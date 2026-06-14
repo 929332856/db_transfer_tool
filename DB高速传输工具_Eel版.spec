@@ -1,0 +1,83 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+
+# 收集各包的子模块（字符串列表，用于 hiddenimports）
+eel_subs = collect_submodules('eel')
+sa_subs = collect_submodules('sqlalchemy')
+py_subs = collect_submodules('pymysql')
+gv_subs = collect_submodules('gevent')
+gw_subs = collect_submodules('geventwebsocket')
+bt_subs = collect_submodules('bottle')
+pg_subs = collect_submodules('psycopg2')
+or_subs = collect_submodules('oracledb')
+ms_subs = collect_submodules('pymssql')
+redis_subs = collect_submodules('redis')
+
+# 收集各包的数据文件（元组列表，用于 datas）
+eel_datas = collect_data_files('eel')
+sa_datas = collect_data_files('sqlalchemy')
+py_datas = collect_data_files('pymysql')
+gv_datas = collect_data_files('gevent')
+gw_datas = collect_data_files('geventwebsocket')
+bt_datas = collect_data_files('bottle')
+pg_datas = collect_data_files('psycopg2')
+or_datas = collect_data_files('oracledb')
+ms_datas = collect_data_files('pymssql')
+redis_datas = collect_data_files('redis')
+
+all_hidden = eel_subs + sa_subs + py_subs + gv_subs + gw_subs + bt_subs + pg_subs + or_subs + ms_subs + redis_subs
+all_extra_datas = [
+    ('web', 'web'),
+] + eel_datas + sa_datas + py_datas + gv_datas + gw_datas + bt_datas + pg_datas + or_datas + ms_datas + redis_datas
+
+if Path('db_profiles.json').exists():
+    all_extra_datas.append(('db_profiles.json', '.'))
+
+a = Analysis(
+    ['db_transfer_eel.py'],
+    pathex=[],
+    binaries=[],
+    datas=all_extra_datas,
+    hiddenimports=all_hidden,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[
+        'customtkinter',
+        'matplotlib',
+        'numpy',
+        'pandas',
+        'PIL',
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=None,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=None)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='DB高速传输工具',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlement_file=None,
+    icon=None,
+)

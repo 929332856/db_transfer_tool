@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>⚡ 数据库高速传输工具</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script type="text/javascript" src="/eel.js"></script>
+    <script type="text/javascript">
+        if (typeof eel === 'undefined') {
+            var s = document.createElement('script');
+            s.src = 'js/eel.js';
+            document.head.appendChild(s);
+        }
+    </script>
+    <script></script>
+</head>
+<body>
+
+    <!-- ========== 顶部标题栏 ========== -->
+    <header class="top-bar">
+        <span class="logo">⚡ 数据库高速传输工具</span>
+        <span class="subtitle">MySQL / OB-MySQL 数据库管理</span>
+    </header>
+
+    <div class="app-layout">
+
+        <!-- ========== 内容区 ========== -->
+        <main class="main-content full-width" id="main_content">
+
+            <!-- 顶部 Tab 栏 -->
+            <div class="top-tabs" id="top_tabs">
+                <button class="top-tab-btn active" onclick="showPanel('my_connections')">📁 我的连接</button>
+                <button class="top-tab-btn" onclick="showPanel('sync')">📦 数据库同步</button>
+                <button class="top-tab-btn" onclick="showPanel('query')">📝 查询同步</button>
+            </div>
+
+            <!-- 我的连接 + 对象浏览 分栏 -->
+            <div class="content-panel active" id="panel_my_connections">
+                <div class="split-view">
+                    <div class="split-left">
+                        <div class="my-conn-header">
+                            <span class="my-conn-title">📁 我的连接</span>
+                            <button class="btn btn-sm" onclick="addFolder('')">📂 新建文件夹</button>
+                            <button class="btn btn-sm btn-green" onclick="showConnDialog('')">🔗 新建连接</button>
+                        </div>
+                        <div class="my-conn-list" id="my_conn_list"></div>
+                    </div>
+                    <div class="split-right" id="object_panel">
+                        <div style="padding:40px;text-align:center;color:#666;">
+                            <div style="font-size:36px;margin-bottom:10px;">📄</div>
+                            <div>点击左侧表、视图等分类查看对象</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 数据同步（独立表单） -->
+            <div class="content-panel" id="panel_sync">
+                <div class="db-row">
+                    <div class="db-card">
+                        <h3>📤 源库配置</h3>
+                        <input type="text" id="sync_src_host" placeholder="主机 IP 地址">
+                        <input type="text" id="sync_src_port" placeholder="端口号" value="3306">
+                        <input type="text" id="sync_src_user" placeholder="用户名">
+                        <input type="password" id="sync_src_pwd" placeholder="密码">
+                        <input type="text" id="sync_src_db" placeholder="数据库名称">
+                        <div class="btn-row">
+                            <button class="btn btn-green" onclick="testConnection('src','sync_')">🔍 测试连接</button>
+                            <button class="btn btn-gray" onclick="clearSide('src','sync_')">🧹 清空</button>
+                            <span class="test-status" id="sync_test_src_status"></span>
+                        </div>
+                    </div>
+                    <div class="db-card">
+                        <h3>📥 目标库配置</h3>
+                        <input type="text" id="sync_dst_host" placeholder="主机 IP 地址">
+                        <input type="text" id="sync_dst_port" placeholder="端口号" value="3306">
+                        <input type="text" id="sync_dst_user" placeholder="用户名">
+                        <input type="password" id="sync_dst_pwd" placeholder="密码">
+                        <input type="text" id="sync_dst_db" placeholder="数据库名称（不存在自动创建）">
+                        <div class="btn-row">
+                            <button class="btn btn-green" onclick="testConnection('dst','sync_')">🔍 测试连接</button>
+                            <button class="btn btn-gray" onclick="clearSide('dst','sync_')">🧹 清空</button>
+                            <span class="test-status" id="sync_test_dst_status"></span>
+                        </div>
+                    </div>
+                </div>
+                <div class="mgr-row">
+                    <span class="mgr-label">&nbsp;&nbsp;&nbsp;&nbsp;📁 配置方案:</span>
+                    <div class="dropdown" id="sync_profile_dropdown">
+                        <button class="dropdown-btn" id="sync_profile_btn" onclick="toggleDropdown('sync_')">
+                            <span id="sync_profile_btn_text">选择配置</span><span class="arrow">▾</span>
+                        </button>
+                        <div class="dropdown-menu" id="sync_dropdown_menu"></div>
+                    </div>
+                    <button class="btn btn-blue" onclick="saveProfile('sync_')">💾 保存当前配置</button>
+                </div>
+                <div class="tbl-row">
+                    <label>表名:</label>
+                    <input type="text" id="table_name" placeholder="留空则导入整个数据库（多表用逗号分隔，如: users,orders）">
+                </div>
+                <div class="btn-row">
+                    <button class="btn btn-primary btn-lg" id="btn_start" onclick="startTransfer()">🚀 开始传输</button>
+                    <button class="btn btn-danger btn-lg" id="btn_stop" onclick="stopTransfer()" disabled>⏹ 停止</button>
+                </div>
+                <div class="progress-section">
+                    <div class="progress-bar" id="progress_bar"><div class="progress-fill" id="progress_fill"></div></div>
+                    <span class="progress-text" id="progress_text">就绪</span>
+                </div>
+                <div class="sync-log-section">
+                    <div class="log-box" id="log_box"></div>
+                </div>
+            </div>
+
+            <!-- 查询同步（独立表单） -->
+            <div class="content-panel" id="panel_query">
+                <div class="db-row">
+                    <div class="db-card">
+                        <h3>📤 源库配置</h3>
+                        <input type="text" id="query_src_host" placeholder="主机 IP 地址">
+                        <input type="text" id="query_src_port" placeholder="端口号" value="3306">
+                        <input type="text" id="query_src_user" placeholder="用户名">
+                        <input type="password" id="query_src_pwd" placeholder="密码">
+                        <input type="text" id="query_src_db" placeholder="数据库名称">
+                        <div class="btn-row">
+                            <button class="btn btn-green" onclick="testConnection('src','query_')">🔍 测试连接</button>
+                            <button class="btn btn-gray" onclick="clearSide('src','query_')">🧹 清空</button>
+                            <span class="test-status" id="query_test_src_status"></span>
+                        </div>
+                    </div>
+                    <div class="db-card">
+                        <h3>📥 目标库配置</h3>
+                        <input type="text" id="query_dst_host" placeholder="主机 IP 地址">
+                        <input type="text" id="query_dst_port" placeholder="端口号" value="3306">
+                        <input type="text" id="query_dst_user" placeholder="用户名">
+                        <input type="password" id="query_dst_pwd" placeholder="密码">
+                        <input type="text" id="query_dst_db" placeholder="数据库名称（不存在自动创建）">
+                        <div class="btn-row">
+                            <button class="btn btn-green" onclick="testConnection('dst','query_')">🔍 测试连接</button>
+                            <button class="btn btn-gray" onclick="clearSide('dst','query_')">🧹 清空</button>
+                            <span class="test-status" id="query_test_dst_status"></span>
+                        </div>
+                    </div>
+                </div>
+                <div class="mgr-row">
+                    <span class="mgr-label">&nbsp;&nbsp;&nbsp;&nbsp;📁 配置方案:</span>
+                    <div class="dropdown" id="query_profile_dropdown">
+                        <button class="dropdown-btn" id="query_profile_btn" onclick="toggleDropdown('query_')">
+                            <span id="query_profile_btn_text">选择配置</span><span class="arrow">▾</span>
+                        </button>
+                        <div class="dropdown-menu" id="query_dropdown_menu"></div>
+                    </div>
+                    <button class="btn btn-blue" onclick="saveProfile('query_')">💾 保存当前配置</button>
+                </div>
+                <textarea id="sql_input" placeholder="输入 SQL 查询语句&#10;SELECT * FROM your_table LIMIT 10"></textarea>
+                <div class="btn-row">
+                    <button class="btn btn-blue" id="btn_run_sql" onclick="executeQuery()">▶ 执行源库查询</button>
+                    <label class="import-label">导入表名:</label>
+                    <input type="text" id="import_table" placeholder="目标表名" class="input-sm">
+                    <button class="btn btn-green btn-import" id="btn_import" onclick="importResults()">📥 导入到目标库</button>
+                    <button class="btn" style="background:#8e44ad;color:#fff;" onclick="importSqlFile()" title="支持 SQL 和 CSV 文件格式">📂 导入文件到目标库</button>
+                    <input type="file" id="sql_file_input" accept=".sql,.csv" style="display:none;" onchange="handleSqlFile(this)">
+                </div>
+                <div class="query-info" id="query_info">查询结果: 未执行</div>
+                <div class="table-wrapper" id="table_wrapper">
+                    <div class="table-scroll" id="table_scroll">
+                        <table id="result_table"><thead></thead><tbody></tbody></table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 表结构面板 -->
+            <div class="content-panel" id="panel_explorer">
+                <div class="explorer-toolbar">
+                    <select id="exp_db_sel" class="db-sel" onchange="onExpDbChange(this)"></select>
+                    <div class="explorer-tabs" id="exp_tab_bar">
+                        <button class="exp-tab-btn active" onclick="switchExpTab('tables',this)">表</button>
+                        <button class="exp-tab-btn" onclick="switchExpTab('views',this)">视图</button>
+                        <button class="exp-tab-btn" onclick="switchExpTab('procedures',this)">存储过程</button>
+                        <button class="exp-tab-btn" onclick="switchExpTab('triggers',this)">触发器</button>
+                    </div>
+                </div>
+                <div class="explorer-table-wrap">
+                    <table class="exp-table">
+                        <thead>
+                            <tr><th style="width:40%">名称</th><th style="width:30%">修改时间</th><th style="width:30%">注释</th></tr>
+                        </thead>
+                        <tbody id="exp_tables_body"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- DDL / 查询编辑面板 -->
+            <div class="content-panel" id="panel_ddl">
+                <div class="ddl-toolbar">
+                    <span id="ddl_title">DDL</span>
+                </div>
+                <textarea id="ddl_text" readonly class="ddl-text"></textarea>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- ========== 弹窗 ========== -->
+    <div class="modal-overlay" id="modal_overlay">
+        <div class="modal-box" id="modal_box" style="position:relative;">
+            <span onclick="hideModal()" style="position:absolute;top:10px;right:14px;font-size:16px;color:#999;z-index:1;line-height:1;" title="关闭">✕</span>
+            <div class="modal-icon" id="modal_icon"></div>
+            <div class="modal-title" id="modal_title"></div>
+            <div class="modal-msg" id="modal_msg"></div>
+            <div class="modal-btns" id="modal_btns"></div>
+        </div>
+    </div>
+
+    <!-- 连接编辑弹窗 -->
+    <div class="modal-overlay" id="conn_modal_overlay">
+        <div class="modal-box" style="min-width:540px;" id="conn_modal_box"></div>
+    </div>
+
+    <!-- 隐藏文件选择器（导入向导使用） -->
+    <input type="file" id="hidden_import_file" style="display:none;" accept=".sql,.csv" onchange="onImportFileSelected(event)">
+
+    <script></script>
+    <script src="js/main.js" charset="utf-8"></script>
+    <script src="js/tree.js" charset="utf-8"></script>
+</body>
+</html>
