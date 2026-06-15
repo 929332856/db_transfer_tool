@@ -24,9 +24,6 @@ Thumbs.db
 venv/
 .venv/
 
-# Eel
-eel.js
-
 # Config with secrets
 config*.json
 *.pem
