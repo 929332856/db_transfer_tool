@@ -208,6 +208,16 @@ textarea { resize: vertical; min-height: 80px; font-size: 12px; line-height: 1.5
 .query-info { font-size: 11px; color: var(--text-secondary); padding: 2px 0; }
 .table-wrapper { flex: 1; min-height: 0; background: #151515; border: 1px solid #444; border-radius: 6px; overflow: hidden; }
 .table-scroll { height: 100%; overflow: auto; }
+/* 双击表打开的数据页容器 */
+.data-table-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; position: relative; }
+.data-table-scroll { flex: 1; min-height: 0; overflow: auto; background: #151515; border: 1px solid #444; border-radius: 6px; }
+.data-table-scroll table { width: max-content; min-width: 100%; }
+/* 分页栏（固定在底部） */
+.data-pager { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #1a1a1a; border-top: 1px solid #333; font-size: 11px; z-index: 5; }
+.data-pager button { background: #333; color: #ccc; border: 1px solid #555; border-radius: 3px; padding: 3px 10px; font-size: 10px; cursor: pointer; }
+.data-pager button:hover { background: #444; }
+.data-pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+.data-pager select { background: #333; color: #ccc; border: 1px solid #555; border-radius: 3px; padding: 2px 6px; font-size: 10px; }
 table { border-collapse: collapse; font-size: 11px; font-family: Consolas, monospace; width: max-content; min-width: 100%; }
 thead th { background: #222; color: var(--text-primary); padding: 5px 8px; text-align: left; font-weight: bold; position: sticky; top: 0; z-index: 1; white-space: nowrap; border-bottom: 1px solid #484848; }
 tbody td { padding: 3px 8px; white-space: nowrap; max-width: 400px; overflow: hidden; text-overflow: ellipsis; }
@@ -371,6 +381,51 @@ tbody td.truncated { color: #5dade2; }
 }
 .editable-cell:hover { background: rgba(255,255,255,0.03); }
 
+/* 列筛选 */
+.col-filter-icon { display: inline-block; vertical-align: middle; transition: opacity 0.2s; }
+.col-filter-icon:hover { opacity: 1 !important; color: #5dade2; }
+.col-filter-row td { padding: 2px 4px; background: #0d1117; border-bottom: 1px solid #333; }
+.col-filter-input {
+    width: 100%; min-width: 80px; padding: 2px 6px; font-size: 11px;
+    background: #1a1a1a; color: #e0e0e0; border: 1px solid #444;
+    border-radius: 3px; outline: none;
+}
+.col-filter-input:focus { border-color: #5dade2; }
+.col-filter-input::placeholder { color: #555; font-style: italic; }
+
+/* 列筛选浮层（在表格上方弹出，不影响表格布局） */
+.col-filter-popup {
+    position: absolute; z-index: 100;
+    background: #1e1e1e; border: 1px solid #555;
+    border-radius: 6px; padding: 8px 10px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    display: flex; flex-direction: column; gap: 6px;
+    min-width: 180px;
+}
+.col-filter-popup input {
+    background: #0d1117; border: 1px solid #444; border-radius: 3px;
+    color: #e0e0e0; padding: 4px 8px; font-size: 12px; outline: none;
+    font-family: Consolas, monospace;
+}
+.col-filter-popup input:focus { border-color: #5dade2; }
+.col-filter-popup .popup-btns {
+    display: flex; gap: 6px; justify-content: flex-end;
+}
+.col-filter-popup .popup-btns button {
+    padding: 3px 10px; font-size: 10px; border-radius: 3px;
+    background: #333; color: #ccc; border: 1px solid #555; cursor: pointer;
+}
+.col-filter-popup .popup-btns button:hover { background: #444; }
+.col-filter-popup .popup-btns .btn-apply { background: #2ecc71; color: #fff; border-color: #27ae60; }
+.col-filter-popup .popup-btns .btn-apply:hover { background: #27ae60; }
+
+/* 行选择复选框 */
+.row-sel-cb { cursor: pointer; accent-color: #5dade2; }
+
+/* 数据表格 tr 行悬停高亮（选中行） */
+.exp-table tbody tr.row-selected { background: rgba(93,173,226,0.12); }
+.exp-table tbody tr.row-selected:hover { background: rgba(93,173,226,0.18); }
+
 /* ========== 滚动条 ========== */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -387,3 +442,65 @@ tbody td.truncated { color: #5dade2; }
 .redis-detail-panel select:focus,
 .redis-detail-panel textarea:focus { border-color: #f39c12 !important; }
 .redis-detail-panel .editable-cell:focus { border-color: #f39c12 !important; background: rgba(243,156,18,0.06) !important; }
+
+/* ========== 慢SQL分析面板 ========== */
+.slow-top-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; padding: 8px 10px; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    flex-shrink: 0; flex-wrap: wrap;
+}
+.slow-top-left, .slow-top-right {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.slow-label {
+    font-size: 12px; color: #5dade2; font-weight: bold; white-space: nowrap;
+}
+.sq-conn-sel { min-width: 240px; max-width: 360px; }
+
+.sq-status-badge {
+    font-size: 10px; padding: 2px 8px; border-radius: 3px;
+    background: #e74c3c; color: #fff; display: inline-block;
+}
+.sq-status-badge.enabled { background: #2ecc71; }
+.sq-status-badge.disabled { background: #555; color: #aaa; }
+
+.slow-stats-bar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 6px 14px; background: #111; border-bottom: 1px solid #333;
+    flex-shrink: 0; flex-wrap: wrap; font-size: 11px; color: #999;
+}
+.slow-stat-item strong { color: #5dade2; font-weight: bold; }
+.slow-sep { width: 1px; height: 16px; background: #333; flex-shrink: 0; }
+
+.slow-table-wrap {
+    flex: 1; overflow: auto; min-height: 0; border-radius: 0;
+}
+.slow-table {
+    width: 100%; border-collapse: collapse; font-size: 11px;
+}
+.slow-table thead th {
+    background: #1a2230; color: #bbb; padding: 7px 8px;
+    text-align: left; font-weight: bold; position: sticky; top: 0; z-index: 2;
+    white-space: nowrap; border-bottom: 2px solid #444;
+}
+.slow-table tbody td {
+    padding: 4px 8px; white-space: nowrap; vertical-align: top;
+    border-bottom: 1px solid #222; max-width: 350px; overflow: hidden;
+    text-overflow: ellipsis; cursor: default; font-family: Consolas, monospace; font-size: 11px;
+}
+.slow-table tbody tr:nth-child(odd) { background: #1a1a1a; }
+.slow-table tbody tr:nth-child(even) { background: #151515; }
+.slow-table tbody tr:hover { background: #1e3040 !important; }
+.slow-table .sql-text { color: #f39c12; font-size: 11px; line-height: 1.4; word-break: break-all; white-space: normal; max-width: 400px; }
+.slow-table .count-num { color: #e74c3c; font-weight: bold; }
+.slow-table .time-val { color: #f39c12; }
+.slow-table .time-slow { color: #e74c3c; font-weight: bold; }
+.sq-empty { text-align: center; color: #666; padding: 40px 0; font-size: 13px; }
+.sq-btn-detail { color: #5dade2; cursor: pointer; font-family: "Microsoft YaHei", sans-serif; }
+.sq-btn-detail:hover { text-decoration: underline; }
+.sq-btn-kill { color: #e74c3c; cursor: pointer; margin-left: 6px; font-family: "Microsoft YaHei", sans-serif; }
+.sq-btn-kill:hover { text-decoration: underline; }
+.sq-sort-arrow { color: #f39c12; font-size: 10px; }
+.slow-table th[onclick] { user-select: none; }
+.slow-table th[onclick]:hover { color: #f39c12; }

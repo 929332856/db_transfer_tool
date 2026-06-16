@@ -33,6 +33,7 @@
                 <button class="top-tab-btn active" onclick="showPanel('my_connections')">📁 我的连接</button>
                 <button class="top-tab-btn" onclick="showPanel('sync')">📦 数据库同步</button>
                 <button class="top-tab-btn" onclick="showPanel('query')">📝 查询同步</button>
+                <button class="top-tab-btn" onclick="showPanel('slowquery')">📊 慢SQL分析</button>
             </div>
 
             <!-- 我的连接 + 对象浏览 分栏 -->
@@ -169,7 +170,87 @@
                 </div>
             </div>
 
-            <!-- 表结构面板 -->
+            <!-- 慢SQL分析 -->
+            <div class="content-panel" id="panel_slowquery">
+                <!-- 连接选择器 -->
+                <div class="slow-top-bar">
+                    <div class="slow-top-left">
+                        <span class="slow-label">🔗 连接:</span>
+                        <select id="sq_conn_sel" class="db-sel sq-conn-sel" onchange="onSqConnChange()">
+                            <option value="">-- 选择已保存的连接 --</option>
+                        </select>
+                        <button class="btn btn-sm btn-green" onclick="slowQueryConnect()" id="sq_btn_conn">连接</button>
+                        <button class="btn btn-sm btn-gray" onclick="slowQueryTestConn()">测试</button>
+                        <span class="test-status" id="sq_test_status"></span>
+                    </div>
+                    <div class="slow-top-right">
+                        <label class="slow-label">阈值:</label>
+                        <input type="number" id="sq_threshold" value="2.0" min="0.1" step="0.5"
+                               style="width:60px;height:26px;" title="慢查询时间阈值（秒）">
+                        <button class="btn btn-sm btn-green" onclick="slowQueryEnable()">开启记录</button>
+                        <select id="sq_source_sel" onchange="onSqSourceChange()" style="height:28px;font-size:11px;"
+                                title="数据来源：performance_schema=历史聚合统计 / slow_log=开启记录后的原始日志">
+                            <option value="ps">📊 聚合统计</option>
+                            <option value="log">📜 慢日志</option>
+                        </select>
+                        <button class="btn btn-sm btn-blue" onclick="slowQueryRefresh()">🔄 刷新</button>
+                        <button class="btn btn-sm" onclick="slowQueryLoadRunning()">🏃 运行进程</button>
+                    </div>
+                </div>
+
+                <!-- 状态栏 -->
+                <div class="slow-stats-bar">
+                    <span class="slow-stat-item">连接状态: <strong id="sq_conn_status">未连接</strong></span>
+                    <span class="slow-sep"></span>
+                    <span class="slow-stat-item">慢查询: <span class="sq-status-badge" id="sq_status_badge">--</span></span>
+                    <span class="slow-sep"></span>
+                    <span class="slow-stat-item">慢SQL 总数: <strong id="sq_total_count">0</strong></span>
+                    <span class="slow-sep"></span>
+                    <span class="slow-stat-item">涉及库数: <strong id="sq_db_count">0</strong></span>
+                    <span class="slow-sep"></span>
+                    <span class="slow-stat-item">最后更新: <strong id="sq_last_update">--</strong></span>
+                </div>
+
+                <!-- TOP 慢SQL排行表格（全局，标注来源库） -->
+                <div class="slow-table-wrap">
+                    <table class="slow-table" id="sq_table">
+                        <thead>
+                            <tr id="sq_thead_ps">
+                                <th style="width:40px;">#</th>
+                                <th style="min-width:120px;">来源数据库</th>
+                                <th style="min-width:300px;">慢 SQL 语句 (摘要)</th>
+                                <th style="width:70px;cursor:pointer;" onclick="sqSort('count_star')" title="点击排序">
+                                    出现次数 <span class="sq-sort-arrow" id="sq_sort_count_star"></span></th>
+                                <th style="width:85px;cursor:pointer;" onclick="sqSort('total_time_sec')" title="点击排序">
+                                    总耗时(s) <span class="sq-sort-arrow" id="sq_sort_total_time_sec"></span></th>
+                                <th style="width:85px;cursor:pointer;" onclick="sqSort('avg_time_sec')" title="点击排序">
+                                    平均耗时(s) <span class="sq-sort-arrow" id="sq_sort_avg_time_sec"></span></th>
+                                <th style="width:85px;cursor:pointer;" onclick="sqSort('max_time_sec')" title="点击排序">
+                                    最大耗时(s) <span class="sq-sort-arrow" id="sq_sort_max_time_sec"></span></th>
+                                <th style="width:65px;">扫描行数</th>
+                                <th style="width:80px;">最近执行</th>
+                                <th style="width:55px;">操作</th>
+                            </tr>
+                            <tr id="sq_thead_log" style="display:none;">
+                                <th style="width:40px;">#</th>
+                                <th style="min-width:100px;">数据库</th>
+                                <th style="min-width:300px;">慢 SQL 语句</th>
+                                <th style="width:100px;">用户@主机</th>
+                                <th style="width:85px;cursor:pointer;" onclick="sqSortLog('query_time')" title="点击排序">
+                                    查询耗时(s) <span class="sq-sort-arrow" id="sq_sort_query_time"></span></th>
+                                <th style="width:75px;cursor:pointer;" onclick="sqSortLog('lock_time')" title="点击排序">
+                                    锁等待(s) <span class="sq-sort-arrow" id="sq_sort_lock_time"></span></th>
+                                <th style="width:65px;">扫描行</th>
+                                <th style="width:55px;">返回行</th>
+                                <th style="width:80px;">执行时间</th>
+                            </tr>
+                        </thead>
+                        <tbody id="sq_tbody">
+                            <tr><td colspan="10" class="sq-empty">请在顶部选择已保存的连接，或从"我的连接"中右键跳转</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
             <div class="content-panel" id="panel_explorer">
                 <div class="explorer-toolbar">
                     <select id="exp_db_sel" class="db-sel" onchange="onExpDbChange(this)"></select>

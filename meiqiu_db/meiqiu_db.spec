@@ -34,6 +34,10 @@ all_extra_datas = [
 
 if Path('db_profiles.json').exists():
     all_extra_datas.append(('db_profiles.json', '.'))
+if Path('dist/navicat_tree.json').exists():
+    all_extra_datas.append(('dist/navicat_tree.json', '.'))
+elif Path('navicat_tree.json').exists():
+    all_extra_datas.append(('navicat_tree.json', '.'))
 
 a = Analysis(
     ['db_transfer_eel.py'],

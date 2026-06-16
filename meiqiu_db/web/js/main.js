@@ -724,3 +724,609 @@ window.addEventListener('load', function () {
         sqlTa.addEventListener('keyup', updSqlBtn);
     }
 });
+
+
+// ========== 慢 SQL 查询分析 ==========
+
+// 当前激活的慢SQL连接（来自 treeData 的连接对象）
+var _sqConnData = null;    // 连接参数 {host, port, user, pwd, db_type}
+var _sqConnName = '';      // 连接名称
+var _sqConnected = false;  // 是否已连接
+var _sqSource = 'ps';      // 数据来源：'ps'=performance_schema聚合 / 'log'=slow_log原始日志
+var _sqSortKey = null;     // 当前排序列名
+var _sqSortDir = 'desc';   // 当前排序方向：'asc' | 'desc'
+
+/** 填充慢SQL面板的连接下拉列表（从 treeData.connections 读取） */
+function refreshSqConnSelector() {
+    var sel = $('sq_conn_sel');
+    if (!sel) return;
+    var html = '<option value="">-- 选择已保存的连接 --</option>';
+    if (typeof treeData !== 'undefined' && treeData && treeData.connections) {
+        var conns = [];
+        for (var k in treeData.connections) {
+            var c = treeData.connections[k];
+            // 只显示关系型数据库（MySQL / OceanBase），排除 Redis 等
+            if (c.db_type === 'mysql' || c.db_type === 'ob-mysql') {
+                conns.push(c);
+            }
+        }
+        conns.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
+        conns.forEach(function(c) {
+            var icon = typeof DB_ICONS !== 'undefined' ? (DB_ICONS[c.db_type] || '🐬') : '🐬';
+            var label = escapeHtml(c.name) + ' (' + escapeHtml(c.host) + ':' + escapeHtml(c.port) + ')';
+            html += '<option value="' + c.id + '" data-icon="' + icon + '">' + icon + ' ' + label + '</option>';
+        });
+    }
+    sel.innerHTML = html;
+
+    // 如果之前已选中某个连接，恢复选中
+    if (_sqConnData && _sqConnData._cid) {
+        sel.value = _sqConnData._cid;
+    }
+}
+
+/** 根据连接ID获取连接参数（转换为后端需要的格式） */
+function sqGetConnDataById(cid) {
+    if (!cid || typeof treeData === 'undefined' || !treeData || !treeData.connections) return null;
+    var c = treeData.connections[cid];
+    if (!c) return null;
+    return {
+        src_host: c.host || '',
+        src_port: c.port || '3306',
+        src_user: c.user || '',
+        src_pwd:  c.pwd || '',
+        db_type: c.db_type || 'mysql',
+        _cid: cid,
+        _name: c.name || ''
+    };
+}
+
+/** 连接下拉框切换 */
+function onSqConnChange() {
+    var cid = $('sq_conn_sel').value;
+    if (!cid) {
+        _sqConnData = null;
+        _sqConnected = false;
+        $('sq_conn_status').textContent = '未连接';
+        $('sq_conn_status').style.color = '#888';
+        $('sq_status_badge').textContent = '--';
+        $('sq_status_badge').className = 'sq-status-badge disabled';
+        $('sq_tbody').innerHTML = '<tr><td colspan="10" class="sq-empty">请在顶部选择已保存的连接</td></tr>';
+        return;
+    }
+    // 切换连接 → 自动连接
+    slowQueryConnect();
+}
+
+/** 连接按钮（从下拉选择器读取连接并测试） */
+function slowQueryConnect() {
+    var cid = $('sq_conn_sel').value;
+    if (!cid) {
+        $('sq_test_status').style.color = '#f39c12';
+        $('sq_test_status').textContent = '请先选择连接';
+        return;
+    }
+    var data = sqGetConnDataById(cid);
+    if (!data) return;
+    _sqConnData = data;
+    _sqConnName = data._name || '';
+
+    var statusEl = $('sq_test_status');
+    statusEl.style.color = '#f39c12';
+    statusEl.textContent = '连接中...';
+    $('sq_conn_status').textContent = '连接中...';
+    $('sq_conn_status').style.color = '#f39c12';
+
+    eel.test_connection(data, 'src')(function(res) {
+        if (res && res.ok) {
+            _sqConnected = true;
+            statusEl.style.color = '#2ecc71';
+            statusEl.textContent = '✅ ' + res.msg;
+            $('sq_conn_status').textContent = '✅ 已连接 (' + _sqConnName + ')';
+            $('sq_conn_status').style.color = '#2ecc71';
+            $('sq_btn_conn').textContent = '已连接';
+
+            // 检查慢查询状态
+            eel.slow_query_check_enabled(data)(function(s) {
+                updateSqStatusBadge(s);
+            });
+            // 重置排序并自动刷新慢SQL列表
+            _sqSortKey = null;
+            _sqSortDir = 'desc';
+            document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
+            slowQueryRefresh();
+        } else {
+            _sqConnected = false;
+            statusEl.style.color = '#e74c3c';
+            statusEl.textContent = '❌ ' + (res ? res.msg : '连接失败');
+            $('sq_conn_status').textContent = '连接失败';
+            $('sq_conn_status').style.color = '#e74c3c';
+        }
+    });
+}
+
+/** 测试连接按钮 */
+function slowQueryTestConn() {
+    var cid = $('sq_conn_sel').value;
+    if (!cid) {
+        $('sq_test_status').style.color = '#f39c12';
+        $('sq_test_status').textContent = '请先选择连接';
+        return;
+    }
+    var data = sqGetConnDataById(cid);
+    if (!data) return;
+    var statusEl = $('sq_test_status');
+    statusEl.style.color = '#f39c12';
+    statusEl.textContent = '测试中...';
+    eel.test_connection(data, 'src')(function(res) {
+        if (res && res.ok) {
+            statusEl.style.color = '#2ecc71';
+            statusEl.textContent = '✅ ' + res.msg;
+        } else {
+            statusEl.style.color = '#e74c3c';
+            statusEl.textContent = '❌ ' + (res ? res.msg : '失败');
+        }
+    });
+}
+
+/** 从"我的连接"跳转过来（外部调用） */
+function slowQueryJumpFromConn(cid) {
+    // 切换到慢SQL面板
+    showPanel('slowquery');
+    // 刷新连接列表并选中
+    refreshSqConnSelector();
+    $('sq_conn_sel').value = cid;
+    // 自动连接
+    slowQueryConnect();
+}
+
+/** 更新状态徽标 */
+function updateSqStatusBadge(status) {
+    var badge = $('sq_status_badge');
+    if (!status || !status.ok) {
+        badge.textContent = '未知';
+        badge.className = 'sq-status-badge disabled';
+        return;
+    }
+    badge.className = 'sq-status-badge ' + (status.enabled ? 'enabled' : 'disabled');
+    badge.textContent = status.enabled
+        ? '✓ 已开启 (' + status.threshold + 's)'
+        : '✕ 未开启 (' + status.threshold + 's)';
+}
+
+/** 开启/配置慢查询记录 */
+function slowQueryEnable() {
+    if (!_sqConnData) {
+        showErrorDialog('提示', '请先选择并连接');
+        return;
+    }
+    var data = _sqConnData;
+    var threshold = parseFloat($('sq_threshold').value) || 2.0;
+    showConfirmDialog('开启慢查询',
+        '确定要设置慢查询阈值为 ' + threshold + ' 秒吗？\n（需要 SUPER 权限）', function() {
+        eel.slow_query_enable(data, threshold)(function(res) {
+            if (res && res.ok) {
+                showOkDialog('成功', res.msg);
+                eel.slow_query_check_enabled(data)(function(s) { updateSqStatusBadge(s); });
+                setTimeout(slowQueryRefresh, 1000);
+            } else {
+                showErrorDialog('操作失败', res ? res.msg : '未知错误');
+            }
+        });
+    });
+}
+
+/** 切换数据来源 */
+function onSqSourceChange() {
+    _sqSource = $('sq_source_sel') ? $('sq_source_sel').value : 'ps';
+    // 重置排序状态
+    _sqSortKey = null;
+    _sqSortDir = 'desc';
+    document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
+    // 切换表头
+    var psHead = $('sq_thead_ps');
+    var logHead = $('sq_thead_log');
+    if (_sqSource === 'log') {
+        if (psHead) psHead.style.display = 'none';
+        if (logHead) logHead.style.display = '';
+    } else {
+        if (psHead) psHead.style.display = '';
+        if (logHead) logHead.style.display = 'none';
+    }
+    // 切换来源时自动刷新
+    if (_sqConnected) slowQueryRefresh();
+}
+
+/** 刷新慢查询列表（全局查询所有数据库） */
+function slowQueryRefresh() {
+    if (!_sqConnData || !_sqConnected) {
+        $('sq_tbody').innerHTML =
+            '<tr><td colspan="10" class="sq-empty">请先选择并连接</td></tr>';
+        return;
+    }
+    var data = _sqConnData;
+    var isLog = _sqSource === 'log';
+    var colspan = isLog ? '9' : '10';
+
+    // 显示加载中
+    $('sq_tbody').innerHTML =
+        '<tr><td colspan="' + colspan + '" class="sq-empty">⏳ 正在查询全库慢SQL数据...</td></tr>';
+
+    // 根据来源选择不同接口
+    if (_sqSource === 'log') {
+        // 慢日志模式：从 mysql.slow_log 读取历史原始日志
+        eel.slow_query_get_log(data, '', '', 200)(function(res) {
+            renderSlowQueryLogTable(res);
+        });
+    } else {
+        // 聚合统计模式：从 performance_schema 读取
+        eel.slow_query_get_list(data, '', '', 200)(function(res) {
+            renderSlowQueryTable(res);
+        });
+    }
+
+    // 更新时间
+    var now = new Date();
+    $('sq_last_update').textContent = now.toLocaleTimeString('zh-CN', {hour12: false});
+}
+
+/** 排序：PS聚合统计模式 */
+function sqSort(key) {
+    if (_sqSortKey === key) {
+        _sqSortDir = _sqSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        _sqSortKey = key;
+        _sqSortDir = 'desc'; // 默认降序
+    }
+    // 更新箭头
+    document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
+    var arrow = $('sq_sort_' + key);
+    if (arrow) arrow.textContent = _sqSortDir === 'asc' ? ' ▲' : ' ▼';
+    // 重新渲染（内存中已有数据）
+    if (window._sqRows) renderSlowQueryTable({ok: true, rows: window._sqRows});
+}
+
+/** 排序：慢日志模式 */
+function sqSortLog(key) {
+    if (_sqSortKey === key) {
+        _sqSortDir = _sqSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        _sqSortKey = key;
+        _sqSortDir = 'desc';
+    }
+    document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
+    var arrow = $('sq_sort_' + key);
+    if (arrow) arrow.textContent = _sqSortDir === 'asc' ? ' ▲' : ' ▼';
+    if (window._sqRows) renderSlowQueryLogTable({ok: true, rows: window._sqRows});
+}
+
+/** 渲染慢查询排行表格（全局，不按数据库过滤） */
+function renderSlowQueryTable(res) {
+    var tbody = $('sq_tbody');
+    if (!res || !res.ok) {
+        tbody.innerHTML = '<tr><td colspan="10" class="sq-empty">' +
+            escapeHtml((res && res.msg) || '查询失败') + '</td></tr>';
+        $('sq_total_count').textContent = '0';
+        $('sq_db_count').textContent = '0';
+        return;
+    }
+
+    var rows = (res.rows || []).slice();  // 复制一份用于排序
+
+    // 前端排序
+    if (_sqSortKey) {
+        rows.sort(function(a, b) {
+            var va = parseFloat(a[_sqSortKey]) || 0;
+            var vb = parseFloat(b[_sqSortKey]) || 0;
+            return _sqSortDir === 'asc' ? va - vb : vb - va;
+        });
+    }
+
+    $('sq_total_count').textContent = rows.length.toString();
+
+    // 统计涉及几个数据库
+    var dbSet = {};
+    rows.forEach(function(r) {
+        var sn = r.schema_name || r.SCHEMA_NAME || '';
+        if (sn) dbSet[sn] = true;
+    });
+    var dbCount = Object.keys(dbSet).length;
+    $('sq_db_count').textContent = dbCount.toString();
+
+    if (rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="10" class="sq-empty">🎉 当前服务器暂无慢查询记录</td></tr>';
+        return;
+    }
+
+    var html = '';
+    for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var idx = i + 1;
+        var schema = escapeHtml(r.schema_name || r.SCHEMA_NAME || '');
+        var sqlText = escapeHtml(r.digest_text || r.DIGEST_TEXT || '').replace(/\n/g, ' ');
+        var count = parseInt(r.count_star || r.COUNT_STAR || 0);
+        var totalTime = parseFloat(r.total_time_sec || 0).toFixed(2);
+        var avgTime = parseFloat(r.avg_time_sec || 0).toFixed(2);
+        var maxTime = parseFloat(r.max_time_sec || 0).toFixed(2);
+        var rowsExamined = (r.rows_examined || r.ROWS_EXAMINED || 0);
+        var lastSeen = r.last_seen || r.LAST_SEEN || '';
+
+        // 格式化时间显示
+        if (typeof lastSeen === 'string' && lastSeen.indexOf('-') > 0) {
+            lastSeen = lastSeen.replace(/T/, ' ').substring(5, 19);
+        }
+
+        // 根据耗时着色
+        var avgCls = parseFloat(avgTime) >= 3 ? 'time-slow' : 'time-val';
+        var maxCls = parseFloat(maxTime) >= 5 ? 'time-slow' : 'time-val';
+
+        html += '<tr>' +
+            '<td style="text-align:center;color:#666;">' + idx + '</td>' +
+            '<td title="' + schema + '" style="color:#5dade2;font-weight:bold;">' + schema + '</td>' +
+            '<td class="sql-text" title="' + sqlText + '">' + truncateSql(sqlText, 180) + '</td>' +
+            '<td class="count-num" style="text-align:center;">' + count + '</td>' +
+            '<td class="time-val" style="text-align:right;">' + totalTime + '</td>' +
+            '<td class="' + avgCls + '" style="text-align:right;">' + avgTime + '</td>' +
+            '<td class="' + maxCls + '" style="text-align:right;">' + maxTime + '</td>' +
+            '<td style="text-align:right;" title="' + formatNum(rowsExamined) + '">' + formatShortNum(rowsExamined) + '</td>' +
+            '<td style="color:#888;font-size:10px;">' + lastSeen + '</td>' +
+            '<td><span class="sq-btn-detail" onclick="slowQueryShowDetail(' + idx +
+                ',\'' + escapeAttr(schema) + '\')">详情</span></td>' +
+            '</tr>';
+    }
+    tbody.innerHTML = html;
+
+    // 存储原始行数据（未排序）供详情弹窗和排序使用
+    // rows 变量此时是 sorted copy，需要从 res.rows 重新获取原始数据
+    window._sqRows = res.rows || [];
+}
+
+/** 渲染慢查询日志表格（从 mysql.slow_log 读取的原始日志） */
+function renderSlowQueryLogTable(res) {
+    var tbody = $('sq_tbody');
+    if (!res || !res.ok) {
+        tbody.innerHTML = '<tr><td colspan="9" class="sq-empty">' +
+            escapeHtml((res && res.msg) || '查询失败') + '</td></tr>';
+        $('sq_total_count').textContent = '0';
+        $('sq_db_count').textContent = '0';
+        return;
+    }
+
+    var rows = (res.rows || []).slice();
+
+    // 前端排序
+    if (_sqSortKey) {
+        rows.sort(function(a, b) {
+            var va = parseFloat(a[_sqSortKey]) || 0;
+            var vb = parseFloat(b[_sqSortKey]) || 0;
+            return _sqSortDir === 'asc' ? va - vb : vb - va;
+        });
+    }
+
+    $('sq_total_count').textContent = rows.length.toString();
+
+    // 统计涉及几个数据库
+    var dbSet = {};
+    rows.forEach(function(r) {
+        var db = r.db || '';
+        if (db) dbSet[db] = true;
+    });
+    var dbCount = Object.keys(dbSet).length;
+    $('sq_db_count').textContent = dbCount.toString();
+
+    if (rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="9" class="sq-empty">📜 慢日志为空（开启记录后执行慢查询才会有记录）</td></tr>';
+        return;
+    }
+
+    var html = '';
+    for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var idx = i + 1;
+        var db = escapeHtml(r.db || '');
+        var sqlText = escapeHtml(r.sql_text || '').replace(/\n/g, ' ');
+        var queryTime = parseFloat(r.query_time || 0);
+        var queryTimeStr = queryTime.toFixed(2);
+        var lockTime = parseFloat(r.lock_time || 0).toFixed(3);
+        var rowsExamined = r.rows_examined || 0;
+        var rowsSent = r.rows_sent || 0;
+        var startTime = r.start_time || '';
+        var userHost = escapeHtml(r.user_host || '');
+
+        // 格式化时间
+        if (typeof startTime === 'string' && startTime.indexOf('-') > 0) {
+            startTime = startTime.replace(/T/, ' ').substring(5, 19);
+        }
+
+        var timeCls = queryTime >= 3 ? 'time-slow' : 'time-val';
+
+        html += '<tr>' +
+            '<td style="text-align:center;color:#666;">' + idx + '</td>' +
+            '<td title="' + db + '" style="color:#5dade2;font-weight:bold;">' + (db || '-') + '</td>' +
+            '<td class="sql-text" title="' + sqlText + '">' + truncateSql(sqlText, 180) + '</td>' +
+            '<td style="text-align:right;" title="' + userHost + '">' + userHost.substring(0, 15) + '</td>' +
+            '<td class="' + timeCls + '" style="text-align:right;">' + queryTimeStr + '</td>' +
+            '<td style="text-align:right;">' + lockTime + '</td>' +
+            '<td style="text-align:right;" title="' + formatNum(rowsExamined) + '">' + formatShortNum(rowsExamined) + '</td>' +
+            '<td style="text-align:right;">' + formatShortNum(rowsSent) + '</td>' +
+            '<td style="color:#888;font-size:10px;">' + startTime + '</td>' +
+            '</tr>';
+    }
+    tbody.innerHTML = html;
+    window._sqRows = res.rows || [];
+}
+
+
+
+function truncateSql(s, maxLen) {
+    if (!s) return '';
+    return s.length <= maxLen ? s : s.substring(0, maxLen) + '...';
+}
+function formatNum(n) {
+    n = Number(n) || 0;
+    return n.toLocaleString();
+}
+function formatShortNum(n) {
+    n = Number(n) || 0;
+    if (n < 10000) return n.toLocaleString();
+    if (n < 1e6) return (n / 1000).toFixed(1) + 'k';
+    return (n / 1e6).toFixed(2) + 'M';
+}
+
+/** 查看慢SQL详情 */
+function slowQueryShowDetail(idx, schemaName) {
+    var rows = window._sqRows || [];
+    var row = rows[idx - 1];
+    if (!row) return;
+
+    var digestText = row.digest_text || row.DIGEST_TEXT || '';
+    if (!_sqConnData) return;
+
+    showModal('🔍', '慢SQL详情 — 第 ' + idx + ' 条', '', '#5dade2',
+        '<div id="sq_detail_loading" style="padding:20px;text-align:center;color:#999;">正在加载详情...</div>' +
+        '<div id="sq_detail_body" style="display:none;text-align:left;"></div>' +
+        '<button class="btn btn-gray" onclick="hideModal()">关闭</button>');
+
+    eel.slow_query_get_detail(_sqConnData, schemaName, digestText)(function(res) {
+        var body = $('sq_detail_body');
+        var loading = $('sq_detail_loading');
+        if (loading) loading.style.display = 'none';
+
+        if (!res || !res.ok) {
+            body.style.display = 'block';
+            body.innerHTML = '<p style="color:#e74c3c;padding:10px;">' +
+                ((res && res.msg) || '获取详情失败') + '</p>';
+            return;
+        }
+        body.style.display = 'block';
+
+        var d = res.detail || {};
+
+        body.innerHTML =
+            '<table style="width:100%;border-collapse:collapse;font-size:11px;margin-bottom:12px;">' +
+            '<tr><td style="color:#888;width:120px;padding:4px;background:#111;">数据库</td>' +
+            '<td style="padding:4px;">' + escapeHtml(d.schema_name || '') + '</td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">出现次数</td>' +
+            '<td style="padding:4px;"><strong style="color:#e74c3c;">' + formatNum(d.count_star) + '</strong> 次</td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">总耗时</td>' +
+            '<td style="padding:4px;"><span class="time-slow">' + (d.total_time || '') + 's</span></td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">平均耗时</td>' +
+            '<td style="padding:4px;"><span class="time-val">' + (d.avg_time || '') + 's</span></td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">最大耗时</td>' +
+            '<td style="padding:4px;"><span class="time-slow">' + (d.max_time || '') + 's</span></td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">最小耗时</td>' +
+            '<td style="padding:4px;"><span class="time-val">' + (d.min_time || '') + 's</span></td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">扫描行数</td>' +
+            '<td style="padding:4px;">' + formatNum(d.rows_examined || 0) + '</td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">返回行数</td>' +
+            '<td style="padding:4px;">' + formatNum(d.rows_sent || 0) + '</td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">临时表(磁盘)</td>' +
+            '<td style="padding:4px;">' + (d.sum_created_tmp_disk_tables || 0) + '</td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">错误次数</td>' +
+            '<td style="padding:4px;color:' + ((d.sum_errors||0)>0?'#e74c3c':'#999') + ';">' + (d.sum_errors || 0) + '</td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">首次执行</td>' +
+            '<td style="padding:4px;color:#888;">' + (d.first_seen || '') + '</td></tr>' +
+            '<tr><td style="color:#888;padding:4px;background:#111;">最近执行</td>' +
+            '<td style="padding:4px;color:#888;">' + (d.last_seen || '') + '</td></tr>' +
+            '</table>' +
+
+            '<div style="margin-bottom:8px;"><strong style="color:#f39c12;font-size:12px;">📝 完整 SQL 语句：</strong></div>' +
+            '<pre style="background:#0d1117;border:1px solid #333;border-radius:6px;' +
+            'padding:10px;overflow:auto;max-height:250px;font-size:11px;' +
+            'font-family:Consolas,monospace;color:#e0e0e0;white-space:pre-wrap;' +
+            'word-break:break-all;line-height:1.5;">' +
+            escapeHtml(digestText) + '</pre>';
+
+        // 最近执行的样本SQL
+        var recent = res.recent_sqls || [];
+        if (recent.length > 0) {
+            body.innerHTML +=
+                '<div style="margin-top:14px;margin-bottom:8px;">' +
+                '<strong style="color:#5dade2;font-size:12px;">🔄 最近执行样本 (最近 ' + recent.length + ' 次):</strong></div>';
+            recent.forEach(function(h, ri) {
+                body.innerHTML +=
+                    '<details style="background:#111;border:1px solid #333;border-radius:4px;margin-bottom:4px;">' +
+                    '<summary style="padding:6px 10px;font-size:11px;cursor:pointer;color:#bbb;">' +
+                    '#' + (ri+1) + ' | 耗时: ' + (h.TIMER_END||h.timer_end||'?') +
+                    ' | 扫描: ' + formatNum(h.ROWS_EXAMINED||h.rows_examined||0) +
+                    ' | 返回: ' + formatNum(h.ROWS_SENT||h.rows_sent||0) +
+                    (h.ERRORS || h.errors ? ' | ⚠️ 错误' : '') +
+                    '</summary>' +
+                    '<pre style="padding:8px 10px;font-size:10px;font-family:Consolas,' +
+                    'monospace;color:#ccc;white-space:pre-wrap;word-break:break-all;' +
+                    'background:#0d0d0d;border-top:1px solid #333;">' +
+                    escapeHtml(h.SQL_TEXT || h.sql_text || '') + '</pre>' +
+                    '</details>';
+            });
+        }
+    });
+}
+
+/** 加载当前运行进程列表 */
+function slowQueryLoadRunning() {
+    if (!_sqConnData || !_sqConnected) {
+        showErrorDialog('提示', '请先选择并连接');
+        return;
+    }
+    eel.slow_query_get_running(_sqConnData)(function(res) {
+        if (!res || !res.ok) {
+            showErrorDialog('查询失败', res ? res.msg : '未知错误');
+            return;
+        }
+        var rows = res.rows || [];
+        if (rows.length === 0) {
+            showOkDialog('运行进程', '当前没有长时间运行的进程 ✅', '✅', '#2ecc71');
+            return;
+        }
+        var html = '<div style="max-height:400px;overflow-y:auto;">' +
+            '<table style="width:100%;border-collapse:collapse;font-size:11px;">' +
+            '<thead><tr style="background:#222;">' +
+            '<th style="padding:4px;text-align:left;">ID</th>' +
+            '<th style="padding:4px;text-align:left;">用户</th>' +
+            '<th style="padding:4px;text-align:left;">数据库</th>' +
+            '<th style="padding:4px;text-align:left;">状态</th>' +
+            '<th style="padding:4px;text-align:right;">耗时(s)</th>' +
+            '<th style="padding:4px;text-align:left;">SQL</th>' +
+            '<th style="padding:4px;text-align:center;">操作</th>' +
+            '</tr></thead><tbody>';
+        rows.forEach(function(r) {
+            var timeVal = parseInt(r.time_ || 0);
+            html += '<tr style="border-top:1px solid #333;">' +
+                '<td style="padding:4px;color:#888;">' + (r.id || '') + '</td>' +
+                '<td style="padding:4px;">' + escapeHtml(r.user_ || '') + '</td>' +
+                '<td style="padding:4px;">' + escapeHtml(r.db || '') + '</td>' +
+                '<td style="padding:4px;color:#f39c12;">' + escapeHtml(r.state || '') + '</td>' +
+                '<td style="padding:4px;text-align:right;color:' +
+                    (timeVal >= 10 ? '#e74c3c' : '#f39c12') + '">' + timeVal + '</td>' +
+                '<td style="padding:4px;max-width:350px;overflow:hidden;text-overflow:ellipsis;' +
+                    'font-family:Consolas,monospace;font-size:10px;color:#ccc;"' +
+                ' title="' + escapeAttr(r.info || '') + '">' +
+                escapeHtml((r.info || '').substring(0, 100)) + '</td>' +
+                '<td style="padding:4px;text-align:center;"><span class="sq-btn-kill"' +
+                ' onclick="slowQueryKill(' + (r.id || '') + ')">终止</span></td>' +
+                '</tr>';
+        });
+        html += '</tbody></table></div>';
+        showModal('🏃 运行进程', '', '', '#5dade2', html +
+            '<button class="btn btn-gray" onclick="hideModal()">关闭</button>');
+    });
+}
+
+/** 终止指定进程 */
+function slowQueryKill(pid) {
+    if (!_sqConnData) return;
+    pid = parseInt(pid);
+    if (!pid) return;
+    showConfirmDialog('确认终止', '确定要终止进程 [' + pid + '] 吗？', function() {
+        eel.slow_query_kill_processlist(_sqConnData, pid)(function(res) {
+            if (res && res.ok) {
+                hideModal();
+                showOkDialog('成功', res.msg);
+                // 自动刷新
+                setTimeout(slowQueryLoadRunning, 500);
+            } else {
+                showErrorDialog('终止失败', res ? res.msg : '未知错误');
+            }
+        });
+    });
+}
