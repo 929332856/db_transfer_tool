@@ -184,26 +184,6 @@ def _row_to_json(row):
     return [_json_safe(v) for v in row]
 
 
-def _detect_table_from_sql(sql: str) -> str:
-    """Best-effort table detection for result metadata; returns empty when ambiguous."""
-    if not sql:
-        return ""
-    cleaned = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
-    cleaned = re.sub(r"--.*?$", " ", cleaned, flags=re.M)
-    match = re.search(
-        r"\b(?:FROM|UPDATE|INTO)\s+(?:`[^`]+`|\"[^\"]+\"|\[[^\]]+\]|\w+)"
-        r"(?:\s*\.\s*(?:`([^`]+)`|\"([^\"]+)\"|\[([^\]]+)\]|(\w+)))?",
-        cleaned,
-        flags=re.I,
-    )
-    if not match:
-        return ""
-    if match.group(1) or match.group(2) or match.group(3) or match.group(4):
-        return match.group(1) or match.group(2) or match.group(3) or match.group(4) or ""
-    token = re.search(r"\b(?:FROM|UPDATE|INTO)\s+(`([^`]+)`|\"([^\"]+)\"|\[([^\]]+)\]|(\w+))", cleaned, flags=re.I)
-    return (token.group(2) or token.group(3) or token.group(4) or token.group(5) or "") if token else ""
-
-
 def _rows_to_dicts(exec_result):
     """将 SQLAlchemy 查询结果转为 JSON 安全的 dict 列表（处理 Decimal/datetime 等）"""
     cols = [str(k) for k in exec_result.keys()]
@@ -532,8 +512,6 @@ def execute_sql_query(sql: str, data: dict):
         if db_type in ('mysql', 'ob-mysql'):
             url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=30") if "?" in url else url + "?charset=utf8mb4&read_timeout=30"
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
-        comments = {}
-        col_types = {}
         with engine.connect() as conn:
             if _query_cancel.is_set():
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
@@ -552,14 +530,6 @@ def execute_sql_query(sql: str, data: dict):
             if result.returns_rows:
                 _query_columns = list(result.keys())
                 _query_rows = [list(row) for row in result.fetchall()]
-                table_name = _detect_table_from_sql(sql)
-                if table_name:
-                    try:
-                        comments = _load_column_comments(conn, db_type, data.get("db", ""), table_name, "")
-                        col_types = _load_column_types(conn, db_type, data.get("db", ""), table_name, "")
-                    except Exception:
-                        comments = {}
-                        col_types = {}
             else:
                 # INSERT/UPDATE/DELETE 等写入操作：提交并返回影响行数
                 conn.commit()
@@ -577,9 +547,7 @@ def execute_sql_query(sql: str, data: dict):
             "ok": True,
             "columns": _query_columns,
             "rows": safe_rows,
-            "total": len(_query_rows),
-            "comments": comments,
-            "col_types": col_types
+            "total": len(_query_rows)
         }
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, data.get('db_type','mysql'))}
@@ -1999,9 +1967,15 @@ _DRIVER_HINTS = {
 }
 
 def _friendly_error(err, db_type='mysql'):
-    """将 ModuleNotFoundError 转为带安装提示的友好信息（同时显示原始错误用于诊断）"""
+    """将常见依赖错误转为带安装提示的友好信息"""
     msg = str(err)
     hint = _DRIVER_HINTS.get(db_type, '')
+    if "No module named" in msg or "ModuleNotFoundError" in msg:
+        return f"缺少驱动 [{hint}]: {msg}\n请安装: pip install {hint}" if hint else msg
+    # ★ oracledb thin 模式缺少 cryptography 依赖 (DPY-3016)
+    if 'DPY-3016' in msg or ('cryptography' in msg and 'cannot be imported' in msg):
+        return f"Oracle 驱动缺少加密库: {msg}\n\n请确保已安装兼容版本:\n  pip install cryptography==41.0.7"
+    # ★ 通用依赖提示（根据 db_type 附加 pip install 命令）
     if "No module named" in msg or "ModuleNotFoundError" in msg:
         return f"缺少驱动 [{hint}]: {msg}" if hint else msg
     return msg
@@ -2060,9 +2034,15 @@ def _conn_url(conn_data):
         base = f"postgresql+psycopg2://{u}:{p}@{h}:{port}"
         return f"{base}/{db}" if db else base
     elif db_type == 'oracle':
-        sid = conn_data.get("sid", db)
+        ora_mode = conn_data.get("ora_mode", "service_name")
         base = f"oracle+oracledb://{u}:{p}@{h}:{port}"
-        return f"{base}/{sid}" if sid else base
+        if db:
+            if ora_mode == "sid":
+                return f"{base}/?sid={db}"
+            else:
+                # ★ 显式用 service_name 参数，避免 oracledb thin 模式把 Easy Connect 路径当成 SID
+                return f"{base}/?service_name={db}"
+        return base
     elif db_type == 'mssql':
         base = f"mssql+pymssql://{u}:{p}@{h}:{port}"
         return f"{base}/{db}" if db else base

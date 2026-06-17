@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
@@ -14,6 +14,7 @@ pg_subs = collect_submodules('psycopg2')
 or_subs = collect_submodules('oracledb')
 ms_subs = collect_submodules('pymssql')
 redis_subs = collect_submodules('redis')
+cr_subs = collect_submodules('cryptography')  # oracle thin 模式依赖
 
 # 收集各包的数据文件（元组列表，用于 datas）
 eel_datas = collect_data_files('eel')
@@ -27,7 +28,7 @@ or_datas = collect_data_files('oracledb')
 ms_datas = collect_data_files('pymssql')
 redis_datas = collect_data_files('redis')
 
-all_hidden = eel_subs + sa_subs + py_subs + gv_subs + gw_subs + bt_subs + pg_subs + or_subs + ms_subs + redis_subs
+all_hidden = eel_subs + sa_subs + py_subs + gv_subs + gw_subs + bt_subs + pg_subs + or_subs + ms_subs + redis_subs + cr_subs
 all_extra_datas = [
     ('web', 'web'),
 ] + eel_datas + sa_datas + py_datas + gv_datas + gw_datas + bt_datas + pg_datas + or_datas + ms_datas + redis_datas
