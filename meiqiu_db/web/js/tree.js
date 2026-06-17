@@ -71,6 +71,75 @@ function getConnIcon(dbType) {
 // ★ 初始化代码已移至 tree_init.js，请勿在此处添加初始化逻辑
 // ★ 如需修改初始化行为，请编辑 js/tree_init.js
 
+// ==================== 字段注释悬浮 Tooltip ====================
+var _fieldCmtTooltip = null;
+var _fieldCmtHideTimer = null;
+
+function _ensureFieldCmtTooltip() {
+    if (_fieldCmtTooltip) return;
+    _fieldCmtTooltip = document.createElement('div');
+    _fieldCmtTooltip.className = 'field-cmt-tooltip';
+    _fieldCmtTooltip.innerHTML = '<div class="cmt-col-name"></div><div class="cmt-col-type"></div><div class="cmt-col-comment"></div>';
+    document.body.appendChild(_fieldCmtTooltip);
+
+    // ★ 使用 mouseover（而非 mousemove），每进入一个元素只触发一次，性能更好且更可靠
+    document.addEventListener('mouseover', function(e) {
+        var th = e.target ? e.target.closest('th[data-cmt],th[data-ctype]') : null;
+        if (!th) { return; }
+        var cmt = th.getAttribute('data-cmt') || '';
+        var cType = th.getAttribute('data-ctype') || '';
+        if (!cmt && !cType) { return; }
+        _showFieldCmt(th, cmt, cType);
+    });
+
+    // ★ 鼠标离开 th 时隐藏
+    document.addEventListener('mouseout', function(e) {
+        var th = e.target ? e.target.closest('th[data-cmt],th[data-ctype]') : null;
+        if (th) { _hideFieldCmtTooltipDelayed(); }
+    });
+}
+
+function _showFieldCmt(thEl, cmt, cType) {
+    clearTimeout(_fieldCmtHideTimer);
+    if (!_fieldCmtTooltip) return;
+    var nameEl = _fieldCmtTooltip.querySelector('.cmt-col-name');
+    var typeEl = _fieldCmtTooltip.querySelector('.cmt-col-type');
+    var cmtEl = _fieldCmtTooltip.querySelector('.cmt-col-comment');
+    var colName = thEl.querySelector('.col-name') ? (thEl.querySelector('.col-name').textContent || '') : '';
+    if (nameEl) nameEl.textContent = colName || thEl.getAttribute('data-orig') || '';
+    if (typeEl) typeEl.textContent = cType || '';
+    if (cmtEl) cmtEl.textContent = cmt || '';
+    _fieldCmtTooltip.style.display = 'block';
+    // 定位：基于 th 元素的位置
+    var rect = thEl.getBoundingClientRect();
+    var ttW = 360, ttH = 80;
+    var left = rect.right + 8;
+    var top = rect.top;
+    // 边界检测
+    if (left + ttW > window.innerWidth - 10) left = Math.max(10, rect.left - ttW - 8);
+    if (top + ttH > window.innerHeight - 10) top = window.innerHeight - ttH - 10;
+    if (top < 10) top = 10;
+    _fieldCmtTooltip.style.left = left + 'px';
+    _fieldCmtTooltip.style.top = top + 'px';
+}
+
+function _hideFieldCmtTooltipDelayed() {
+    clearTimeout(_fieldCmtHideTimer);
+    if (!_fieldCmtTooltip) return;
+    _fieldCmtHideTimer = setTimeout(function() {
+        if (_fieldCmtTooltip) _fieldCmtTooltip.style.display = 'none';
+    }, 150);
+}
+
+// 在页面加载完成后初始化
+(function() {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _ensureFieldCmtTooltip);
+    } else {
+        _ensureFieldCmtTooltip();
+    }
+})();
+
 // ==================== 面板切换 ====================
 function showPanel(name) {
     document.querySelectorAll('.content-panel').forEach(function (p) { p.classList.remove('active'); });
@@ -86,6 +155,19 @@ function showPanel(name) {
     // 切换到慢SQL面板时，刷新连接选择器
     if (name === 'slowquery' && typeof refreshSqConnSelector === 'function') {
         setTimeout(refreshSqConnSelector, 50);
+    }
+    // ★ 切换到查询同步面板时，强制复位按钮状态（防止 isQueryRunning 卡死导致无法执行）
+    if (name === 'query') {
+        setTimeout(function() {
+            if (typeof isQueryRunning !== 'undefined' && isQueryRunning) {
+                isQueryRunning = false;
+            }
+            var btn = document.getElementById('btn_run_sql');
+            if (btn && btn.textContent.indexOf('⏹') === 0) {
+                btn.textContent = '▶ 执行源库查询';
+                btn.style.background = '';
+            }
+        }, 50);
     }
 }
 
@@ -925,6 +1007,13 @@ function renderObjectPanel() {
             var qm = activeObjTab.match(/^query_(.+)$/);
             if (qm) {
                 var qid3 = qm[1];
+                // ★ 切换到 query tab 时，强制清理可能卡死的 _execRunning 标志（防止切换后永远无法执行）
+                if (_execRunning[qid3]) {
+                    _execRunning[qid3] = false;
+                }
+                if (_execCancelFlags[qid3]) {
+                    _execCancelFlags[qid3] = false;
+                }
                 // ★ 重新绑定 textarea 事件（使用 setTimeout 确保 DOM 完全构建）
                 (function(qidX) {
                     setTimeout(function() {
@@ -932,14 +1021,17 @@ function renderObjectPanel() {
                         var sqlTa = document.getElementById('sq_' + qidX);
                         var sqlBtn = document.getElementById('btn_exe_' + qidX);
                         if (!sqlTa || !sqlBtn) return;
-                        // ★ 切回 query tab 时，若查询未在运行，强制把按钮恢复为"执行"
-                        if (!_execRunning[qidX] && sqlBtn.textContent.indexOf('⏹') === 0) {
-                            sqlBtn.textContent = '▶ 执行';
-                            sqlBtn.style.background = '#2ecc71';
-                        }
+                        // ★ 强制复位按钮状态为"执行"（无论之前是什么状态）
+                        sqlBtn.textContent = '▶ 执行';
+                        sqlBtn.style.background = '#2ecc71';
                         // ★ 先恢复 textarea value
-                        if (esX && esX._cachedSql) {
+                        if (esX && Object.prototype.hasOwnProperty.call(esX, '_cachedSql')) {
                             sqlTa.value = esX._cachedSql;
+                        } else {
+                            var cachedTab = objectTabs.find(function(t){ return t.id === 'query_' + qidX; });
+                            if (cachedTab && Object.prototype.hasOwnProperty.call(cachedTab, '_cachedSql')) {
+                                sqlTa.value = cachedTab._cachedSql;
+                            }
                         }
                         // 更新按钮标签 + 绑定所有必要事件
                         var updateBtnLabel = function() {
@@ -950,6 +1042,7 @@ function renderObjectPanel() {
                         };
                         sqlTa.addEventListener('mouseup', updateBtnLabel);
                         sqlTa.addEventListener('keyup', updateBtnLabel);
+                        sqlTa.addEventListener('input', function(){ _queryTextareaChanged(qidX, sqlTa); });
                         // ★ 重新绑定 Ctrl+Enter 执行和 Ctrl+S 保存
                         var curTab = objectTabs.find(function(t){ return t.id === 'query_' + qidX; });
                         var cid2 = curTab ? curTab.cid : '';
@@ -1014,6 +1107,14 @@ function renderObjectPanel() {
             initQuerySplitter('ql_' + qid2, 'qs_' + qid2, 'sq_' + qid2, 'qr_' + qid2);
         }
     });
+}
+
+function _queryTextareaChanged(qid, ta) {
+    if (!qid || !ta) return;
+    var es = _qState(qid);
+    es._cachedSql = ta.value;
+    var tab = objectTabs.find(function(t){ return t.id === 'query_' + qid; });
+    if (tab) tab._cachedSql = ta.value;
 }
 
 function filterObjectTable() {
@@ -1467,6 +1568,9 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                 var cmt = getCmt(c);
                 var cType = getCType(c);
                 var cmtTitle = cmt ? ' title="'+escapeAttr(cmt)+'"' : '';
+                // ★ 添加 data-cmt 和 data-ctype 属性，供自定义 field-comment-tooltip 使用
+                var cmtData = cmt ? ' data-cmt="'+escapeAttr(cmt)+'"' : '';
+                var ctypeData = cType ? ' data-ctype="'+escapeAttr(cType)+'"' : '';
                 // 排序三态：未排序=⇅(灰色双向箭头), 升序=▲, 降序=▼
                 var sortIcon = '⇅';
                 if (sortRef.col === ci) {
@@ -1476,7 +1580,7 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                 var hasFilter = _colFilters[ci] && _colFilters[ci].trim() !== '';
                 var filterOpacity = hasFilter ? '1' : '0.4';
                 // ★ 使用 flex 布局：字段名+类型+注释在左侧，排序+筛选图标在右侧，同行显示
-                h+='<th class="sortable-th" data-ci="'+ci+'" data-orig="'+escapeAttr(c)+'" style="user-select:none;"'+cmtTitle+'>';
+                h+='<th class="sortable-th" data-ci="'+ci+'" data-orig="'+escapeAttr(c)+'" style="user-select:none;"'+cmtTitle+cmtData+ctypeData+'>';
                 h+='<div class="th-left">';
                 // ★ 字段名 span 也加 title，确保悬停时一定能看到注释
                 h+='<span class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</span>';
@@ -2717,6 +2821,7 @@ function openQueryInTab(qid) {
                 btnE.textContent = (s !== e) ? '▶ 执行选中' : '▶ 执行';
             }
             if(ta) {
+                ta.addEventListener('input', function(){ _queryTextareaChanged(qid, ta); });
                 ta.addEventListener('keydown',function(e){
                     if(e.ctrlKey&&e.key==='Enter') execQueryTab(qid);
                     if(e.ctrlKey&&(e.key==='s'||e.key==='S')) { e.preventDefault(); saveQueryTab(qid, cid, qdb, q.name); }
@@ -2804,6 +2909,22 @@ function initQuerySplitter(layoutId, splitterId, editorId, resultsId) {
 }
 
 function execQueryTab(qid) {
+    // ★ 同步验证 + 恢复连接数据（放在最前面，避免异步回调中状态丢失导致闪回）
+    var curTabSync = objectTabs.find(function(t){return t.id==='query_'+qid;});
+    if (curTabSync && curTabSync.cid && treeData && treeData.connections && treeData.connections[curTabSync.cid]) {
+        activeConnId = curTabSync.cid;
+        activeConnData = treeData.connections[curTabSync.cid];
+    }
+    // ★ 强制清理可能卡死的标记（切换 tab 后按钮可能被 _execRunning 误判为正在执行）
+    _execRunning[qid] = false;
+    _execCancelFlags[qid] = false;
+
+    if (!activeConnData) {
+        var resultsDivPreCheck = document.getElementById('qr_'+qid);
+        if (resultsDivPreCheck) resultsDivPreCheck.innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ 连接已断开，请先在左侧树中展开对应连接</div>';
+        return;
+    }
+
     // 检查是否有选中文本
     var ta = document.getElementById('sq_'+qid);
     var selection = '';
@@ -2841,23 +2962,30 @@ function execQueryTab(qid) {
         if(!stmts.length) { _resetExeBtn(); return; }
 
         // 如果正在执行中，取消（★ 用 _execRunning 可靠判定，避免 _execCancelFlags 卡住导致永远无法执行）
+        // ★ 增加超时检测：如果 _execRunning 卡死超过 120 秒（说明 eel 回调丢失），强制清除并允许重新执行
         if (_execRunning[qid]) {
-            cancelExecQuery(qid);
-            return;
+            var elapsedSinceStart = Date.now() - (_execStartTime[qid] || 0);
+            if (elapsedSinceStart > 120000) {
+                // 超过 2 分钟卡死 → 强制清除僵尸状态
+                console.warn('[execQueryTab] _execRunning 卡死 ' + Math.round(elapsedSinceStart/1000) + 's，强制清除');
+                _execRunning[qid] = false;
+                _execCancelFlags[qid] = false;
+            } else {
+                cancelExecQuery(qid);
+                return;
+            }
         }
 
-        // ★ 从查询 tab 的 cid 恢复 activeConnData，防止切换 tab 后连接丢失
-        var curTab0 = objectTabs.find(function(t){return t.id==='query_'+qid;});
-        var tabCid = curTab0 ? curTab0.cid : '';
-        if (tabCid && treeData && treeData.connections && treeData.connections[tabCid]) {
-            activeConnId = tabCid;
-            activeConnData = treeData.connections[tabCid];
-        }
-
-        // ★ 先检查所有前置条件，再改按钮状态，防止按钮闪回
+        // ★ 再次确认 activeConnData 仍然有效（异步回调中可能已被其他操作修改）
         if (!activeConnData) {
-            resultsDiv.innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ 未找到活动连接，请先在左侧树中展开对应连接再执行</div>';
-            return;
+            // 再次尝试从 tab 恢复
+            if (curTabSync && curTabSync.cid && treeData && treeData.connections && treeData.connections[curTabSync.cid]) {
+                activeConnId = curTabSync.cid;
+                activeConnData = treeData.connections[curTabSync.cid];
+            } else {
+                resultsDiv.innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ 连接已断开，请先在左侧树中展开对应连接</div>';
+                return;
+            }
         }
 
         _execCancelFlags[qid] = false;
@@ -2950,12 +3078,13 @@ function _syncQueryContent(qid) {
     var tab = objectTabs.find(function(t){ return t.id === 'query_' + qid; });
     if (!tab) return;
     // 获取 layout 的完整 HTML，同时把 textarea 的 value 写入（innerHTML 不反映 textarea 实时值）
-    var html = layout.innerHTML;
+    var html = layout.outerHTML;
     var ta = document.getElementById('sq_' + qid);
     // ★ 额外缓存 textarea value 和结果区域到 _queryEditStates（双重保险，防止 HTML 反转义问题）
     var es = _qState(qid);
     if (ta) {
         es._cachedSql = ta.value;
+        tab._cachedSql = ta.value;
         var escapedQid = qid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         var taRe = new RegExp('(<textarea[^>]*id="sq_' + escapedQid + '"[^>]*>)([\\s\\S]*?)(</textarea>)', 'i');
         html = html.replace(taRe, '$1' + escapeHtml(ta.value) + '$3');
@@ -3249,7 +3378,9 @@ function _qRenderTable(qid) {
         var cType = (es._colTypes && es._colTypes[c]) ? es._colTypes[c] : '';
         var cCmt = (es._colComments && es._colComments[c]) ? es._colComments[c] : '';
         var cmtTitle = cCmt ? ' title="'+escapeAttr(cCmt)+'"' : '';
-        html += '<th'+cmtTitle+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
+        var cmtData = cCmt ? ' data-cmt="'+escapeAttr(cCmt)+'"' : '';
+        var ctypeData = cType ? ' data-ctype="'+escapeAttr(cType)+'"' : '';
+        html += '<th'+cmtTitle+cmtData+ctypeData+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
         if (cType) html += '<div class="col-type">'+escapeHtml(cType)+'</div>';
         if (cCmt) html += '<div class="col-type" style="color:#5dade2;font-style:italic;">'+escapeHtml(cCmt)+'</div>';
         html += '</th>';
@@ -3304,6 +3435,8 @@ function renderQueryResults(div, results, total, stmtsArr) {
         } else {
             es.columns = r0.columns || [];
             es.rows = r0.rows || [];
+            es._colTypes = r0.col_types || {};
+            es._colComments = r0.comments || {};
             var rc = r0.total || 0;
             var hc = es.columns.length > 0;
             // 重置编辑状态
@@ -3314,13 +3447,11 @@ function renderQueryResults(div, results, total, stmtsArr) {
 
             if (hc) {
                 // 尝试加载列类型和注释
-                if (es._tableName && es.connData && !Object.keys(es._colTypes || {}).length) {
-                    es._colTypes = {};
-                    es._colComments = {};
+                if (es._tableName && es.connData) {
                     eel.table_get_col_types(es.connData, es.execDb, es._tableName, '')(function(r){
                         if (r && r.ok) {
-                            es._colTypes = r.col_types || {};
-                            es._colComments = r.comments || {};
+                            es._colTypes = Object.assign({}, es._colTypes || {}, r.col_types || {});
+                            es._colComments = Object.assign({}, es._colComments || {}, r.comments || {});
                         }
                         // 渲染表格
                         if (es.columns.length > 0) _qRenderTable(qid);
@@ -3339,7 +3470,10 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     var cType = (es._colTypes && es._colTypes[c]) ? es._colTypes[c] : '';
                     var cCmt = (es._colComments && es._colComments[c]) ? es._colComments[c] : '';
                     var cmtTitle = cCmt ? ' title="'+escapeAttr(cCmt)+'"' : '';
-                    html += '<th'+cmtTitle+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
+                    // ★ 添加 data-cmt 属性，供自定义 field-comment-tooltip 使用（鼠标悬停展示字段注释）
+                    var cmtData = cCmt ? ' data-cmt="'+escapeAttr(cCmt)+'"' : '';
+                    var ctypeData = cType ? ' data-ctype="'+escapeAttr(cType)+'"' : '';
+                    html += '<th'+cmtTitle+cmtData+ctypeData+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
                     if (cType) html += '<div class="col-type">'+escapeHtml(cType)+'</div>';
                     if (cCmt) html += '<div class="col-type" style="color:#5dade2;font-style:italic;">'+escapeHtml(cCmt)+'</div>';
                     html += '</th>';

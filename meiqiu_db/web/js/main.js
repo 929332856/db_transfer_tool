@@ -202,13 +202,19 @@ document.addEventListener('click', function (e) {
 });
 
 // ========== 确认弹窗 ==========
-function showConfirmDialog(title, msg, onConfirm) {
+function showConfirmDialog(title, msg, onConfirm, onCancel) {
     showModal('⚠️', title, msg, '#e67e22',
-        '<button class="btn btn-gray" onclick="hideModal()">取消</button>' +
+        '<button class="btn btn-gray" id="modal_cancel_btn">取消</button>' +
         '<button class="btn btn-red" id="modal_confirm_btn">确定</button>');
     setTimeout(function () {
-        const btn = $('modal_confirm_btn');
-        if (btn) btn.onclick = function () { hideModal(); onConfirm(); };
+        var cfm = $('modal_confirm_btn');
+        if (cfm) cfm.onclick = function () { hideModal(); onConfirm(); };
+        var can = $('modal_cancel_btn');
+        if (can && onCancel) {
+            can.onclick = function () { hideModal(); onCancel(); };
+        } else if (can) {
+            can.onclick = function () { hideModal(); };
+        }
     }, 10);
 }
 
@@ -341,18 +347,33 @@ function pollProgress() {
 // ========== SQL 查询（查询同步 Tab，使用 query_ 表单） ==========
 let isQueryRunning = false;
 let queryDiscard = false;
+let _queryTimeoutId = null;
+
+function _resetQueryState() {
+    if (_queryTimeoutId) { clearTimeout(_queryTimeoutId); _queryTimeoutId = null; }
+    isQueryRunning = false;
+    queryDiscard = false;
+    const btn = $('btn_run_sql');
+    if (btn) { btn.textContent = '▶ 执行源库查询'; btn.style.background = ''; }
+}
 
 function executeQuery() {
     const ta = $('sql_input');
+    const btn = $('btn_run_sql');
+
+    // ★ 如果按钮卡在取消状态但实际未运行，强制复位
     if (isQueryRunning) {
-        queryDiscard = true;
-        eel.cancel_query()();
-        isQueryRunning = false;
-        const btn = $('btn_run_sql');
-        btn.textContent = '▶ 执行源库查询';
-        btn.style.background = '';
-        appendLog('⏸ 查询已取消');
-        return;
+        // 检查是否有超时卡死的情况（按钮显示取消但超时计时器已清除说明没在真正运行）
+        if (!_queryTimeoutId) {
+            _resetQueryState();
+        } else {
+            // 正常取消
+            queryDiscard = true;
+            eel.cancel_query()();
+            _resetQueryState();
+            appendLog('⏸ 查询已取消');
+            return;
+        }
     }
 
     // 检查选中文本
@@ -375,16 +396,25 @@ function executeQuery() {
 
     isQueryRunning = true;
     queryDiscard = false;
-    const btn = $('btn_run_sql');
     btn.textContent = '⏹ 取消查询';
     btn.style.background = '#e74c3c';
 
+    // ★ 超时保护：60秒后若回调仍未触发，自动复位（防止 Eel 回调丢失导致按钮永久卡死）
+    _queryTimeoutId = setTimeout(function() {
+        _queryTimeoutId = null;
+        if (isQueryRunning) {
+            _resetQueryState();
+            $('query_info').textContent = '查询结果: 超时';
+            $('table_scroll').innerHTML = '<div style="padding:20px;color:#f39c12;">⚠️ 查询超时或无响应，请重试</div>';
+            appendLog('⚠️ 查询超时（60秒），已自动取消');
+        }
+    }, 60000);
+
+    var queryStartTime = Date.now();
     eel.execute_sql_query(sql, data)(function (result) {
         if (queryDiscard) { return; }
 
-        isQueryRunning = false;
-        btn.textContent = '▶ 执行源库查询';
-        btn.style.background = '';
+        _resetQueryState();
 
         if (!result) {
             $('query_info').textContent = '查询结果: 出错';
@@ -397,13 +427,17 @@ function executeQuery() {
             $('table_scroll').innerHTML = '<div style="padding:20px;color:#ff4444;">❌ ' + (result.msg || '未知错误') + '</div>';
             return;
         }
-        buildResultTable(result.columns, result.rows, result.total || 0);
+        buildResultTable(result.columns, result.rows, result.total || 0, result.comments || {}, result.col_types || {});
+        var elapsed = ((Date.now() - queryStartTime) / 1000).toFixed(1);
+        appendLog('✅ 查询完成，返回 ' + (result.total || 0) + ' 行（耗时 ' + elapsed + 's）');
     });
 }
 
-function buildResultTable(columns, rows, total) {
+function buildResultTable(columns, rows, total, comments, colTypes) {
     const MAX_CHARS = 40;
     total = total || 0;
+    comments = comments || {};
+    colTypes = colTypes || {};
     $('query_info').textContent = '查询结果: ' + total + ' 行';
     const wrapper = $('table_scroll');
     if (!columns || !columns.length) {
@@ -413,7 +447,18 @@ function buildResultTable(columns, rows, total) {
 
     let html = '<table id="result_table"><thead><tr>';
     for (let i = 0; i < columns.length; i++) {
-        html += '<th>' + escapeHtml(String(columns[i])) + '</th>';
+        var colName = String(columns[i]);
+        var cmt = comments[colName] || '';
+        var ctype = colTypes[colName] || '';
+        var titleParts = [];
+        if (ctype) titleParts.push(ctype);
+        if (cmt) titleParts.push(cmt);
+        var titleAttr = titleParts.length ? ' title="' + escapeAttr(titleParts.join('\n')) + '"' : '';
+        var cmtAttr = cmt ? ' data-cmt="' + escapeAttr(cmt) + '"' : '';
+        var typeAttr = ctype ? ' data-ctype="' + escapeAttr(ctype) + '"' : '';
+        html += '<th' + titleAttr + cmtAttr + typeAttr + '><div class="col-name">' + escapeHtml(colName) + '</div>';
+        if (ctype) html += '<div class="col-type">' + escapeHtml(ctype) + '</div>';
+        html += '</th>';
     }
     html += '</tr></thead><tbody>';
 
@@ -717,11 +762,21 @@ window.addEventListener('load', function () {
     if (sqlTa && sqlBtn) {
         function updSqlBtn() {
             if (sqlBtn.textContent.indexOf('⏹') === 0) return;
-            var s = sqlTa.selectionStart, e = sqlTa.selectionEnd;
-            sqlBtn.textContent = (s !== e) ? '▶ 执行选中SQL' : '▶ 执行源库查询';
+            // 使用 setTimeout 确保 selection 已更新（尤其 keydown 后）
+            setTimeout(function() {
+                var s = sqlTa.selectionStart, e = sqlTa.selectionEnd;
+                sqlBtn.textContent = (s !== e) ? '▶ 执行选中SQL' : '▶ 执行源库查询';
+            }, 0);
         }
         sqlTa.addEventListener('mouseup', updSqlBtn);
         sqlTa.addEventListener('keyup', updSqlBtn);
+        sqlTa.addEventListener('select', updSqlBtn);
+        // 兜底：点击 textarea 外部后可能丢失选择状态
+        document.addEventListener('mouseup', function(e) {
+            if (document.activeElement === sqlTa) {
+                updSqlBtn();
+            }
+        });
     }
 });
 

@@ -184,6 +184,26 @@ def _row_to_json(row):
     return [_json_safe(v) for v in row]
 
 
+def _detect_table_from_sql(sql: str) -> str:
+    """Best-effort table detection for result metadata; returns empty when ambiguous."""
+    if not sql:
+        return ""
+    cleaned = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
+    cleaned = re.sub(r"--.*?$", " ", cleaned, flags=re.M)
+    match = re.search(
+        r"\b(?:FROM|UPDATE|INTO)\s+(?:`[^`]+`|\"[^\"]+\"|\[[^\]]+\]|\w+)"
+        r"(?:\s*\.\s*(?:`([^`]+)`|\"([^\"]+)\"|\[([^\]]+)\]|(\w+)))?",
+        cleaned,
+        flags=re.I,
+    )
+    if not match:
+        return ""
+    if match.group(1) or match.group(2) or match.group(3) or match.group(4):
+        return match.group(1) or match.group(2) or match.group(3) or match.group(4) or ""
+    token = re.search(r"\b(?:FROM|UPDATE|INTO)\s+(`([^`]+)`|\"([^\"]+)\"|\[([^\]]+)\]|(\w+))", cleaned, flags=re.I)
+    return (token.group(2) or token.group(3) or token.group(4) or token.group(5) or "") if token else ""
+
+
 def _rows_to_dicts(exec_result):
     """将 SQLAlchemy 查询结果转为 JSON 安全的 dict 列表（处理 Decimal/datetime 等）"""
     cols = [str(k) for k in exec_result.keys()]
@@ -512,6 +532,8 @@ def execute_sql_query(sql: str, data: dict):
         if db_type in ('mysql', 'ob-mysql'):
             url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=30") if "?" in url else url + "?charset=utf8mb4&read_timeout=30"
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
+        comments = {}
+        col_types = {}
         with engine.connect() as conn:
             if _query_cancel.is_set():
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
@@ -527,9 +549,25 @@ def execute_sql_query(sql: str, data: dict):
             result = conn.execute(text(sql))
             if _query_cancel.is_set():
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
-            _query_columns = list(result.keys())
-            _query_rows = [list(row) for row in result.fetchall()]
+            if result.returns_rows:
+                _query_columns = list(result.keys())
+                _query_rows = [list(row) for row in result.fetchall()]
+                table_name = _detect_table_from_sql(sql)
+                if table_name:
+                    try:
+                        comments = _load_column_comments(conn, db_type, data.get("db", ""), table_name, "")
+                        col_types = _load_column_types(conn, db_type, data.get("db", ""), table_name, "")
+                    except Exception:
+                        comments = {}
+                        col_types = {}
+            else:
+                # INSERT/UPDATE/DELETE 等写入操作：提交并返回影响行数
+                conn.commit()
+                rc = result.rowcount
         engine.dispose()
+        # 写入操作提前返回（无需序列化行数据）
+        if not result.returns_rows:
+            return {"ok": True, "msg": f"成功执行，影响 {rc} 行", "columns": [], "rows": [], "total": rc}
 
         if _query_cancel.is_set():
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
@@ -539,7 +577,9 @@ def execute_sql_query(sql: str, data: dict):
             "ok": True,
             "columns": _query_columns,
             "rows": safe_rows,
-            "total": len(_query_rows)
+            "total": len(_query_rows),
+            "comments": comments,
+            "col_types": col_types
         }
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, data.get('db_type','mysql'))}
@@ -695,7 +735,12 @@ def import_query_results(table_name: str, data: dict):
 
 
 def _connect_args(db_type='mysql', timeout=10):
-    """返回 create_engine 的 connect_args，MySQL 禁用 SSL"""
+    """返回 create_engine 的 connect_args，MySQL 禁用 SSL
+    注意：oracledb 不支持 connect_timeout 参数，Oracle 不使用此参数
+    """
+    if db_type == 'oracle':
+        # oracledb 驱动不支持 connect_timeout，返回空字典
+        return {}
     args = {"connect_timeout": timeout}
     if db_type in ('mysql', 'ob-mysql'):
         args["ssl_disabled"] = True
@@ -759,8 +804,9 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
             # 查询列注释
             comments = {}
             comments = _load_column_comments(conn, db_type, database, table_name, schema)
+            col_types = _load_column_types(conn, db_type, database, table_name, schema)
         engine.dispose()
-        return {"ok": True, "columns": columns, "rows": rows, "comments": comments}
+        return {"ok": True, "columns": columns, "rows": rows, "comments": comments, "col_types": col_types}
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
 
@@ -792,9 +838,10 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
             columns = list(result.keys())
             rows = [_row_to_json(row) for row in result.fetchall()]
             comments = _load_column_comments(conn, db_type, database, table_name, schema)
+            col_types = _load_column_types(conn, db_type, database, table_name, schema)
         engine.dispose()
         return {"ok": True, "columns": columns, "rows": rows, "comments": comments,
-                "fast": True, "total_hint": len(rows)}
+                "col_types": col_types, "fast": True, "total_hint": len(rows)}
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
 
@@ -849,6 +896,77 @@ def _load_column_comments(conn, db_type, database, table_name, schema=''):
     return comments
 
 
+def _load_column_types(conn, db_type, database, table_name, schema=''):
+    """加载列类型（用于表头展示）"""
+    types = {}
+    try:
+        if db_type in ('mysql', 'ob-mysql'):
+            col_rows = conn.execute(text(
+                "SELECT COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA=:db AND TABLE_NAME=:tbl ORDER BY ORDINAL_POSITION"
+            ), {"db": database, "tbl": table_name}).fetchall()
+            for cr in col_rows:
+                types[cr[0]] = cr[1]
+        elif db_type == 'postgresql':
+            sch = schema if schema else 'public'
+            col_rows = conn.execute(text(
+                "SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) "
+                "FROM pg_catalog.pg_attribute a "
+                "JOIN pg_catalog.pg_class c ON a.attrelid = c.oid "
+                "JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid "
+                "WHERE c.relname=:tbl AND n.nspname=:sch AND a.attnum>0 AND NOT a.attisdropped "
+                "ORDER BY a.attnum"
+            ), {"tbl": table_name, "sch": sch}).fetchall()
+            for cr in col_rows:
+                types[cr[0]] = cr[1]
+        elif db_type == 'mssql':
+            col_rows = conn.execute(text(
+                "SELECT COLUMN_NAME, DATA_TYPE + "
+                "CASE WHEN CHARACTER_MAXIMUM_LENGTH IS NOT NULL AND DATA_TYPE IN ('varchar','nvarchar','char','nchar') "
+                "THEN '('+CAST(CHARACTER_MAXIMUM_LENGTH AS VARCHAR)+')' "
+                "WHEN DATA_TYPE IN ('decimal','numeric') "
+                "THEN '('+CAST(NUMERIC_PRECISION AS VARCHAR)+','+CAST(NUMERIC_SCALE AS VARCHAR)+')' "
+                "ELSE '' END AS COLUMN_TYPE "
+                "FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_CATALOG=:db AND TABLE_NAME=:tbl ORDER BY ORDINAL_POSITION"
+            ), {"db": database, "tbl": table_name}).fetchall()
+            for cr in col_rows:
+                types[cr[0]] = cr[1]
+        elif db_type == 'sqlite':
+            col_rows = conn.execute(text(f"PRAGMA table_info('{table_name}')")).fetchall()
+            for cr in col_rows:
+                # cr = (cid, name, type, notnull, dflt_value, pk)
+                types[cr[1]] = cr[2]
+    except Exception:
+        pass  # 获取类型失败不阻塞主流程
+    return types
+
+
+@eel.expose
+def table_get_col_types(conn_data, database, table_name, schema=''):
+    """供查询窗口获取列类型和注释"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql',):
+            cdata["db"] = database
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        with engine.connect() as conn:
+            col_types = _load_column_types(conn, db_type, database, table_name, schema)
+            comments = _load_column_comments(conn, db_type, database, table_name, schema)
+        engine.dispose()
+        return {"ok": True, "col_types": col_types, "comments": comments}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+
+
+
+
+
+
+
 
 
 
@@ -872,7 +990,7 @@ def _get_where_columns(c, db_type, database, table_name):
         if uniqs:
             return [r[0] for r in uniqs]
     elif db_type == 'postgresql':
-        sch = 'public'
+        # 1. 主键
         pks = c.execute(text(
             "SELECT kcu.column_name FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name "
@@ -881,6 +999,15 @@ def _get_where_columns(c, db_type, database, table_name):
         ), {"tbl": table_name}).fetchall()
         if pks:
             return [r[0] for r in pks]
+        # 2. 唯一索引
+        uniqs = c.execute(text(
+            "SELECT kcu.column_name FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name "
+            "WHERE tc.table_name=:tbl AND tc.constraint_type='UNIQUE' "
+            "ORDER BY tc.constraint_name, kcu.ordinal_position"
+        ), {"tbl": table_name}).fetchall()
+        if uniqs:
+            return [r[0] for r in uniqs]
     # 3. 兜底：返回 None，调用方使用所有列
     return None
 

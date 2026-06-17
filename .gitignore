@@ -10,6 +10,9 @@ build/
 dist/
 *.spec.bak
 
+# 打包输出（exe 文件不提交）
+meiqiu_db/program/
+
 # IDE
 .idea/
 .vscode/

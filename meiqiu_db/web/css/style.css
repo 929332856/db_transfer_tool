@@ -370,6 +370,41 @@ tbody td.truncated { color: #5dade2; }
 /* 单元格 Tooltip */
 .cell-tooltip { display: none; position: fixed; z-index: 1500; background: #2c3e50; color: #ecf0f1; padding: 5px 10px; border-radius: 4px; font-size: 11px; pointer-events: none; white-space: nowrap; font-family: "Microsoft YaHei", sans-serif; }
 
+/* 字段注释悬浮 Tooltip */
+.field-cmt-tooltip {
+    display: none; position: fixed; z-index: 1600;
+    background: linear-gradient(135deg, #1a2332 0%, #16213e 100%);
+    border: 1px solid #5dade2; border-radius: 8px;
+    padding: 8px 14px; font-size: 12px;
+    color: #ecf0f1; pointer-events: none;
+    white-space: normal; max-width: 420px; line-height: 1.5;
+    box-shadow: 0 4px 16px rgba(0,0,0,.4);
+    font-family: "Microsoft YaHei", sans-serif;
+}
+.field-cmt-tooltip .cmt-col-name {
+    font-weight: bold; color: #5dade2; margin-bottom: 2px; font-size: 13px;
+}
+.field-cmt-tooltip .cmt-col-type {
+    color: #888; font-size: 11px; margin-bottom: 4px; font-family: Consolas, monospace;
+}
+.field-cmt-tooltip .cmt-col-comment {
+    color: #f0c040; font-style: italic; font-size: 12px;
+}
+
+/* ★ 字段注释 CSS 兜底：th[data-cmt] 悬停时用 ::after 显示注释（确保 JS 不生效时仍可见） */
+th[data-cmt]:hover::after {
+    content: attr(data-cmt);
+    position: absolute;
+    left: 100%; top: 0; margin-left: 8px;
+    background: #1a2332; color: #f0c040;
+    border: 1px solid #5dade2; border-radius: 6px;
+    padding: 6px 12px; font-size: 11px; font-style: italic;
+    white-space: nowrap; z-index: 1600;
+    box-shadow: 0 2px 10px rgba(0,0,0,.4);
+    pointer-events: none;
+    max-width: 400px; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* 可编辑单元格 */
 .editable-cell {
     width: 100%; min-width: 80px; border: none; background: transparent;
@@ -422,9 +457,62 @@ tbody td.truncated { color: #5dade2; }
 /* 行选择复选框 */
 .row-sel-cb { cursor: pointer; accent-color: #5dade2; }
 
+/* 行选择格（替代复选框） */
+.row-sel-grip {
+    text-align: center; padding: 3px 2px; cursor: pointer;
+    background: #1a1a2e; border-right: 1px solid #2a2a3a;
+    font-size: 10px; color: #555; user-select: none;
+    transition: background 0.15s, color 0.15s;
+    width: 26px; min-width: 26px; max-width: 26px;
+}
+.row-sel-grip:hover { background: #2a3050; color: #aaa; }
+.row-sel-grip.selected {
+    background: rgba(46,204,113,0.2); color: #2ecc71;
+    border-right-color: rgba(46,204,113,0.3);
+}
+
+/* 表头行选择格（全选点击） */
+.row-sel-header {
+    text-align: center; padding: 2px; cursor: pointer;
+    background: #141420; font-size: 11px; color: #555;
+    user-select: none; width: 26px; min-width: 26px; max-width: 26px;
+}
+.row-sel-header:hover { background: #2a3050; color: #aaa; }
+.row-sel-header.all-selected { color: #2ecc71; }
+
 /* 数据表格 tr 行悬停高亮（选中行） */
 .exp-table tbody tr.row-selected { background: rgba(93,173,226,0.12); }
 .exp-table tbody tr.row-selected:hover { background: rgba(93,173,226,0.18); }
+
+/* 数据预览表格选中行高亮 */
+.data-table-scroll tbody tr.row-selected { background: rgba(46,204,113,0.15) !important; }
+.data-table-scroll tbody tr.row-selected td { color: #e0e0e0; }
+.data-table-scroll tbody tr.row-selected:hover { background: rgba(46,204,113,0.22) !important; }
+.data-table-scroll tbody tr { cursor: pointer; }
+.data-table-scroll tbody tr:hover { background: rgba(255,255,255,0.03); }
+
+/* 列类型显示（列名下方） */
+.col-type {
+    font-size: 10px; color: #999; font-weight: normal;
+    white-space: nowrap; margin-left: 5px;
+}
+
+/* 数据表头 flex 布局：左(字段名+类型) | 右(排序+筛选) 同行 */
+.sortable-th {
+    display: table-cell;
+}
+.sortable-th .th-left {
+    display: inline-flex; align-items: baseline; gap: 2px;
+    flex-wrap: nowrap; overflow: hidden;
+    max-width: calc(100% - 56px); /* 给右侧图标留空间 */
+}
+.sortable-th .th-right {
+    float: right; display: inline-flex; align-items: center; gap: 2px;
+    flex-shrink: 0;
+}
+.col-name {
+    font-size: 12px; font-weight: bold; white-space: nowrap;
+}
 
 /* ========== 滚动条 ========== */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
