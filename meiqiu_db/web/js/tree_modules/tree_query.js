@@ -1,4 +1,10 @@
 // ==================== 查询编辑器分割线拖动 ====================
+// ★ 格式化服务器执行时间：毫秒→友好显示
+function _fmtExecTime(ms) {
+    if (ms < 1) return ms.toFixed(2) + 'ms';
+    if (ms < 1000) return ms.toFixed(1) + 'ms';
+    return (ms / 1000).toFixed(2) + 's';
+}
 var _querySplitterInited = {};
 function initQuerySplitter(layoutId, splitterId, editorId, resultsId) {
     if (_querySplitterInited[splitterId]) return; // 防止重复绑定
@@ -236,7 +242,7 @@ var _queryEditStates = {};
 /** 获取查询结果编辑状态 */
 function _qState(qid) {
     if (!_queryEditStates[qid]) {
-        _queryEditStates[qid] = { columns: [], rows: [], changedCells: {}, selectedRows: {}, editing: false, connData: null, execDb: '', _colComments: {}, _colTypes: {}, _lastClickedIdx: -1 };
+        _queryEditStates[qid] = { columns: [], rows: [], changedCells: {}, selectedRows: {}, editing: false, connData: null, execDb: '', _colComments: {}, _colTypes: {}, _lastClickedIdx: -1, server_ms: undefined };
     }
     return _queryEditStates[qid];
 }
@@ -591,7 +597,7 @@ function _qRebuildSingleTab(qid, tabIdx) {
             '<span style="flex:1;"></span>' +
             '<button class="btn btn-sm" id="'+qid+'_mqdel_'+tabIdx+'" onclick="_qDoDeleteMulti(\''+qid+'\','+tabIdx+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
             '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-        tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows.length+' 行</div>';
+        tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows.length+' 行'+(es._multiServerMs[tabIdx]!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(es._multiServerMs[tabIdx])+'</span>':'')+'</div>';
         tabBody += '<div style="overflow:auto;"><table class="exp-table"><thead><tr>';
         tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+tabIdx+'" onclick="_qToggleSelAllMulti(\''+qid+'\','+tabIdx+')" title="全选/取消全选">#</th>';
         cols.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
@@ -634,7 +640,7 @@ function _qRenderTable(qid) {
         '<span style="flex:1;"></span>' +
         '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
         '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-    html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — ' + rc + ' 行</div>';
+    html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — ' + rc + ' 行'+(es.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(es.server_ms)+'</span>':'')+'</div>';
 
     html += '<div style="overflow:auto;"><table class="exp-table"><thead><tr>';
     html += '<th class="row-sel-header" id="'+qid+'_qsel_all" onclick="_qToggleSelAll(\x27'+qid+'\x27)" title="全选/取消全选">#</th>';
@@ -646,7 +652,6 @@ function _qRenderTable(qid) {
         var ctypeData = cType ? ' data-ctype="'+escapeAttr(cType)+'"' : '';
         html += '<th'+cmtTitle+cmtData+ctypeData+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
         if (cType) html += '<div class="col-type">'+escapeHtml(cType)+'</div>';
-        if (cCmt) html += '<div class="col-type" style="color:#5dade2;font-style:italic;">'+escapeHtml(cCmt)+'</div>';
         html += '</th>';
     });
     html += '</tr></thead><tbody>';
@@ -686,7 +691,8 @@ function renderQueryResults(div, results, total, stmtsArr) {
     var qdb = curTab ? curTab.db : '';
     var sqlText = (stmtsArr && stmtsArr.length) ? stmtsArr[0] : '';
     var detectDb = detectDbFromSql(sqlText);
-    es.execDb = detectDb || qdb || (activeConnData ? activeConnData.db : '') || '';
+    var isOraRefresh = (es.connData && es.connData.db_type === 'oracle');
+    es.execDb = isOraRefresh ? (es.connData.db || '') : (detectDb || qdb || (activeConnData ? activeConnData.db : '') || '');
     es._tableName = detectTableFromSql(sqlText);
 
     // 只有一个结果时直接展示（支持编辑）
@@ -701,6 +707,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
             es.rows = r0.rows || [];
             es._colTypes = r0.col_types || {};
             es._colComments = r0.comments || {};
+            es.server_ms = r0.server_ms;
             var rc = r0.total || 0;
             var hc = es.columns.length > 0;
             // 重置编辑状态
@@ -735,7 +742,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     '<span style="flex:1;"></span>' +
                     '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
                     '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-                html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rc+' 行</div>';
+                html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rc+' 行'+(r0.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r0.server_ms)+'</span>':'')+'</div>';
                 html += '<div style="overflow:auto;"><table class="exp-table"><thead><tr>';
                 html += '<th class="row-sel-header" id="'+qid+'_qsel_all" onclick="_qToggleSelAll(\x27'+qid+'\x27)" title="全选/取消全选">#</th>';
                 es.columns.forEach(function(c){
@@ -747,7 +754,6 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     var ctypeData = cType ? ' data-ctype="'+escapeAttr(cType)+'"' : '';
                     html += '<th'+cmtTitle+cmtData+ctypeData+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
                     if (cType) html += '<div class="col-type">'+escapeHtml(cType)+'</div>';
-                    if (cCmt) html += '<div class="col-type" style="color:#5dade2;font-style:italic;">'+escapeHtml(cCmt)+'</div>';
                     html += '</th>';
                 });
                 html += '</tr></thead><tbody>';
@@ -784,10 +790,10 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     else if (sqlLower.indexOf('DELETE') === 0) opType = '删除';
                     else if (sqlLower.indexOf('REPLACE') === 0) opType = '替换';
                     else if (sqlLower.indexOf('TRUNCATE') === 0) opType = '截断';
-                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+opType+'成功，影响 <b>'+affRows+'</b> 行</div>';
+                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+opType+'成功，影响 <b>'+affRows+'</b> 行'+(r0.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r0.server_ms)+'</span>':'')+'</div>';
                 } else {
                     var msg = (r0 && r0.msg) ? r0.msg : '执行成功，无返回结果集';
-                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+escapeHtml(msg)+'</div>';
+                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+escapeHtml(msg)+(r0.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r0.server_ms)+'</span>':'')+'</div>';
                 }
             }
         }
@@ -815,6 +821,8 @@ function renderQueryResults(div, results, total, stmtsArr) {
             } else {
                 count = ' ✅';
             }
+            // ★ 多结果 tab 标签也显示服务器执行时间
+            if (rr.server_ms !== undefined) count += ' ⏱'+_fmtExecTime(rr.server_ms);
             var s = (stmtsArr||[])[i] || '';
             var shortSql = s.replace(/\s+/g,' ').trim().substring(0, 30);
             if (shortSql) label = shortSql;
@@ -832,11 +840,13 @@ function renderQueryResults(div, results, total, stmtsArr) {
     es._multiLastClicked = new Array(results.length);
     es._multiTableNames = new Array(results.length);
     es._multiStmts = stmtsArr || [];  // ★ 保存每条 SQL，供单 tab 刷新使用
+    es._multiServerMs = new Array(results.length);  // ★ 保存每条 SQL 的服务器执行时间
     for (var im = 0; im < results.length; im++) {
         es._multiChanged[im] = {};
         es._multiSelected[im] = {};
         es._multiLastClicked[im] = -1;
         es._multiTableNames[im] = detectTableFromSql((stmtsArr||[])[im]||'');
+        es._multiServerMs[im] = (results[im] && results[im].server_ms !== undefined) ? results[im].server_ms : undefined;
     }
 
     html += '<div class="result-tab-content">';
@@ -859,7 +869,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     '<span style="flex:1;"></span>' +
                     '<button class="btn btn-sm" id="'+qid+'_mqdel_'+i2+'" onclick="_qDoDeleteMulti(\''+qid+'\','+i2+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
                     '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-                tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows2.length+' 行</div>';
+                tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows2.length+' 行'+(r2.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r2.server_ms)+'</span>':'')+'</div>';
                 tabBody += '<div style="overflow:auto;"><table class="exp-table"><thead><tr>';
                 tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+i2+'" onclick="_qToggleSelAllMulti(\''+qid+'\','+i2+')" title="全选/取消全选">#</th>';
                 cols2.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
@@ -893,9 +903,9 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     else if (s2u.indexOf('UPDATE') === 0) opType2 = '更新';
                     else if (s2u.indexOf('DELETE') === 0) opType2 = '删除';
                     else if (s2u.indexOf('REPLACE') === 0) opType2 = '替换';
-                    tabBody = '<div style="padding:12px;color:#2ecc71;">✅ '+opType2+'成功，影响 <b>'+rc2+'</b> 行</div>';
+                    tabBody = '<div style="padding:12px;color:#2ecc71;">✅ '+opType2+'成功，影响 <b>'+rc2+'</b> 行'+(r2.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r2.server_ms)+'</span>':'')+'</div>';
                 } else {
-                    tabBody = '<div style="padding:12px;color:#2ecc71;">✅ '+escapeHtml(r2.msg||'执行成功')+'</div>';
+                    tabBody = '<div style="padding:12px;color:#2ecc71;">✅ '+escapeHtml(r2.msg||'执行成功')+(r2.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r2.server_ms)+'</span>':'')+'</div>';
                 }
             }
         }
@@ -1285,11 +1295,18 @@ function autoRefreshTreeTables(cid, connData, execDb, qDb) {
     var conn = treeData.connections[cid];
     if (!conn) return;
     var dbType = connData.db_type || '';
-    // 收集所有可能的 dbKey（Oracle 的 schema=user，PG/MySQL 的 db=execDb）
+    // ★ Oracle 的 execDb 是 service_name/SID，查表必须用 schema 名；activeDatabase 是连接展开时设置的当前 schema
+    var refreshDb = (dbType === 'oracle') ? (qDb || activeDatabase || '') : (execDb || qDb || '');
+    // 收集所有可能的 dbKey
     var candidates = [];
-    if (execDb) candidates.push(safeBtoa(execDb));
-    if (qDb && qDb !== execDb) candidates.push(safeBtoa(qDb));
-    if (dbType === 'oracle' && connData.user) candidates.push(safeBtoa(connData.user));
+    if (dbType === 'oracle') {
+        // Oracle: 用 schema 名生成 dbKey，同时也加入 username（可能大小写不同）
+        if (refreshDb) candidates.push(safeBtoa(refreshDb));
+        if (connData.user && safeBtoa(connData.user.toUpperCase()) !== safeBtoa(refreshDb)) candidates.push(safeBtoa(connData.user.toUpperCase()));
+    } else {
+        if (execDb) candidates.push(safeBtoa(execDb));
+        if (qDb && qDb !== execDb) candidates.push(safeBtoa(qDb));
+    }
     candidates.forEach(function(dbKey) {
         var rowId = 'cat_tables_' + dbKey;
         var el = document.getElementById(rowId);
@@ -1299,11 +1316,11 @@ function autoRefreshTreeTables(cid, connData, execDb, qDb) {
         if (children.classList.contains('open') && children.innerHTML.trim()) {
             // 已展开：立即刷新
             children.innerHTML = '<div style="font-size:11px;color:#999;padding:4px 0;padding-left:36px;">🔄 刷新中...</div>';
-            loadCategoryItems(conn, execDb || qDb || '', 'tables', function(items) {
+            loadCategoryItems(conn, refreshDb, 'tables', function(items) {
                 var itemPad = 36;
                 var h = items.map(function(it) {
                     var n = it.name || it;
-                    return '<div class="my-conn-row" style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;" ondblclick="addTableDataTab(\x27'+escapeAttr(n)+'\x27,\x27'+escapeAttr(execDb||qDb||'')+'\x27,\x27\x27,\x27'+cid+'\x27)"><span class="my-conn-icon">📊</span>'+escapeHtml(n)+'</div>';
+                    return '<div class="my-conn-row" style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;" ondblclick="addTableDataTab(\x27'+escapeAttr(n)+'\x27,\x27'+escapeAttr(refreshDb)+'\x27,\x27\x27,\x27'+cid+'\x27)"><span class="my-conn-icon">📊</span>'+escapeHtml(n)+'</div>';
                 }).join('');
                 children.innerHTML = h || '<div style="padding-left:'+itemPad+'px;color:#999;font-size:11px;">（无数据）</div>';
             }, '');

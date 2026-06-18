@@ -525,6 +525,9 @@ def execute_sql_query(sql: str, data: dict):
                 conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 30000"))
             except Exception:
                 pass
+            # ★ 纯服务器执行计时：从发送SQL到数据库返回结果（不含JSON序列化和网络传输展示）
+            import time as _time
+            _t0 = _time.perf_counter()
             result = conn.execute(text(sql))
             if _query_cancel.is_set():
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
@@ -535,10 +538,12 @@ def execute_sql_query(sql: str, data: dict):
                 # INSERT/UPDATE/DELETE 等写入操作：提交并返回影响行数
                 conn.commit()
                 rc = result.rowcount
+            _t1 = _time.perf_counter()
+            _server_ms = round((_t1 - _t0) * 1000, 1)
         engine.dispose()
         # 写入操作提前返回（无需序列化行数据）
         if not result.returns_rows:
-            return {"ok": True, "msg": f"成功执行，影响 {rc} 行", "columns": [], "rows": [], "total": rc}
+            return {"ok": True, "msg": f"成功执行，影响 {rc} 行", "columns": [], "rows": [], "total": rc, "server_ms": _server_ms}
 
         if _query_cancel.is_set():
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
@@ -548,7 +553,8 @@ def execute_sql_query(sql: str, data: dict):
             "ok": True,
             "columns": _query_columns,
             "rows": safe_rows,
-            "total": len(_query_rows)
+            "total": len(_query_rows),
+            "server_ms": _server_ms
         }
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, data.get('db_type','mysql'))}
@@ -2132,6 +2138,7 @@ def _conn_url(conn_data):
 def db_explore_get_databases(conn_data):
     try:
         db_type = conn_data.get("db_type", "mysql")
+        print(f"[get_databases] db_type={db_type}, user={conn_data.get('user','')}, host={conn_data.get('host','')}, db={conn_data.get('db','')}")
         engine = create_engine(_conn_url(conn_data), connect_args=_connect_args(conn_data.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
             if db_type in ('mysql', 'ob-mysql'):
@@ -2143,6 +2150,13 @@ def db_explore_get_databases(conn_data):
             elif db_type == 'oracle':
                 rows = c.execute(text("SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER")).fetchall()
                 databases = [r[0] for r in rows]
+                # ★ 确保当前用户的 schema 始终出现在列表中（即使暂时没有表），并排在首位
+                current_user = conn_data.get("user", "").upper()
+                if current_user:
+                    if current_user in databases:
+                        databases.remove(current_user)
+                    databases.insert(0, current_user)
+                print(f"[Oracle get_databases] user={conn_data.get('user','')!r}, current_user={current_user!r}, databases={databases[:5]}...")
             elif db_type == 'mssql':
                 rows = c.execute(text("SELECT name FROM sys.databases WHERE database_id>4 ORDER BY name")).fetchall()
                 databases = [r[0] for r in rows]
@@ -2198,12 +2212,15 @@ def db_explore_get_tables(conn_data, database, schema=''):
                 ), {"sch":sch}).fetchall()
                 tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":"","comment":r[3] or ""} for r in rows]
             elif db_type == 'oracle':
+                # ★ 调试：记录 Oracle 查表时使用的 database(schema) 参数
+                print(f"[Oracle get_tables] database={database!r}, user={cdata.get('user','')!r}")
                 rows = c.execute(text(
                     "SELECT t.TABLE_NAME, t.NUM_ROWS, "
                     "COALESCE((SELECT SUM(s.BYTES) FROM ALL_SEGMENTS s WHERE s.OWNER=t.OWNER AND s.SEGMENT_NAME=t.TABLE_NAME),0), "
                     "COALESCE((SELECT c.COMMENTS FROM ALL_TAB_COMMENTS c WHERE c.OWNER=t.OWNER AND c.TABLE_NAME=t.TABLE_NAME AND c.TABLE_TYPE='TABLE'),'') "
                     "FROM ALL_TABLES t WHERE t.OWNER=:db ORDER BY t.TABLE_NAME"
                 ), {"db":database}).fetchall()
+                print(f"[Oracle get_tables] found {len(rows)} tables for OWNER={database!r}")
                 tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
             elif db_type == 'mssql':
                 rows = c.execute(text(
@@ -4146,6 +4163,6 @@ if __name__ == "__main__":
         web_dir = "web"
     eel.init(web_dir)
     try:
-        eel.start("index.html", size=(1280, 860), port=0, cmdline_args=['--disable-dev-tools'])
+        eel.start("index.html", size=(1280, 860), port=0, cmdline_args=[])
     finally:
         _force_cleanup_and_exit()

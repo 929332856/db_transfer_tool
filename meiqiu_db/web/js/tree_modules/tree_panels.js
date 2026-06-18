@@ -162,7 +162,8 @@ function expandConn(cid, pad) {
         return;
     }
     eel.db_explore_get_databases(conn)(function (r) {
-        if (!r || !r.ok) { children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌</div>'; return; }
+        console.log('[expandConn] db_explore_get_databases callback:', JSON.stringify(r).substring(0, 200));
+        if (!r || !r.ok) { children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'无响应')+'</div>'; return; }
         var html = '';
         var dbs = r.databases || [];
         // Oracle：直接平铺分类，省去 DB/SCHEMA 文件夹层级
