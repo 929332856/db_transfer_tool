@@ -1,4 +1,11 @@
 // ==================== 设计器交互函数 ====================
+
+// ★ 多 Tab 支持：设计数据按 tabId 存储，不再使用全局单例 _tableDesign
+window._tableDesigns = window._tableDesigns || {};
+function _getDesignDS() {
+    return window._tableDesigns[activeObjTab] || window._tableDesign || null;
+}
+
 function designSwitchTab(tab) {
     document.querySelectorAll('.designer-subtab').forEach(function(b) { b.classList.remove('active'); });
     document.querySelectorAll('.designer-pane').forEach(function(p) { p.classList.remove('active'); });
@@ -12,7 +19,7 @@ function designSwitchTab(tab) {
 
 // 把当前表单里的字段数据保存回 ds.design.columns（防新增时清空已填内容）
 function collectFieldsToDesign() {
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     var rows = document.querySelectorAll('#design_fields_table tbody tr');
     for (var i = 0; i < rows.length && i < ds.design.columns.length; i++) {
@@ -39,7 +46,7 @@ function collectFieldsToDesign() {
 
 function designAddField() {
     collectFieldsToDesign();
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     ds.design.columns.push({name:'new_field', data_type:'VARCHAR', col_type:'VARCHAR(255)', length:'255', nullable:true, default_val:null, auto_increment:false, comment:''});
     rebuildFieldsTable();
@@ -47,7 +54,7 @@ function designAddField() {
 
 function designInsertField(pos) {
     collectFieldsToDesign();
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     ds.design.columns.splice(pos < 0 ? 0 : pos, 0, {name:'new_field', data_type:'VARCHAR', col_type:'VARCHAR(255)', length:'255', nullable:true, default_val:null, auto_increment:false, comment:''});
     rebuildFieldsTable();
@@ -55,7 +62,7 @@ function designInsertField(pos) {
 
 function designRemoveField(row) {
     collectFieldsToDesign();
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     if (ds.design.columns.length <= 1) { showWarnDialog('提示', '至少保留一个字段'); return; }
     ds.design.columns.splice(row, 1);
@@ -63,7 +70,7 @@ function designRemoveField(row) {
 }
 
 function rebuildFieldsTable() {
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     var dataTypes = ['INT', 'BIGINT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'FLOAT', 'DOUBLE', 'DECIMAL',
         'VARCHAR', 'CHAR', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT', 'TINYTEXT',
@@ -79,7 +86,7 @@ function rebuildFieldsTable() {
 
 // 把当前索引表单数据保存回 ds.design.indexes
 function collectIndexesToDesign() {
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     var idxNames = document.querySelectorAll('.idx-name');
     var idxTypes = document.querySelectorAll('.idx-type');
@@ -96,7 +103,7 @@ function collectIndexesToDesign() {
 function designAddIndex() {
     collectFieldsToDesign();
     collectIndexesToDesign();
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     var idxName = 'idx_' + ds.design.columns[0].name;
     ds.design.indexes.push({name: idxName, type: 'INDEX', columns: [ds.design.columns[0].name], method: 'BTREE'});
@@ -107,7 +114,7 @@ function designAddIndex() {
 function designRemoveIndex(j) {
     collectFieldsToDesign();
     collectIndexesToDesign();
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     ds.design.indexes.splice(j, 1);
     buildDesignerUI(ds.tabId, ds.tn, ds.design);
@@ -116,7 +123,7 @@ function designRemoveIndex(j) {
 
 // 收集表单数据到 design 对象
 function designCollect() {
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return null;
     var d = JSON.parse(JSON.stringify(ds.design));
 
@@ -147,16 +154,21 @@ function designCollect() {
         });
     }
 
-    // 收集索引数据
+    // ★ 收集索引数据：完全从表单重建，不依赖 ds.design.indexes（防止多 Tab 串数据）
     var idxNames = document.querySelectorAll('.idx-name');
     var idxTypes = document.querySelectorAll('.idx-type');
     var idxCols = document.querySelectorAll('.idx-cols');
     var idxMethods = document.querySelectorAll('.idx-method');
-    for (var j = 0; j < idxNames.length && j < d.indexes.length; j++) {
-        d.indexes[j].name = idxNames[j].value.trim();
-        d.indexes[j].type = idxTypes[j].value;
-        d.indexes[j].columns = idxCols[j].value.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
-        d.indexes[j].method = idxMethods[j].value;
+    d.indexes = [];
+    for (var j = 0; j < idxNames.length; j++) {
+        var idxType = idxTypes[j] ? idxTypes[j].value : 'INDEX';
+        var colsStr = idxCols[j] ? idxCols[j].value : '';
+        d.indexes.push({
+            name: idxNames[j].value.trim(),
+            type: idxType,
+            columns: colsStr.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s; }),
+            method: (idxMethods[j] ? idxMethods[j].value : 'BTREE')
+        });
     }
 
     // 收集表属性
@@ -170,23 +182,42 @@ function designCollect() {
     return d;
 }
 
+// ★ 设计保存取消标记（防止取消后回调仍弹窗）
+var _designSaveCancel = false;
+
 function designSave() {
     collectFieldsToDesign();
     collectIndexesToDesign();
-    var ds = window._tableDesign;
-    if (!ds) return;
+    var ds = _getDesignDS();
+    if (!ds) {
+        showWarnDialog('提示', '未找到表设计数据，请重新打开设计 Tab');
+        return;
+    }
+    // ★ 安全校验：当前激活的 Tab 必须是该设计的 Tab，防止多 Tab 时点错
+    if (activeObjTab !== ds.tabId) {
+        showWarnDialog('提示', '设计数据与当前Tab不匹配，请切换到正确的设计Tab或重新打开');
+        return;
+    }
     var design = designCollect();
     if (!design) return;
+
+    // ★ 捕获当前 tabId，防止异步回调期间用户切换 Tab 导致串数据
+    var _capturedTabId = ds.tabId;
+
+    // ★ 重置取消标记
+    _designSaveCancel = false;
 
     // 先预览 SQL
     document.getElementById('modal_icon').innerHTML = '🔍';
     document.getElementById('modal_title').textContent = '预览变更 SQL';
     document.getElementById('modal_title').style.color = '#2980b9';
     document.getElementById('modal_msg').innerHTML = '<div style="color:#888;padding:20px;text-align:center;">⏳ 正在生成 SQL...</div>';
-    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">取消</button>';
+    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="_designSaveCancel=true;eel.cancel_query()();hideModal()">取消</button>';
     document.getElementById('modal_overlay').classList.add('show');
 
     eel.table_apply_design(ds.conn, ds.db, ds.tn, design, ds.schema, false)(function(r) {
+        // ★ 用户已取消，不再继续
+        if (_designSaveCancel) { hideModal(); return; }
         if (!r || !r.ok) {
             document.getElementById('modal_overlay').classList.remove('show');
             showErrorDialog('生成失败', r ? r.msg : '未知错误');
@@ -211,23 +242,33 @@ function designSave() {
             '<div style="max-height:300px;overflow-y:auto;margin-bottom:8px;">' + sqlHtml + '</div>' +
             '<div style="font-size:11px;color:#e74c3c;">共 ' + sqls.length + ' 条 SQL，确认后将直接修改表结构</div>';
         document.getElementById('modal_btns').innerHTML =
-            '<button class="btn btn-gray" onclick="hideModal()">取消</button>' +
+            '<button class="btn btn-gray" onclick="_designSaveCancel=true;hideModal()">取消</button>' +
             '<button class="btn btn-red" id="modal_exec_btn">执行</button>';
         document.getElementById('modal_exec_btn').onclick = function() {
             hideModal();
+            // ★ 重置取消标记（执行阶段新操作）
+            _designSaveCancel = false;
             // 显示执行进度
             document.getElementById('modal_icon').innerHTML = '⏳';
             document.getElementById('modal_title').textContent = '执行中...';
             document.getElementById('modal_title').style.color = '#f39c12';
             document.getElementById('modal_msg').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">正在应用表设计修改...</div>';
-            document.getElementById('modal_btns').innerHTML = '';
+            document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" style="margin-top:8px;font-size:10px;" onclick="_designSaveCancel=true;eel.cancel_query()();hideModal()">⏹ 取消执行</button>';
             document.getElementById('modal_overlay').classList.add('show');
 
             eel.table_apply_design(ds.conn, ds.db, ds.tn, design, ds.schema, true)(function(r2) {
+                // ★ 用户已取消执行，不再弹窗
+                if (_designSaveCancel) { hideModal(); return; }
                 document.getElementById('modal_overlay').classList.remove('show');
                 if (r2 && r2.ok) {
                     showOkDialog('成功', r2.msg);
-                    setTimeout(function() { designRefresh(); }, 300);
+                    // ★ 用捕获的 tabId 刷新正确的设计 Tab
+                    setTimeout(function() {
+                        var ds2 = window._tableDesigns[_capturedTabId];
+                        if (ds2) {
+                            addTableDDLTab(ds2.tn, ds2.db, ds2.schema, ds2.cid);
+                        }
+                    }, 300);
                 } else {
                     showErrorDialog('失败', r2 ? r2.msg : '未知错误');
                 }
@@ -237,13 +278,13 @@ function designSave() {
 }
 
 function designRefresh() {
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     addTableDDLTab(ds.tn, ds.db, ds.schema, ds.cid);
 }
 
 function designViewDDL() {
-    var ds = window._tableDesign;
+    var ds = _getDesignDS();
     if (!ds) return;
     document.getElementById('modal_icon').innerHTML = '📄';
     document.getElementById('modal_title').textContent = '建表 SQL：' + ds.tn;

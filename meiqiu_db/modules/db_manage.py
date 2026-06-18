@@ -18,7 +18,9 @@ from modules.tree_manager import _load_tree, _save_tree
 @eel.expose
 def db_explore_get_views(conn_data, database, schema=''):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         db_type = cdata.get("db_type", "mysql")
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
@@ -40,7 +42,9 @@ def db_explore_get_views(conn_data, database, schema=''):
 @eel.expose
 def db_explore_get_procedures(conn_data, database, schema=''):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         db_type = cdata.get("db_type", "mysql")
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
@@ -62,18 +66,52 @@ def db_explore_get_procedures(conn_data, database, schema=''):
 @eel.expose
 def db_explore_get_triggers(conn_data, database):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
+        db_type = cdata.get("db_type", "mysql")
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as c:
-            rows = c.execute(text(f"SELECT TRIGGER_NAME,EVENT_MANIPULATION,EVENT_OBJECT_TABLE,ACTION_TIMING FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA=:db ORDER BY TRIGGER_NAME"), {"db":database}).fetchall()
+            if db_type == 'oracle':
+                rows = c.execute(text("SELECT TRIGGER_NAME FROM ALL_TRIGGERS WHERE OWNER=:db ORDER BY TRIGGER_NAME"), {"db":database}).fetchall()
+            elif db_type == 'postgresql':
+                rows = c.execute(text("SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema=:db ORDER BY trigger_name"), {"db":database}).fetchall()
+            else:
+                rows = c.execute(text("SELECT TRIGGER_NAME FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA=:db ORDER BY TRIGGER_NAME"), {"db":database}).fetchall()
         engine.dispose()
-        return {"ok": True, "triggers": [{"name":r[0],"event":r[1],"table":r[2],"timing":r[3]} for r in rows]}
+        return {"ok": True, "triggers": [{"name":r[0]} for r in rows]}
     except Exception as e: return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
+
+@eel.expose
+def db_explore_get_objlist(conn_data, database, cat):
+    """Oracle 特有对象列表（索引/序列/同义词/包/物化视图）"""
+    try:
+        cdata = dict(conn_data)
+        # ★ Oracle: db 必须是 service_name，不能用 schema 名覆盖
+        cdata["db"] = conn_data.get("db", database)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args('oracle', timeout=10))
+        queries = {
+            'indexes': "SELECT INDEX_NAME FROM ALL_INDEXES WHERE OWNER=:db ORDER BY INDEX_NAME",
+            'sequences': "SELECT SEQUENCE_NAME FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER=:db ORDER BY SEQUENCE_NAME",
+            'synonyms': "SELECT SYNONYM_NAME FROM ALL_SYNONYMS WHERE OWNER=:db ORDER BY SYNONYM_NAME",
+            'packages': "SELECT OBJECT_NAME FROM ALL_OBJECTS WHERE OWNER=:db AND OBJECT_TYPE='PACKAGE' ORDER BY OBJECT_NAME",
+            'mviews': "SELECT MVIEW_NAME FROM ALL_MVIEWS WHERE OWNER=:db ORDER BY MVIEW_NAME",
+        }
+        if cat not in queries:
+            engine.dispose()
+            return {"ok": True, "items": []}
+        with engine.connect() as c:
+            rows = c.execute(text(queries[cat]), {"db": database}).fetchall()
+        engine.dispose()
+        return {"ok": True, "items": [{"name": r[0]} for r in rows]}
+    except Exception as e: return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type', 'mysql'))}
 
 @eel.expose
 def db_explore_get_table_ddl(conn_data, database, table_name):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c: row = c.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
         engine.dispose()
@@ -86,7 +124,8 @@ def db_get_info(conn_data, database):
     """获取数据库信息（字符集、排序规则）"""
     try:
         cdata = dict(conn_data); db_type = cdata.get('db_type', 'mysql')
-        cdata["db"] = database
+        if db_type != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
             if db_type in ('mysql', 'ob-mysql'):
@@ -108,7 +147,7 @@ def db_delete(conn_data, database):
     """删除数据库"""
     try:
         cdata = dict(conn_data); db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',): cdata["db"] = database
+        if db_type not in ('postgresql', 'oracle'): cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.begin() as conn:
             if db_type in ('mysql', 'ob-mysql'):
@@ -147,8 +186,10 @@ def db_run_sql_file(conn_data, database, file_path, content=''):
 
     def _run():
         try:
-            cdata = dict(conn_data); cdata["db"] = database
+            cdata = dict(conn_data)
             db_type = cdata.get('db_type', 'mysql')
+            if db_type != 'oracle':
+                cdata["db"] = database
             engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
             if content:
                 sql_content = content
@@ -196,7 +237,8 @@ def db_get_collations(conn_data, database):
     """获取可用排序规则"""
     try:
         cdata = dict(conn_data); db_type = cdata.get('db_type', 'mysql')
-        cdata["db"] = database
+        if db_type != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
             if db_type in ('mysql', 'ob-mysql'):

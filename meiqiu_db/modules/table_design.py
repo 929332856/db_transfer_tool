@@ -3,6 +3,7 @@
 """
 import eel
 from sqlalchemy import text, create_engine
+from modules import _query_cancel
 from modules.conn_utils import _connect_args, _conn_url, _safe_ident, _build_table_ref, _friendly_error
 
 @eel.expose
@@ -12,7 +13,7 @@ def table_get_design_info(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
 
@@ -120,7 +121,7 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         tbl = _build_table_ref(cdata, database, table_name)
@@ -131,6 +132,11 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
             indexes = design.get("indexes", [])
             foreign_keys = design.get("foreign_keys", [])
             table_options = design.get("table_options", {})
+
+            # ★ 检查取消标记（在可能耗时的 INFORMATION_SCHEMA 查询前）
+            if _query_cancel.is_set():
+                engine.dispose()
+                return {"ok": False, "msg": "操作已取消", "cancelled": True}
 
             # 获取数据库中现有列名 + 索引详情 + 表属性（用于 diff）
             with engine.connect() as curconn:
@@ -189,6 +195,13 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
             # ===== 三阶段 ALTER TABLE：先删索引 → 再改列 → 最后加索引 =====
             new_col_names = set(col.get("name", "") for col in columns)
             dropped_col_names = set(n for n in existing_detail if n not in new_col_names)
+
+            # ★ 安全校验：如果所有列都不匹配（设计数据显然来自另一张表），拒绝执行
+            common_cols = new_col_names & set(existing_detail.keys())
+            if not common_cols and dropped_col_names and new_col_names:
+                engine.dispose()
+                wrong_tn_hint = f"设计数据中的列 [{', '.join(sorted(list(new_col_names))[:5])}{'...' if len(new_col_names) > 5 else ''}] 与表 [{table_name}] 的实际列 [{', '.join(sorted(list(existing_detail.keys()))[:5])}{'...' if len(existing_detail) > 5 else ''}] 完全不匹配。可能原因：打开了多个设计Tab导致数据串扰，请关闭并重新打开该表的设计Tab后再试。"
+                return {"ok": False, "msg": wrong_tn_hint}
 
             pre_parts = []   # 阶段1：删除索引
             mid_parts = []   # 阶段2：列操作 + 主键
@@ -335,6 +348,10 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
         if execute:
             with engine.begin() as conn:
                 for sql in sqls:
+                    # ★ 每条 SQL 执行前检查取消标记
+                    if _query_cancel.is_set():
+                        engine.dispose()
+                        return {"ok": False, "msg": "操作已取消，部分 SQL 可能已执行", "cancelled": True}
                     conn.execute(text(sql))
             engine.dispose()
             return {"ok": True, "msg": f"表 [{table_name}] 设计已更新"}
@@ -349,7 +366,7 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
 def table_truncate(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') != 'postgresql': cdata["db"] = database
+        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         sql = f"TRUNCATE TABLE {tbl}"
@@ -363,7 +380,7 @@ def table_truncate(conn_data, database, table_name, schema=''):
 def table_delete(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') != 'postgresql': cdata["db"] = database
+        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         sql = f"DROP TABLE {tbl}"

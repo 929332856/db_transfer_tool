@@ -78,9 +78,14 @@ def _conn_url(conn_data):
         base = f"postgresql+psycopg2://{u}:{p}@{h}:{port}"
         return f"{base}/{db}" if db else base
     elif db_type == 'oracle':
-        sid = conn_data.get("sid", db)
+        ora_mode = conn_data.get("ora_mode", "service_name")
         base = f"oracle+oracledb://{u}:{p}@{h}:{port}"
-        return f"{base}/{sid}" if sid else base
+        if db:
+            if ora_mode == "sid":
+                return f"{base}/?sid={db}"
+            else:
+                return f"{base}/?service_name={db}"
+        return base
     elif db_type == 'mssql':
         base = f"mssql+pymssql://{u}:{p}@{h}:{port}"
         return f"{base}/{db}" if db else base
@@ -101,8 +106,13 @@ def db_explore_get_databases(conn_data):
                 rows = c.execute(text("SELECT datname FROM pg_database WHERE datistemplate=false ORDER BY datname")).fetchall()
                 databases = [r[0] for r in rows]
             elif db_type == 'oracle':
-                rows = c.execute(text("SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER")).fetchall()
+                # 从 ALL_USERS 获取所有可见用户（不局限于有表的用户）
+                rows = c.execute(text("SELECT USERNAME FROM ALL_USERS ORDER BY USERNAME")).fetchall()
                 databases = [r[0] for r in rows]
+                # 确保当前登录用户一定在列表中
+                cur_user = c.execute(text("SELECT USER FROM DUAL")).fetchone()[0]
+                if cur_user and cur_user not in databases:
+                    databases.insert(0, cur_user)
             elif db_type == 'mssql':
                 rows = c.execute(text("SELECT name FROM sys.databases WHERE database_id>4 ORDER BY name")).fetchall()
                 databases = [r[0] for r in rows]
@@ -117,7 +127,9 @@ def db_explore_get_databases(conn_data):
 def db_explore_get_schemas(conn_data, database):
     """PostgreSQL: 获取数据库下的 schema 列表"""
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
             rows = c.execute(text("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name")).fetchall()
@@ -137,7 +149,9 @@ def _format_size(size_bytes):
 @eel.expose
 def db_explore_get_tables(conn_data, database, schema=''):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         db_type = cdata.get("db_type", "mysql")
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:

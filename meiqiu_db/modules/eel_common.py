@@ -294,12 +294,26 @@ def execute_sql_file(sql: str, data: dict):
 def clear_cancel():
     """清除取消标记（新操作开始前调用）"""
     _query_cancel.clear()
+    # ★ 同时清除主模块的取消标记
+    try:
+        import __main__
+        if hasattr(__main__, '_query_cancel'):
+            __main__._query_cancel.clear()
+    except Exception:
+        pass
     return True
 
 @eel.expose
 def cancel_query():
     """取消所有查询 — 设置全局取消标记"""
     _query_cancel.set()
+    # ★ 同时设置主模块的取消标记（确保主模块函数也能感知到）
+    try:
+        import __main__
+        if hasattr(__main__, '_query_cancel'):
+            __main__._query_cancel.set()
+    except Exception:
+        pass
     return True
 
 

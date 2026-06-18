@@ -39,7 +39,7 @@ var activeConnData = null;
 var activeDatabase = null;
 var objectTabs = [];
 var activeObjTab = null;
-var activeCatId = null;   // 当前高亮的分类行 ID  （如 'cat_t_' + dbKey）
+var activeCatId = null;   // 当前高亮的分类行 ID  （如 'cat_tables_' + dbKey）
 var _redisKeysCache = {};  // Redis keys 缓存 {dbId: {keys, total, cid, dbIdx}}
 var _redisPanelCtx = null; // 当前右侧面板是否在展示 Redis keys {cid, dbIdx, dbId}
 

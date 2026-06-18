@@ -23,7 +23,7 @@ def export_wizard_get_tables(conn_data, database, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         tables = db_explore_get_tables(cdata, database, schema or '')
@@ -41,7 +41,7 @@ def export_wizard_get_columns(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
@@ -291,7 +291,7 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
         try:
             cdata = dict(conn_data)
             db_type = cdata.get('db_type', 'mysql')
-            if db_type not in ('postgresql',):
+            if db_type not in ('postgresql', 'oracle'):
                 cdata["db"] = database
             engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
 

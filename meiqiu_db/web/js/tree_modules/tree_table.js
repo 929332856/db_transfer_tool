@@ -162,14 +162,80 @@ function updateWhereCount(tid, filteredCount, totalCount) {
 function addTableDataTab(tn, db, schema, cid) {
     var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
     var sch = schema || '';
+    // ★ 防御：连接信息为空时直接报错
+    if (!conn || !conn.host) {
+        addOrUpdateTab('data_'+tn, tn, 'data', '<div style="padding:20px;color:#e74c3c;">❌ 未找到连接信息，请先在左侧树中选择数据库后再试</div>');
+        return;
+    }
     // ★ 大表优化：首次打开只取 50 行（快速预览），点"加载全部"再全量查询
     addOrUpdateTab('data_'+tn, tn, 'data', '<div style="padding:20px;color:#999;">⏳ 正在加载数据（前50行）...</div>');
     
-    eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, '', '')(function(r){
-        if(!r||!r.ok){addOrUpdateTab('data_'+tn,tn,'data','<div style="padding:20px;color:#e74c3c;">❌ '+(r?r.msg:'')+'</div>');return;}
-        _buildTableDataUI(tn, conn, sch, r, db||activeDatabase);
-    });
+    try {
+        eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, '', '')(function(r){
+            if(!r||!r.ok){addOrUpdateTab('data_'+tn,tn,'data','<div style="padding:20px;color:#e74c3c;">❌ '+(r?r.msg:'')+'</div>');return;}
+            _buildTableDataUI(tn, conn, sch, r, db||activeDatabase);
+        });
+    } catch(e) {
+        addOrUpdateTab('data_'+tn, tn, 'data', '<div style="padding:20px;color:#e74c3c;">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>');
+    }
 }
+
+// ★ 判断列类型是否为长文本（TEXT 或 varchar(>500)），用于显示"展开"图标
+function _isLongTextType(colType) {
+    if (!colType) return false;
+    var lower = colType.toLowerCase();
+    // TEXT 及其变体（排除 tinytext 因为长度很短）
+    if (/\btext\b/.test(lower) && lower.indexOf('tinytext') === -1) return true;
+    // VARCHAR / CHAR / CHARACTER VARYING 长度超过 500
+    var m = lower.match(/(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)/i);
+    if (m && parseInt(m[1]) > 500) return true;
+    return false;
+}
+
+// ★ 弹出文本框显示完整长文本内容
+window._textPopupData = {};
+window._showTextPopup = function(uid) {
+    var data = window._textPopupData[uid];
+    if (!data) return;
+    var text = data.text || '';
+    var colName = data.col || '';
+
+    // 移除已存在的弹窗
+    var old = document.getElementById('text_popup_overlay');
+    if (old) old.remove();
+
+    var overlay = document.createElement('div');
+    overlay.id = 'text_popup_overlay';
+    overlay.className = 'text-popup-overlay';
+    overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+
+    var popup = document.createElement('div');
+    popup.className = 'text-popup-box';
+
+    var header = document.createElement('div');
+    header.className = 'text-popup-header';
+    header.innerHTML = '<span>📄 ' + escapeHtml(colName || '完整文本') + '</span>' +
+        '<span class="text-popup-close" onclick="document.getElementById(\'text_popup_overlay\').remove()">✕</span>';
+
+    var content = document.createElement('div');
+    content.className = 'text-popup-content';
+    // ★ 将 \\n（字面的反斜杠n）和实际换行符都展开为 <br>
+    var displayText = text
+        .replace(/\\\\n/g, '<br>')
+        .replace(/\\n/g, '<br>')
+        .replace(/\n/g, '<br>');
+    content.innerHTML = displayText || '<span style="color:#888;">（空文本）</span>';
+
+    var footer = document.createElement('div');
+    footer.className = 'text-popup-footer';
+    footer.textContent = '字符数: ' + text.length;
+
+    popup.appendChild(header);
+    popup.appendChild(content);
+    popup.appendChild(footer);
+    overlay.appendChild(popup);
+    document.body.appendChild(overlay);
+};
 
 /** 构建/更新表格数据 UI（加载全量数据，支持客户端分页） */
 function _buildTableDataUI(tn, conn, sch, r, db) {
@@ -194,6 +260,18 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
 
         // 列筛选器状态：{colIndex: filterText}
         var _colFilters = {};
+
+        // ★ 检测哪些列是长文本类型（TEXT / varchar(>500)），显示"展开"图标
+        var _longTextCols = {};
+        cols.forEach(function(c, ci) {
+            var ct = getCType(c);
+            if (ct && _isLongTextType(ct)) _longTextCols[ci] = true;
+        });
+
+        // ★ 数据库真实总行数（首次只加载50行，但DB可能有上万行）
+        var _totalCount = r.total_count || rows.length;
+        // ★ 是否已加载全部数据
+        var _allLoaded = (!r.fast) || (_totalCount <= rows.length);
 
         function buildTh() {
             var h = '<tr><th class="row-sel-header" id="'+tid+'_sel_all" onclick="window[\'_toggleSelAll_'+tid+'\']()" title="全选/取消全选">#</th>';
@@ -301,12 +379,30 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                     'title="左键选择/取消选择行 | 右键菜单">'+(origIdx+1)+'</td>';
                 row.forEach(function(v,ci){
                     var val = v===null ? 'NULL' : String(v);
-                    h += '<td><input class="editable-cell" data-ri="'+ri+'" data-ci="'+ci+'" data-col="'+escapeAttr(cols[ci])+'" ' +
-                        'value="'+escapeAttr(val)+'" ' +
-                        'onfocus="this._oldVal=this.value" ' +
-                        'onchange="window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)" ' +
-                        'onblur="if(this.value!==this._oldVal){window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)}" ' +
-                        'spellcheck="false" autocomplete="off"></td>';
+                    var isLongText = _longTextCols[ci];
+                    if (isLongText) {
+                        var uid = tid + '_txt_' + origIdx + '_' + ci;
+                        // ★ 把文本存到全局对象，避免内联 JS 的转义问题
+                        window._textPopupData[uid] = { text: val, col: cols[ci] };
+                        h += '<td class="cell-with-icon">' +
+                            '<input class="editable-cell" data-ri="'+ri+'" data-ci="'+ci+'" data-col="'+escapeAttr(cols[ci])+'" ' +
+                            'value="'+escapeAttr(val)+'" ' +
+                            'onfocus="this._oldVal=this.value" ' +
+                            'onchange="window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)" ' +
+                            'onblur="if(this.value!==this._oldVal){window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)}" ' +
+                            'spellcheck="false" autocomplete="off">' +
+                            '<span class="text-expand-icon" data-uid="'+uid+'" ' +
+                            'onclick="event.stopPropagation();window._showTextPopup(\''+uid+'\')" ' +
+                            'title="查看完整文本">📄</span>' +
+                            '</td>';
+                    } else {
+                        h += '<td><input class="editable-cell" data-ri="'+ri+'" data-ci="'+ci+'" data-col="'+escapeAttr(cols[ci])+'" ' +
+                            'value="'+escapeAttr(val)+'" ' +
+                            'onfocus="this._oldVal=this.value" ' +
+                            'onchange="window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)" ' +
+                            'onblur="if(this.value!==this._oldVal){window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)}" ' +
+                            'spellcheck="false" autocomplete="off"></td>';
+                    }
                 });
                 h += '</tr>';
             });
@@ -688,17 +784,21 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                 allFiltered = f.filtered;
                 allIndices = f.indices;
             }
-            var total = allFiltered.length;
+            var loadedTotal = allFiltered.length;
+            // ★ 有 WHERE 筛选时用实际筛选结果；无筛选时用 DB 真实总数（支持服务端分页）
+            var st = _whereStates[tid];
+            var hasWhere = st && st.whereFn;
+            var displayTotal = (!_allLoaded && !hasWhere) ? Math.max(_totalCount, loadedTotal) : loadedTotal;
             if (_pageSize <= 0) {
                 // 全部
-                return { rows: allFiltered, indices: allIndices, total: total, offset: 0, pageSize: total };
+                return { rows: allFiltered, indices: allIndices, total: displayTotal, offset: 0, pageSize: displayTotal };
             }
             var start = _pageOffset;
-            var end = Math.min(start + _pageSize, total);
+            var end = Math.min(start + _pageSize, displayTotal);
             return {
-                rows: allFiltered.slice(start, end),
-                indices: allIndices.slice(start, end),
-                total: total,
+                rows: allFiltered.slice(start, Math.min(end, loadedTotal)),
+                indices: allIndices.slice(start, Math.min(end, loadedTotal)),
+                total: displayTotal,
                 offset: start,
                 pageSize: _pageSize
             };
@@ -721,11 +821,13 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
         }
 
         var _lastGoPageTs = 0; // ★ 防抖时间戳，防止重复绑定导致一次点击触发多次 goPage
+        var _pageLoading = false; // ★ 防止并发翻页请求
         function goPage(dir) {
             // ★ 防抖：重复绑定会让一次 click 触发多次 goPage（offset 跳两页），120ms 内忽略后续调用
             var now = Date.now();
             if (now - _lastGoPageTs < 120) return;
             _lastGoPageTs = now;
+            if (_pageLoading) return; // 正在加载中，忽略
             // ★ 先从 select 同步 pageSize，避免闭包 _pageSize 与 UI 不一致
             var psizeEl = document.getElementById(tid+'_psize');
             if (psizeEl) _pageSize = parseInt(psizeEl.value) || 50;
@@ -733,47 +835,202 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
             var newOffset = pg.offset + dir * _pageSize;
             if (newOffset < 0) newOffset = 0;
             if (pg.total > 0 && newOffset >= pg.total) newOffset = Math.max(0, pg.total - _pageSize);
+
+            // ★ 检查目标页数据是否已加载：如果没加载完且目标偏移超出已加载范围
+            var neededEnd = newOffset + _pageSize;
+            var loadedCount = (_colFilteredPairs ? _colFilteredPairs.length : (getFilteredRows(tid).filtered || []).length);
+            if (neededEnd > loadedCount && !_allLoaded && _totalCount > loadedCount) {
+                _pageOffset = newOffset;
+                _fetchPageFromServer(newOffset, _pageSize);
+                return;
+            }
+
             _pageOffset = newOffset;
             render();
         }
 
+        function _fetchPageFromServer(offset, limit) {
+            _pageLoading = true;
+            var wrap = document.getElementById(tid);
+            if (wrap) { wrap.style.opacity = '0.6'; wrap.style.pointerEvents = 'none'; }
+            var infoEl = document.getElementById(tid + '_pager_info');
+            if (infoEl) infoEl.textContent = '⏳ 加载第 ' + (Math.floor(offset/Math.max(limit,1))+1) + ' 页...';
+            var orderCol = sortRef.col >= 0 ? cols[sortRef.col] : '';
+            var orderDir = sortRef.dir === 1 ? 'asc' : 'desc';
+            eel.table_load_page(conn, _connDb, _connTn, _connSch, offset, limit, orderCol, orderDir)(function(rp){
+                _pageLoading = false;
+                if (wrap) { wrap.style.opacity = '1'; wrap.style.pointerEvents = ''; }
+                if (!rp || !rp.ok) { if (infoEl) infoEl.textContent = '加载失败'; return; }
+                if (rp.total_count) _totalCount = rp.total_count;
+                var newRows = rp.rows || [];
+                // ★ offset=0 时替换（切 pageSize 从0重新拉），否则追加
+                if (offset === 0) {
+                    rows = newRows;
+                } else if (offset >= rows.length) {
+                    rows = rows.concat(newRows);
+                }
+                if (rows.length >= _totalCount) _allLoaded = true;
+                var st = _whereStates[tid];
+                if (st) { st.rows = rows; st.filteredCache = null; st.fcCount = null; }
+                render();
+                updatePagerInfo();
+            });
+        }
+
         function changePageSize() {
-            _pageSize = parseInt((document.getElementById(tid+'_psize')||{}).value) || 50;
+            var newSize = parseInt((document.getElementById(tid+'_psize')||{}).value) || 50;
+            // ★ 切 pageSize 时如果新页大小超出已加载行数，从服务端拉取
+            if (newSize > rows.length && !_allLoaded && _totalCount > rows.length) {
+                _pageSize = newSize;
+                _pageOffset = 0;
+                _fetchPageFromServer(0, newSize);
+                return;
+            }
+            _pageSize = newSize;
             _pageOffset = 0;
             render();
         }
 
         function showAllRows() {
-            _pageSize = 0; // 0 表示全部
-            _pageOffset = 0;
-            render();
+            if (_allLoaded) {
+                _pageSize = 0;
+                _pageOffset = 0;
+                render();
+                return;
+            }
+            // ★ 显示全量加载遮罩（带取消按钮）
+            _showFullLoadOverlay();
+        }
+
+        // ★ 全量加载遮罩 + 取消按钮
+        function _showFullLoadOverlay() {
+            // 移除旧遮罩
+            _hideFullLoadOverlay();
+            var wrap = document.getElementById(tid);
+            if (!wrap) return;
+            var overlay = document.createElement('div');
+            overlay.id = tid + '_fullload_overlay';
+            overlay.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;' +
+                'background:rgba(255,255,255,0.85);z-index:100;display:flex;' +
+                'flex-direction:column;align-items:center;justify-content:center;gap:12px;' +
+                'border-radius:6px;min-height:120px;';
+            overlay.innerHTML = '<div style="font-size:28px;animation:spin 1s linear infinite;">⏳</div>' +
+                '<div style="color:#333;font-size:14px;">正在加载全部数据...</div>' +
+                '<button id="' + tid + '_cancel_load_btn" style="padding:6px 20px;border:1px solid #e74c3c;' +
+                'border-radius:4px;background:#fff;color:#e74c3c;cursor:pointer;font-size:12px;">✕ 取消加载</button>';
+            wrap.style.position = 'relative';
+            wrap.appendChild(overlay);
+            // 绑定取消按钮
+            setTimeout(function(){
+                var btn = document.getElementById(tid + '_cancel_load_btn');
+                if (btn) btn.onclick = function() {
+                    eel.cancel_query()();
+                    _hideFullLoadOverlay();
+                    var infoEl = document.getElementById(tid + '_pager_info');
+                    if (infoEl) infoEl.textContent = '⏸ 加载已取消';
+                };
+            }, 50);
+            // 发起全量查询
+            var orderCol = sortRef.col >= 0 ? cols[sortRef.col] : '';
+            var orderDir = sortRef.dir === 1 ? 'asc' : 'desc';
+            eel.table_preview_data(conn, _connDb, _connTn, _connSch, orderCol, orderDir)(function(rf){
+                _hideFullLoadOverlay();
+                if (!rf || !rf.ok) {
+                    if (rf && rf.cancelled) {
+                        var ie2 = document.getElementById(tid + '_pager_info');
+                        if (ie2) ie2.textContent = '⏸ 加载已取消';
+                        return;
+                    }
+                    showErrorDialog('加载失败', rf ? rf.msg : '未知错误');
+                    return;
+                }
+                rows = rf.rows || [];
+                comments = rf.comments || {};
+                colTypes = rf.col_types || {};
+                _totalCount = rows.length;
+                _allLoaded = true;
+                _pageSize = 0;
+                _pageOffset = 0;
+                _selectedRows = {};
+                _lastClickedIdx = -1;
+                _changedCells = {};
+                _editing = false;
+                _colFilteredPairs = null;
+                _colFilters = {};
+                _activeFilterCol = -1;
+                var st2 = _whereStates[tid];
+                if (st2) { st2.rows = rows; st2.filteredCache = null; st2.fcCount = null; }
+                updateFilterIcons();
+                render();
+                updateDeleteBtn();
+                updateSaveBtn();
+                var ie3 = document.getElementById(tid + '_pager_info');
+                if (ie3) ie3.textContent = '共 ' + rows.length + ' 行（全部已加载）';
+            });
+        }
+        function _hideFullLoadOverlay() {
+            var ov = document.getElementById(tid + '_fullload_overlay');
+            if (ov) ov.remove();
         }
 
         window['_goPage_'+tid] = goPage;
         window['_changePageSize_'+tid] = changePageSize;
         window['_showAllRows_'+tid] = showAllRows;
 
-        // ★ 刷新按钮：重新从数据库加载数据
+        // ★ 刷新按钮：重新从数据库加载数据（只取前50行，支持取消）
         function refreshTableData() {
             var st7 = _whereStates[tid];
             // 保存当前排序状态用于刷新后恢复
             var sortCol = sortRef.col >= 0 ? cols[sortRef.col] : '';
             var sortDir = sortRef.dir === 1 ? 'asc' : 'desc';
-            // 显示加载状态
+            // ★ 显示刷新遮罩（带取消按钮）
+            _hideFullLoadOverlay();
             var wrap = document.getElementById(tid);
-            if (wrap) {
-                wrap.style.opacity = '0.6';
-                wrap.style.pointerEvents = 'none';
+            if (!wrap) return;
+            var overlay = document.createElement('div');
+            overlay.id = tid + '_refresh_overlay';
+            overlay.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;' +
+                'background:rgba(0,0,0,0.5);z-index:100;display:flex;' +
+                'flex-direction:column;align-items:center;justify-content:center;gap:12px;' +
+                'border-radius:6px;min-height:120px;';
+            overlay.innerHTML = '<div style="font-size:28px;animation:spin 1s linear infinite;">⏳</div>' +
+                '<div style="color:#ccc;font-size:14px;">正在刷新数据（前50行）...</div>' +
+                '<button id="' + tid + '_cancel_refresh_btn" style="padding:6px 20px;border:1px solid #e74c3c;' +
+                'border-radius:4px;background:rgba(255,255,255,0.1);color:#e74c3c;cursor:pointer;font-size:12px;">✕ 取消刷新</button>';
+            wrap.style.position = 'relative';
+            wrap.appendChild(overlay);
+            // ★ 绑定取消按钮
+            setTimeout(function(){
+                var btn = document.getElementById(tid + '_cancel_refresh_btn');
+                if (btn) btn.onclick = function() {
+                    eel.cancel_query()();
+                    _hideRefreshOverlay();
+                    var infoEl = document.getElementById(tid + '_pager_info');
+                    if (infoEl) infoEl.textContent = '⏸ 刷新已取消';
+                };
+            }, 50);
+
+            function _hideRefreshOverlay() {
+                var ov = document.getElementById(tid + '_refresh_overlay');
+                if (ov) ov.remove();
             }
-            eel.table_preview_data(conn, db||activeDatabase, tn, sch, sortCol, sortDir)(function(r3){
-                if (wrap) { wrap.style.opacity = '1'; wrap.style.pointerEvents = ''; }
+
+            eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, sortCol, sortDir)(function(r3){
+                _hideRefreshOverlay();
                 if (!r3 || !r3.ok) {
+                    if (r3 && r3.cancelled) {
+                        var ie2 = document.getElementById(tid + '_pager_info');
+                        if (ie2) ie2.textContent = '⏸ 刷新已取消';
+                        return;
+                    }
                     showErrorDialog('刷新失败', r3 ? r3.msg : '未知错误');
                     return;
                 }
                 rows = r3.rows || [];
                 comments = r3.comments || {};
                 colTypes = r3.col_types || {};
+                _totalCount = r3.total_count || rows.length;
+                _allLoaded = (!r3.fast) || (_totalCount <= rows.length);
                 // 清除编辑状态和选择状态
                 _selectedRows = {};
                 _lastClickedIdx = -1;
@@ -793,11 +1050,13 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                 updateFilterIcons();
                 // 重置分页到第一页
                 _pageOffset = 0;
+                _pageSize = 50;
                 // 重新渲染
                 render();
                 updateDeleteBtn();
                 updateSaveBtn();
                 updateFilterIcons();
+                updatePagerInfo();
                 // 刷新完成，不弹窗
             });
         }
@@ -885,6 +1144,9 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                     }
                     // 更新数据
                     rows = r2.rows;
+                    _totalCount = rows.length;
+                    _allLoaded = true;
+                    _pageSize = 50;
                     _origRows = rows.slice();
                     window['_origRows_' + tid] = _origRows;
                     var st5 = _whereStates[tid];
@@ -893,6 +1155,7 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                     _colFilteredPairs = null;
                     _pageOffset = 0;
                     render();
+                    updatePagerInfo();
                     // 更新表头
                     if (wrap2) {
                         var thead2 = wrap2.querySelector('thead');
@@ -1005,21 +1268,39 @@ function addTableDDLTab(tn, db, schema, cid) {
     var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
     var sch = schema || '';
     var tabId = 'ddl_' + tn;
+    // ★ 关键：立即捕获 db 值（禁止在回调里再用 activeDatabase 兜底，防止全局变量竞态）
+    var theDb = db || activeDatabase;
+    // ★ 防御：连接信息为空时直接报错，避免卡在"加载中"
+    if (!conn || !conn.host) {
+        addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 未找到连接信息，请先在左侧树中选择数据库后再试</div>');
+        return;
+    }
     addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#999;">⏳ 加载表设计...</div>');
 
-    eel.table_get_design_info(conn, db || activeDatabase, tn, sch)(function(r) {
-        try {
-            if (!r || !r.ok) {
-                addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ ' + (r ? escapeHtml(r.msg) : '加载失败，请检查连接') + '</div>');
-                return;
+    try {
+        eel.table_get_design_info(conn, theDb, tn, sch)(function(r) {
+            try {
+                if (!r || !r.ok) {
+                    addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ ' + (r ? escapeHtml(r.msg) : '加载失败，请检查连接') + '</div>');
+                    return;
+                }
+                var design = r.design || {columns:[], indexes:[], foreign_keys:[], table_options:{}};
+                // ★ 多 Tab 支持：按 tabId 存储设计数据，不再使用全局单例
+                window._tableDesigns = window._tableDesigns || {};
+                window._tableDesigns[tabId] = { conn: conn, db: theDb, tn: tn, schema: sch, cid: cid, design: design, tabId: tabId };
+                // 向后兼容：保留 _tableDesign 指向最后打开的（旧代码可能依赖）
+                if (activeObjTab === tabId) {
+                    window._tableDesign = window._tableDesigns[tabId];
+                }
+                buildDesignerUI(tabId, tn, design);
+            } catch(e) {
+                addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 渲染失败: ' + escapeHtml(String(e)) + '</div>');
             }
-            var design = r.design || {columns:[], indexes:[], foreign_keys:[], table_options:{}};
-            window._tableDesign = { conn: conn, db: db || activeDatabase, tn: tn, schema: sch, cid: cid, design: design, tabId: tabId };
-            buildDesignerUI(tabId, tn, design);
-        } catch(e) {
-            addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 渲染失败: ' + escapeHtml(String(e)) + '</div>');
-        }
-    });
+        });
+    } catch(e) {
+        // ★ eel 调用本身抛异常（如函数未注册等）
+        addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>');
+    }
 }
 
 function buildDesignerUI(tabId, tn, design) {

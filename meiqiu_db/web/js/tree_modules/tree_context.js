@@ -287,7 +287,7 @@ function qLabelCtx(e, cid, db, schema) {
 
 function expandCat(cat, cid, db, dbKey, pad, schema) {
     var sch = schema || '';
-    var rowId = 'cat_'+cat.charAt(0)+'_'+dbKey;
+    var rowId = 'cat_'+cat+'_'+dbKey;
     var el = document.getElementById(rowId);
     if (!el) return;
     // 检查已展开的 children
@@ -302,7 +302,8 @@ function expandCat(cat, cid, db, dbKey, pad, schema) {
             var conn = treeData.connections[cid];
             if (!conn) return;
             loadCategoryItems(conn, db, cat, function (items) {
-                var catIcon = cat==='tables'?'📊':cat==='views'?'👁':cat==='procedures'?'⚙':cat==='functions'?'𝑓':'📝';
+                var catIcons = {tables:'📊',views:'👁',mviews:'📋',indexes:'🔍',sequences:'🔢',synonyms:'🔗',functions:'𝑓',procedures:'⚙',packages:'📦',triggers:'⚡'};
+                var catIcon = catIcons[cat] || '📝';
                 var h = items.map(function (it) {
                     var n = it.name || it;
                     var qual = sch || db;  // PG 用 schema，其他用 db
@@ -318,7 +319,7 @@ function expandCat(cat, cid, db, dbKey, pad, schema) {
 
 // 通用刷新：刷新指定分类（表/视图/存储过程/函数/查询）
 function refreshCatItem(cat, cid, db, schema, dbKey, pad) {
-    var rowId = 'cat_'+cat.charAt(0)+'_'+dbKey;
+    var rowId = 'cat_'+cat+'_'+dbKey;
     var el = document.getElementById(rowId);
     if (!el) return;
     var children = el.nextElementSibling;
@@ -334,7 +335,8 @@ function refreshCatItem(cat, cid, db, schema, dbKey, pad) {
     var sch = schema || '';
     loadCategoryItems(conn, db, cat, function(items) {
         var itemPad = (pad||0) + 20;
-        var catIcon = cat==='tables'?'📊':cat==='views'?'👁':cat==='procedures'?'⚙':cat==='functions'?'𝑓':'📝';
+        var catIcons = {tables:'📊',views:'👁',mviews:'📋',indexes:'🔍',sequences:'🔢',synonyms:'🔗',functions:'𝑓',procedures:'⚙',packages:'📦',triggers:'⚡'};
+        var catIcon = catIcons[cat] || '📝';
         var h = items.map(function(it) {
             var n = it.name || it;
             var qual = sch || db;
@@ -365,12 +367,12 @@ function updateCatArrow(rowId, icon) {
 function refreshTableFolder(cid, db, schema) {
     var key = (schema||'') ? db + '/' + (schema||'') : db;
     var dbKey = safeBtoa(key);
-    var rowId = 'cat_t_' + dbKey;
+    var rowId = 'cat_tables_' + dbKey;
     var el = document.getElementById(rowId);
     if (!el) {
         // 回退：不用 schema 再试
         dbKey = safeBtoa(db);
-        rowId = 'cat_t_' + dbKey;
+        rowId = 'cat_tables_' + dbKey;
         el = document.getElementById(rowId);
     }
     if (!el) return;
@@ -385,7 +387,7 @@ function refreshTableFolder(cid, db, schema) {
 }
 
 function expandQueries(cid, dbKey, pad, db, schema) {
-    var rowId = 'cat_q_'+dbKey;
+    var rowId = 'cat_queries_'+dbKey;
     var el = document.getElementById(rowId);
     if (!el) return;
     var children = el.nextElementSibling;
@@ -409,7 +411,7 @@ function refreshQueriesTree(cid, db, schema) {
     var fullDb = schema ? db+'/'+schema : db;
     if (!cid || !fullDb) return;
     var dbKey = safeBtoa(fullDb);
-    var rowId = 'cat_q_' + dbKey;
+    var rowId = 'cat_queries_' + dbKey;
     var el = document.getElementById(rowId);
     if (!el) return;
     var children = el.nextElementSibling;

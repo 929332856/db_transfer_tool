@@ -118,6 +118,7 @@ function expandConn(cid, pad) {
 
     var isPg = conn.db_type === 'postgresql';
     var isRedis = conn.db_type === 'redis';
+    var isOra = conn.db_type === 'oracle';
     if (isRedis) {
         // Redis 连接展开 → 显示数据库列表（db0, db1, ...）
         children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#999;font-size:11px;">⏳ 加载数据库列表...</div>';
@@ -163,20 +164,30 @@ function expandConn(cid, pad) {
     eel.db_explore_get_databases(conn)(function (r) {
         if (!r || !r.ok) { children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌</div>'; return; }
         var html = '';
-        r.databases.forEach(function (db) {
-            var dbId = cid + '_db_' + safeBtoa(db);
-            var dropAttrs = ' ondragover="onDbDragOver(event,this)" ondragleave="onDbDragLeave(event,this)" ondrop="onDbDrop(event,this,\''+cid+'\',\''+escapeAttr(db)+'\')"';
-            var ctxAttr = ' oncontextmenu="dbCtx(event,\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\')"';
-            if (isPg) {
-                html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
-                    '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId+'\',\'ar_'+dbId+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db)+'</span></div>' +
-                    '<div class="tree-children" id="'+dbId+'"></div></div>';
-            } else {
-                html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
-                    '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId+'\',\'ar_'+dbId+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db)+'</span></div>' +
-                    '<div class="tree-children" id="'+dbId+'">' + renderDbCats(cid, db, pad+40) + '</div></div>';
+        var dbs = r.databases || [];
+        // Oracle：直接平铺分类，省去 DB/SCHEMA 文件夹层级
+        if (isOra) {
+            window._oraSchemas = dbs;
+            if (dbs.length > 0) {
+                activeDatabase = dbs[0];
+                html += renderOraCats(cid, dbs[0], pad+20);
             }
-        });
+        } else {
+            dbs.forEach(function (db) {
+                var dbId = cid + '_db_' + safeBtoa(db);
+                var dropAttrs = ' ondragover="onDbDragOver(event,this)" ondragleave="onDbDragLeave(event,this)" ondrop="onDbDrop(event,this,\''+cid+'\',\''+escapeAttr(db)+'\')"';
+                var ctxAttr = ' oncontextmenu="dbCtx(event,\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\')"';
+                if (isPg) {
+                    html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
+                        '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId+'\',\'ar_'+dbId+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db)+'</span></div>' +
+                        '<div class="tree-children" id="'+dbId+'"></div></div>';
+                } else {
+                    html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
+                        '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId+'\',\'ar_'+dbId+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db)+'</span></div>' +
+                        '<div class="tree-children" id="'+dbId+'">' + renderDbCats(cid, db, pad+40) + '</div></div>';
+                }
+            });
+        }
         children.innerHTML = html || '<div style="padding-left:'+(pad+20)+'px;color:#999;font-size:11px;">（无数据库）</div>';
     });
 }
@@ -193,9 +204,32 @@ function renderDbCats(cid, db, pad, schema) {
            catRow('queries','📝',cid,db,dbKey,p,'clickQueries','qLabelCtx',sch);
 }
 
+function renderOraCats(cid, db, pad) {
+    var dbKey = safeBtoa(db);
+    var p = pad + 16;
+    return catRow('tables',    '📊',cid,db,dbKey,p,'clickTableCat','tableCatCtx','') +
+           catRow('views',     '👁',cid,db,dbKey,p,'clickCat','','') +
+           catRow('mviews',    '📋',cid,db,dbKey,p,'clickCat','','') +
+           catRow('indexes',   '🔍',cid,db,dbKey,p,'clickCat','','') +
+           catRow('sequences', '🔢',cid,db,dbKey,p,'clickCat','','') +
+           catRow('synonyms',  '🔗',cid,db,dbKey,p,'clickCat','','') +
+           catRow('functions', '𝑓',cid,db,dbKey,p,'clickCat','','') +
+           catRow('procedures','⚙',cid,db,dbKey,p,'clickCat','','') +
+           catRow('packages',  '📦',cid,db,dbKey,p,'clickCat','','') +
+           catRow('triggers',  '⚡',cid,db,dbKey,p,'clickCat','','') +
+           catRow('queries',   '📝',cid,db,dbKey,p,'clickQueries','qLabelCtx','') +
+           oraUsersRow(cid, db, dbKey, p);
+}
+function oraUsersRow(cid, db, dbKey, pad) {
+    var rowId = 'cat_users_' + dbKey;
+    return '<div class="my-conn-row tree-subcat cat-row" id="'+rowId+'" style="padding-left:'+pad+'px" onclick="clickOraUsers(\''+cid+'\',\''+escapeAttr(db)+'\');highlightCat(\''+rowId+'\')">' +
+        '<span class="arrow" id="ar_'+rowId+'" onclick="event.stopPropagation();expandOraUsers(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbKey+'\','+(pad+16)+')">▸</span>' +
+        '👤 用户</div><div class="tree-children" id="'+rowId+'"></div>';
+}
+
 function catRow(cat, icon, cid, db, dbKey, pad, clickFn, ctxFn, schema) {
     var sch = schema || '';
-    var rowId = 'cat_'+cat.charAt(0)+'_'+dbKey;
+    var rowId = 'cat_'+cat+'_'+dbKey;
     var clickArgs = (cat==='tables') ? '\''+cid+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\''
         : (cat==='queries') ? '\''+cid+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\''
         : '\''+cid+'\',\''+escapeAttr(db)+'\',\''+cat+'\',\''+escapeAttr(sch)+'\'';
@@ -205,7 +239,8 @@ function catRow(cat, icon, cid, db, dbKey, pad, clickFn, ctxFn, schema) {
     var ctx = ctxFn ? ' oncontextmenu="'+ctxFn+'(event,\''+cid+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\')"' : '';
     var extraAttrs = (cat==='queries') ? ' data-cid="'+cid+'" data-db="'+escapeAttr(db)+'" data-pad="'+pad+'"' : '';
     // 所有分类加刷新按钮，仅表分类加拖放目标
-    var catLabel = cat==='tables'?'表':cat==='views'?'视图':cat==='procedures'?'存储过程':cat==='functions'?'函数':'查询';
+    var catNames = {tables:'表',views:'视图',mviews:'物化视图',indexes:'索引',sequences:'序列',synonyms:'同义词',functions:'函数',procedures:'存储过程',packages:'包',triggers:'触发器',queries:'查询'};
+    var catLabel = catNames[cat] || '查询';
     var refreshArgs = '\''+cat+'\',\''+cid+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+dbKey+'\','+pad;
     var refreshBtn = '<span class="cat-refresh" onclick="event.stopPropagation();refreshCatItem('+refreshArgs+')" title="刷新'+catLabel+'列表">🔄</span>';
     var dropAttrs = '';
@@ -214,7 +249,7 @@ function catRow(cat, icon, cid, db, dbKey, pad, clickFn, ctxFn, schema) {
     }
     return '<div class="my-conn-row tree-subcat cat-row" id="'+rowId+'" style="padding-left:'+pad+'px" onclick="'+clickFn+'('+clickArgs+');highlightCat(\''+rowId+'\')"'+ctx+dropAttrs+'>' +
         '<span class="arrow" id="ar_'+rowId+'" onclick="event.stopPropagation();'+expandFn+'('+expandArgs+')">▸</span>' +
-        icon+' ' + (cat==='tables'?'表':cat==='views'?'视图':cat==='procedures'?'存储过程':cat==='functions'?'函数':'查询') + refreshBtn +
+        icon+' ' + catLabel + refreshBtn +
         '</div><div class="tree-children" id="'+rowId+'"'+extraAttrs+'></div>';
 }
 

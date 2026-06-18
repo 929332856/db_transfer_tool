@@ -28,7 +28,7 @@
                     'db_explore_get_databases', 'db_explore_get_schemas', 'db_explore_get_tables',
                     'db_explore_get_views', 'db_explore_get_procedures', 'db_explore_get_triggers',
                     'db_explore_get_table_ddl', 'db_get_info', 'db_get_collations', 'db_delete',
-                    'table_preview_data', 'table_preview_data_fast', 'table_save_changes', 'table_exec_save',
+                    'table_preview_data', 'table_preview_data_fast', 'table_load_page', 'table_save_changes', 'table_exec_save',
                     'table_delete_rows', 'table_exec_delete',
                     'table_get_ddl', 'table_get_design_info', 'table_apply_design',
                     'table_truncate', 'table_delete', 'table_clear',

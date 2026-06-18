@@ -505,7 +505,8 @@ def execute_sql_query(sql: str, data: dict):
             data = {
                 "host": data.get("src_host", ""), "port": data.get("src_port", "3306"),
                 "user": data.get("src_user", ""), "pwd": data.get("src_pwd", ""),
-                "db": data.get("src_db", ""), "db_type": data.get("db_type", "mysql")
+                "db": data.get("src_db", ""), "db_type": data.get("db_type", "mysql"),
+                "ora_mode": data.get("ora_mode", "service_name")
             }
         db_type = data.get("db_type", "mysql")
         url = _conn_url(data)
@@ -648,12 +649,24 @@ def execute_sql_file(sql: str, data: dict):
 def clear_cancel():
     """清除取消标记（新操作开始前调用）"""
     _query_cancel.clear()
+    # ★ 同时清除 modules 包的取消标记
+    try:
+        import modules
+        modules._query_cancel.clear()
+    except Exception:
+        pass
     return True
 
 @eel.expose
 def cancel_query():
     """取消所有查询 — 设置全局取消标记"""
     _query_cancel.set()
+    # ★ 同时设置 modules 包的取消标记（确保 modules/ 下的函数也能感知到）
+    try:
+        import modules
+        modules._query_cancel.set()
+    except Exception:
+        pass
     return True
 
 
@@ -748,7 +761,7 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
     _query_cancel.clear()
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') == 'postgresql':
+        if cdata.get('db_type') in ('postgresql', 'oracle'):
             pass
         else:
             cdata["db"] = database
@@ -781,11 +794,11 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
 
 @eel.expose
 def table_preview_data_fast(conn_data, database, table_name, schema='', order_col='', order_dir=''):
-    """快速预览：只返回前 50 行（用于大表首次打开），避免超时"""
+    """快速预览：只返回前 50 行 + 总行数（用于大表首次打开），避免超时"""
     _query_cancel.clear()
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') == 'postgresql':
+        if cdata.get('db_type') in ('postgresql', 'oracle'):
             pass
         else:
             cdata["db"] = database
@@ -799,23 +812,72 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
         if _query_cancel.is_set():
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
         limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=50)
+        count_sql = f"SELECT COUNT(*) AS cnt FROM {tbl}"
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as conn:
             _log_db_select(limit_sql + "  -- [FAST] 前50行")
             result = conn.execute(text(limit_sql))
             columns = list(result.keys())
             rows = [_row_to_json(row) for row in result.fetchall()]
+            # 查询总行数
+            try:
+                total_count = conn.execute(text(count_sql)).scalar()
+            except Exception:
+                total_count = len(rows)
             comments = _load_column_comments(conn, db_type, database, table_name, schema)
             col_types = _load_column_types(conn, db_type, database, table_name, schema)
         engine.dispose()
         return {"ok": True, "columns": columns, "rows": rows, "comments": comments,
-                "col_types": col_types, "fast": True, "total_hint": len(rows)}
+                "col_types": col_types, "fast": True, "total_count": total_count}
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
 
 
-def _build_full_table_sql(tbl, db_type, order_clause, limit=None):
-    """构建 SELECT * FROM tbl 的 SQL，支持各数据库方言和可选 LIMIT"""
+@eel.expose
+def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=50, order_col='', order_dir=''):
+    """服务端分页加载：按 offset/limit 加载指定页数据，同时返回总行数"""
+    _query_cancel.clear()
+    try:
+        cdata = dict(conn_data)
+        if cdata.get('db_type') in ('postgresql', 'oracle'):
+            pass
+        else:
+            cdata["db"] = database
+        tbl = _build_table_ref(cdata, database, table_name, schema)
+        db_type = cdata.get('db_type', 'mysql')
+        order_clause = ''
+        if order_col and order_dir:
+            safe_col = _safe_ident(order_col, db_type)
+            direction = 'DESC' if order_dir == 'desc' else 'ASC'
+            order_clause = f' ORDER BY {safe_col} {direction}'
+        if _query_cancel.is_set():
+            return {"ok": False, "msg": "查询已取消", "cancelled": True}
+        offset = int(offset)
+        limit = int(limit)
+        page_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=limit, offset=offset)
+        count_sql = f"SELECT COUNT(*) AS cnt FROM {tbl}"
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        with engine.connect() as conn:
+            _log_db_select(f"{page_sql}  -- [PAGE] offset={offset} limit={limit}")
+            result = conn.execute(text(page_sql))
+            columns = list(result.keys())
+            rows = [_row_to_json(row) for row in result.fetchall()]
+            try:
+                total_count = conn.execute(text(count_sql)).scalar()
+            except Exception:
+                total_count = 0
+            comments = {}
+            comments = _load_column_comments(conn, db_type, database, table_name, schema)
+            col_types = _load_column_types(conn, db_type, database, table_name, schema)
+        engine.dispose()
+        return {"ok": True, "columns": columns, "rows": rows, "total_count": total_count,
+                "offset": offset, "limit": limit, "comments": comments, "col_types": col_types}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
+
+
+def _build_full_table_sql(tbl, db_type, order_clause, limit=None, offset=0):
+    """构建 SELECT * FROM tbl 的 SQL，支持各数据库方言、可选 LIMIT 和 OFFSET"""
     base_sql = f"SELECT * FROM {tbl}{order_clause}"
     if limit is None:
         # 无限制 — 全量查询
@@ -825,16 +887,32 @@ def _build_full_table_sql(tbl, db_type, order_clause, limit=None):
             pass  # SQL Server 无限制也用基础 SQL
         return base_sql
 
-    # 带限制的快速预览
+    # 带限制
     n = int(limit)
-    if db_type == 'oracle':
-        return f"SELECT * FROM (SELECT * FROM {tbl}{order_clause}) WHERE ROWNUM <= {n}"
-    elif db_type == 'mssql':
-        return f"SELECT TOP {n} * FROM {tbl}{order_clause}"
-    elif db_type in ('mysql', 'ob-mysql', 'postgresql', 'sqlite'):
-        return f"{base_sql} LIMIT {n}"
+    off = int(offset) if offset else 0
+
+    if off > 0:
+        # 带偏移的翻页查询
+        if db_type == 'oracle':
+            return (f"SELECT * FROM (SELECT t.*, ROWNUM rn FROM "
+                    f"(SELECT * FROM {tbl}{order_clause}) t WHERE ROWNUM <= {off+n}) "
+                    f"WHERE rn > {off}")
+        elif db_type == 'mssql':
+            return f"SELECT * FROM {tbl}{order_clause} OFFSET {off} ROWS FETCH NEXT {n} ROWS ONLY"
+        elif db_type in ('mysql', 'ob-mysql', 'postgresql', 'sqlite'):
+            return f"{base_sql} LIMIT {n} OFFSET {off}"
+        else:
+            return f"{base_sql} LIMIT {n} OFFSET {off}"
     else:
-        return f"{base_sql} LIMIT {n}"
+        # 不带偏移，只限制行数
+        if db_type == 'oracle':
+            return f"SELECT * FROM (SELECT * FROM {tbl}{order_clause}) WHERE ROWNUM <= {n}"
+        elif db_type == 'mssql':
+            return f"SELECT TOP {n} * FROM {tbl}{order_clause}"
+        elif db_type in ('mysql', 'ob-mysql', 'postgresql', 'sqlite'):
+            return f"{base_sql} LIMIT {n}"
+        else:
+            return f"{base_sql} LIMIT {n}"
 
 
 def _load_column_comments(conn, db_type, database, table_name, schema=''):
@@ -916,7 +994,7 @@ def table_get_col_types(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
@@ -1006,7 +1084,7 @@ def table_save_changes(conn_data, database, table_name, schema, changes):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -1034,7 +1112,7 @@ def table_exec_save(conn_data, database, table_name, schema, changes):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -1080,7 +1158,7 @@ def table_delete_rows(conn_data, database, table_name, schema, rows_data):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -1104,7 +1182,7 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -1130,7 +1208,7 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data):
 def table_get_ddl(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') == 'postgresql':
+        if cdata.get('db_type') in ('postgresql', 'oracle'):
             pass
         else:
             cdata["db"] = database
@@ -1175,7 +1253,7 @@ def table_get_design_info(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
 
@@ -1283,7 +1361,7 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         tbl = _build_table_ref(cdata, database, table_name)
@@ -1512,7 +1590,7 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
 def table_truncate(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') != 'postgresql': cdata["db"] = database
+        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         sql = f"TRUNCATE TABLE {tbl}"
@@ -1526,7 +1604,7 @@ def table_truncate(conn_data, database, table_name, schema=''):
 def table_delete(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') != 'postgresql': cdata["db"] = database
+        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         sql = f"DROP TABLE {tbl}"
@@ -1540,7 +1618,7 @@ def table_delete(conn_data, database, table_name, schema=''):
 def table_clear(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') != 'postgresql': cdata["db"] = database
+        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         sql = f"DELETE FROM {tbl}"
@@ -2079,7 +2157,9 @@ def db_explore_get_databases(conn_data):
 def db_explore_get_schemas(conn_data, database):
     """PostgreSQL: 获取数据库下的 schema 列表"""
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
             rows = c.execute(text("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name")).fetchall()
@@ -2099,7 +2179,9 @@ def _format_size(size_bytes):
 @eel.expose
 def db_explore_get_tables(conn_data, database, schema=''):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         db_type = cdata.get("db_type", "mysql")
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
@@ -2743,7 +2825,9 @@ def format_size(size_val):
 @eel.expose
 def db_explore_get_views(conn_data, database, schema=''):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         db_type = cdata.get("db_type", "mysql")
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
@@ -2765,7 +2849,9 @@ def db_explore_get_views(conn_data, database, schema=''):
 @eel.expose
 def db_explore_get_procedures(conn_data, database, schema=''):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         db_type = cdata.get("db_type", "mysql")
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
@@ -2787,7 +2873,9 @@ def db_explore_get_procedures(conn_data, database, schema=''):
 @eel.expose
 def db_explore_get_triggers(conn_data, database):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c:
             rows = c.execute(text(f"SELECT TRIGGER_NAME,EVENT_MANIPULATION,EVENT_OBJECT_TABLE,ACTION_TIMING FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA=:db ORDER BY TRIGGER_NAME"), {"db":database}).fetchall()
@@ -2798,7 +2886,9 @@ def db_explore_get_triggers(conn_data, database):
 @eel.expose
 def db_explore_get_table_ddl(conn_data, database, table_name):
     try:
-        cdata = dict(conn_data); cdata["db"] = database
+        cdata = dict(conn_data)
+        if cdata.get("db_type") != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as c: row = c.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
         engine.dispose()
@@ -2811,7 +2901,8 @@ def db_get_info(conn_data, database):
     """获取数据库信息（字符集、排序规则）"""
     try:
         cdata = dict(conn_data); db_type = cdata.get('db_type', 'mysql')
-        cdata["db"] = database
+        if db_type != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
             if db_type in ('mysql', 'ob-mysql'):
@@ -2833,7 +2924,7 @@ def db_delete(conn_data, database):
     """删除数据库"""
     try:
         cdata = dict(conn_data); db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',): cdata["db"] = database
+        if db_type not in ('postgresql', 'oracle'): cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.begin() as conn:
             if db_type in ('mysql', 'ob-mysql'):
@@ -2872,8 +2963,10 @@ def db_run_sql_file(conn_data, database, file_path, content=''):
 
     def _run():
         try:
-            cdata = dict(conn_data); cdata["db"] = database
+            cdata = dict(conn_data)
             db_type = cdata.get('db_type', 'mysql')
+            if db_type != 'oracle':
+                cdata["db"] = database
             engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
             if content:
                 sql_content = content
@@ -2921,7 +3014,8 @@ def db_get_collations(conn_data, database):
     """获取可用排序规则"""
     try:
         cdata = dict(conn_data); db_type = cdata.get('db_type', 'mysql')
-        cdata["db"] = database
+        if db_type != 'oracle':
+            cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
             if db_type in ('mysql', 'ob-mysql'):
@@ -3217,7 +3311,7 @@ def export_wizard_get_tables(conn_data, database, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         tables = db_explore_get_tables(cdata, database, schema or '')
@@ -3235,7 +3329,7 @@ def export_wizard_get_columns(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
@@ -3485,7 +3579,7 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
         try:
             cdata = dict(conn_data)
             db_type = cdata.get('db_type', 'mysql')
-            if db_type not in ('postgresql',):
+            if db_type not in ('postgresql', 'oracle'):
                 cdata["db"] = database
             engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
 
@@ -3978,8 +4072,64 @@ def slow_query_get_running(conn_data: dict):
         return {"ok": False, "msg": str(e)}
 
 
+# ==================== 清理函数 ====================
+def _force_cleanup_and_exit():
+    """关闭窗口后彻底清理所有子进程，防止 Chrome/Edge/gevent 后台残留"""
+    pid = os.getpid()
+
+    # ① 停止 gevent hub（终止可能还在运行的 greenlet/协程）
+    try:
+        import gevent.hub
+        hub = gevent.hub.get_hub()
+        if hub is not None:
+            hub.destroy()
+    except Exception:
+        pass
+
+    # ② 杀掉 Eel 启动的浏览器进程树（Chrome/Edge 多进程模式下会残留 GPU/网络等子进程）
+    if sys.platform == 'win32':
+        import subprocess
+        try:
+            # 查找当前进程的所有子进程
+            r = subprocess.run(
+                ['wmic', 'process', 'where', f'ParentProcessId={pid}', 'get', 'ProcessId'],
+                capture_output=True, text=True, timeout=5,
+                creationflags=0x08000000  # CREATE_NO_WINDOW
+            )
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    try:
+                        subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', line],
+                            capture_output=True, timeout=3,
+                            creationflags=0x08000000
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    else:
+        # Unix: kill 进程组
+        try:
+            os.killpg(os.getpgid(pid), 9)
+        except Exception:
+            try:
+                os.kill(pid, 9)
+            except Exception:
+                pass
+
+    # ③ 最终兜底：强制退出（不执行 atexit / finally，直接终止 Python 进程 + bootloader）
+    os._exit(0)
+
+
 # ==================== 启动 ====================
 if __name__ == "__main__":
+    # ★ PyInstaller onefile + gevent 在 Windows 上必须调用
+    if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+        import multiprocessing
+        multiprocessing.freeze_support()
+
     # 开发/打包自适应路径
     if getattr(sys, 'frozen', False):
         web_dir = os.path.join(sys._MEIPASS, "web")
@@ -3998,5 +4148,4 @@ if __name__ == "__main__":
     try:
         eel.start("index.html", size=(1280, 860), port=0, cmdline_args=['--disable-dev-tools'])
     finally:
-        # 窗口关闭后强制退出，防止 gevent / bottle 后台残留
-        os._exit(0)
+        _force_cleanup_and_exit()

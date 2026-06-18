@@ -138,47 +138,60 @@ function execQueryTab(qid) {
         }
 
         var allResults = [];
-        var pending = 0;
         // 确定执行数据库优先级：SQL 显式前缀 > 查询自身 db > 连接默认 db（不含 activeDatabase 等外部状态）
+        // ★ Oracle 特殊处理：db 必须是 service_name/SID（原始连接），不能是 schema 名
         var curTab = objectTabs.find(function(t){return t.id==='query_'+qid;});
         var qDb = curTab ? curTab.db : '';
         var sqlDb = detectDbFromSql(fullSql);
-        var execDb = sqlDb || qDb || activeConnData.db || '';
-        stmts.forEach(function(stmt,i){
-            var clean = stmt.trim();
-            if(!clean) {allResults[i]=null; return;}
-            pending++;
-            var data = {src_host:activeConnData.host, src_port:activeConnData.port, src_user:activeConnData.user, src_pwd:activeConnData.pwd, src_db:execDb, db_type:activeConnData.db_type||'mysql'};
-            eel.execute_sql_query(clean, data)(function(result){
-                if (_execCancelFlags[qid]) {
-                    _execCancelFlags[qid] = false;
-                    foreachPending();
-                    return;
-                }
-                allResults[i] = result;
-                pending--;
-                foreachPending();
-            });
-        });
-
-        function foreachPending() {
-            if (pending > 0) return;
-            _execRunning[qid] = false; // ★ 执行结束
+        var isOra = (activeConnData.db_type || '') === 'oracle';
+        var execDb = isOra ? (activeConnData.db || '') : (sqlDb || qDb || activeConnData.db || '');
+        // ★ 顺序执行：逐条发送，等上一条完成后才发下一条
+        var execIdx = 0;
+        var hasDDL = false; // 是否有 DDL 需要刷新树
+        function execNext() {
             if (_execCancelFlags[qid]) {
                 _execCancelFlags[qid] = false;
+                _execRunning[qid] = false;
                 if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
                 resultsDiv.innerHTML = '<div style="padding:10px;color:#f39c12;">⏸ 查询已取消</div>';
                 return;
             }
-            _execCancelFlags[qid] = false;
-            // ★ 最小执行延迟：防止按钮瞬间闪回（至少 300ms）
-            var elapsed = Date.now() - (_execStartTime[qid] || 0);
-            var minDelay = Math.max(0, 300 - elapsed);
-            setTimeout(function() {
-                if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
-                renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
-            }, minDelay);
+            if (execIdx >= stmts.length) {
+                // ★ 全部执行完毕
+                _execRunning[qid] = false;
+                _execCancelFlags[qid] = false;
+                var elapsed = Date.now() - (_execStartTime[qid] || 0);
+                var minDelay = Math.max(0, 300 - elapsed);
+                setTimeout(function() {
+                    if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
+                    renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
+                    // ★ DDL 执行后自动刷新左侧树的表列表
+                    if (hasDDL) { autoRefreshTreeTables(activeConnId, activeConnData, execDb, qDb); }
+                }, minDelay);
+                return;
+            }
+            var i = execIdx;
+            var clean = stmts[i].trim();
+            if (!clean) {
+                allResults[i] = null;
+                execIdx++;
+                execNext();
+                return;
+            }
+            // 更新进度
+            resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中 ('+(i+1)+'/'+stmts.length+')...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
+            var data = {src_host:activeConnData.host, src_port:activeConnData.port, src_user:activeConnData.user, src_pwd:activeConnData.pwd, src_db:execDb, db_type:activeConnData.db_type||'mysql', ora_mode:activeConnData.ora_mode||'service_name'};
+            eel.execute_sql_query(clean, data)(function(result){
+                allResults[i] = result;
+                // 检测 DDL：无返回列 + 执行成功 = DDL/写入操作
+                if (result && result.ok && !result.cancelled && (!result.columns || !result.columns.length) && result.total === undefined) {
+                    hasDDL = true;
+                }
+                execIdx++;
+                execNext();
+            });
         }
+        execNext();
     });
 }
 
@@ -392,6 +405,11 @@ function _qUpdateBtns(qid) {
 /** 保存修改 */
 function _qDoSave(qid) {
     var es = _qState(qid);
+    // ★ 拦截：查询未包含表的所有字段时，不允许修改数据
+    if (es._allColumnsPresent === false) {
+        showWarnDialog('修改被拦截', '当前查询未包含表的所有字段，不允许修改数据。\n\n修改操作需要所有字段值来构建精确的 WHERE 条件\n以确保只更新目标行。\n\n请使用 SELECT * 或包含所有字段的查询后重试。');
+        return;
+    }
     var changes = [];
     for (var key in es.changedCells) {
         var ch = es.changedCells[key];
@@ -457,6 +475,11 @@ function _qCancelEdit(qid) {
 /** 删除选中行 */
 function _qDoDelete(qid) {
     var es = _qState(qid);
+    // ★ 拦截：查询未包含表的所有字段时，不允许删除数据
+    if (es._allColumnsPresent === false) {
+        showWarnDialog('删除被拦截', '当前查询未包含表的所有字段，不允许删除数据。\n\n删除操作需要所有字段值来构建精确的 WHERE 条件\n以确保只删除目标行。\n\n请使用 SELECT * 或包含所有字段的查询后重试。');
+        return;
+    }
     var selIndices = Object.keys(es.selectedRows).map(Number).sort(function(a,b){return a-b;});
     if (!selIndices.length) return;
     if (!es.connData) { showWarnDialog('提示', '连接信息丢失'); return; }
@@ -500,7 +523,7 @@ function _qRefreshData(qid, tabIdx) {
         var pane = resultsDiv.querySelector('.result-tab-pane[data-ri="'+tabIdx+'"]');
         if (pane) pane.innerHTML = '<div style="padding:10px;color:#999;">🔄 正在刷新...</div>';
         var data = {src_host:es.connData.host, src_port:es.connData.port, src_user:es.connData.user,
-            src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql'};
+            src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql', ora_mode:es.connData.ora_mode||'service_name'};
         eel.execute_sql_query(stmt, data)(function(result){
             // 重建该 tab 的结果，保持其他 tab 不变
             if (!result || !result.ok) {
@@ -529,21 +552,25 @@ function _qRefreshData(qid, tabIdx) {
     if (!stmts.length) return;
     resultsDiv.innerHTML = '<div style="padding:10px;color:#999;">🔄 正在刷新...</div>';
     var allResults = [];
-    var pending = 0;
-    stmts.forEach(function(stmt, i){
-        var clean = stmt.trim();
-        if (!clean) { allResults[i] = null; return; }
-        pending++;
+    var refIdx = 0;
+    function execNextRefresh() {
+        if (refIdx >= stmts.length) {
+            renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
+            return;
+        }
+        var i = refIdx;
+        var clean = stmts[i].trim();
+        if (!clean) { allResults[i] = null; refIdx++; execNextRefresh(); return; }
+        resultsDiv.innerHTML = '<div style="padding:10px;color:#999;">🔄 正在刷新 ('+(i+1)+'/'+stmts.length+')...</div>';
         var data = {src_host:es.connData.host, src_port:es.connData.port, src_user:es.connData.user,
-            src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql'};
+            src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql', ora_mode:es.connData.ora_mode||'service_name'};
         eel.execute_sql_query(clean, data)(function(result){
             allResults[i] = result;
-            pending--;
-            if (pending === 0) {
-                renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
-            }
+            refIdx++;
+            execNextRefresh();
         });
-    });
+    }
+    execNextRefresh();
 }
 
 /** ★ 仅重建多结果中单个 tab 的 DOM（不重跑 SQL，SQL 已由 _qRefreshData 重新执行） */
@@ -606,7 +633,6 @@ function _qRenderTable(qid) {
         '<button class="btn btn-sm" id="'+qid+'_qcancel_btn" onclick="_qCancelEdit(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
         '<span style="flex:1;"></span>' +
         '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
-        '<button class="btn btn-sm" style="background:transparent;color:#999;font-size:12px;padding:2px 8px;cursor:pointer;border:1px solid #555;border-radius:3px;" onclick="closeQueryResults(\''+qid+'\')" title="关闭查询结果">✕</button>' +
         '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
     html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — ' + rc + ' 行</div>';
 
@@ -668,9 +694,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
         var html = '';
         var r0 = results[0];
         if (!r0 || !r0.ok) {
-            html += '<div style="display:flex;align-items:center;padding:10px 12px;color:#e74c3c;font-size:12px;background:#2a1a1a;">' +
-                '<span style="flex:1;">❌ '+escapeHtml(r0?r0.msg:'无响应')+'</span>' +
-                '<button class="btn btn-sm" style="background:transparent;color:#999;font-size:12px;padding:2px 8px;cursor:pointer;border:1px solid #555;border-radius:3px;flex-shrink:0;margin-left:8px;" onclick="closeQueryResults(\''+qid+'\')" title="关闭查询结果">✕</button></div>';
+            html += '<div style="padding:10px 12px;color:#e74c3c;font-size:12px;background:#2a1a1a;">❌ '+escapeHtml(r0?r0.msg:'无响应')+'</div>';
             es.columns = []; es.rows = [];
         } else {
             es.columns = r0.columns || [];
@@ -692,17 +716,24 @@ function renderQueryResults(div, results, total, stmtsArr) {
                         if (r && r.ok) {
                             es._colTypes = Object.assign({}, es._colTypes || {}, r.col_types || {});
                             es._colComments = Object.assign({}, es._colComments || {}, r.comments || {});
+                            // ★ 检查是否查询了表的所有列（用于拦截不完整列时的修改/删除操作）
+                            var tableCols = Object.keys(r.col_types || {});
+                            var queryCols = es.columns || [];
+                            es._allColumnsPresent = tableCols.length === 0 || tableCols.every(function(tc) { return queryCols.indexOf(tc) !== -1; });
+                        } else {
+                            es._allColumnsPresent = false;
                         }
                         // 渲染表格
                         if (es.columns.length > 0) _qRenderTable(qid);
                     });
+                } else if (!es._tableName) {
+                    es._allColumnsPresent = false;
                 }
                 html += '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:#111;border-bottom:1px solid #333;flex-wrap:wrap;">' +
                     '<button class="btn btn-sm" id="'+qid+'_qsave_btn" onclick="_qDoSave(\''+qid+'\')" disabled style="background:#2ecc71;color:#fff;font-size:10px;">💾 保存 (0)</button>' +
                     '<button class="btn btn-sm" id="'+qid+'_qcancel_btn" onclick="_qCancelEdit(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
                     '<span style="flex:1;"></span>' +
                     '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
-                    '<button class="btn btn-sm" style="background:transparent;color:#999;font-size:12px;padding:2px 8px;cursor:pointer;border:1px solid #555;border-radius:3px;" onclick="closeQueryResults(\''+qid+'\')" title="关闭查询结果">✕</button>' +
                     '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
                 html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rc+' 行</div>';
                 html += '<div style="overflow:auto;"><table class="exp-table"><thead><tr>';
@@ -753,14 +784,10 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     else if (sqlLower.indexOf('DELETE') === 0) opType = '删除';
                     else if (sqlLower.indexOf('REPLACE') === 0) opType = '替换';
                     else if (sqlLower.indexOf('TRUNCATE') === 0) opType = '截断';
-                    html += '<div style="display:flex;align-items:center;padding:12px;color:#2ecc71;font-size:12px;">' +
-                        '<span style="flex:1;">✅ '+opType+'成功，影响 <b>'+affRows+'</b> 行</span>' +
-                        '<button class="btn btn-sm" style="background:transparent;color:#999;font-size:12px;padding:2px 8px;cursor:pointer;border:1px solid #555;border-radius:3px;flex-shrink:0;" onclick="closeQueryResults(\''+qid+'\')" title="关闭查询结果">✕</button></div>';
+                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+opType+'成功，影响 <b>'+affRows+'</b> 行</div>';
                 } else {
                     var msg = (r0 && r0.msg) ? r0.msg : '执行成功，无返回结果集';
-                    html += '<div style="display:flex;align-items:center;padding:12px;color:#2ecc71;font-size:12px;">' +
-                        '<span style="flex:1;">✅ '+escapeHtml(msg)+'</span>' +
-                        '<button class="btn btn-sm" style="background:transparent;color:#999;font-size:12px;padding:2px 8px;cursor:pointer;border:1px solid #555;border-radius:3px;flex-shrink:0;" onclick="closeQueryResults(\''+qid+'\')" title="关闭查询结果">✕</button></div>';
+                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+escapeHtml(msg)+'</div>';
                 }
             }
         }
@@ -794,9 +821,8 @@ function renderQueryResults(div, results, total, stmtsArr) {
         } else if (!rr || !rr.ok) {
             count = ' ❌';
         }
-        html += '<button class="result-tab-btn'+(i===0?' active':'')+'" onclick="switchResultTab(\''+tid+'\','+i+')">'+escapeHtml(label)+count+'</button>';
+        html += '<button class="result-tab-btn'+(i===0?' active':'')+'" onclick="switchResultTab(\''+tid+'\','+i+')"><span class="tab-label">'+escapeHtml(label)+count+'</span><span class="tab-close" onclick="event.stopPropagation();closeSingleResultTab(event,\''+qid+'\','+i+',\''+tid+'\')" title="关闭此结果">✕</span></button>';
     }
-    html += '<span style="flex:1;"></span><button class="btn btn-sm" style="background:transparent;color:#999;font-size:11px;padding:2px 8px;cursor:pointer;border:1px solid #555;border-radius:3px;flex-shrink:0;" onclick="closeQueryResults(\''+qid+'\')" title="关闭查询结果">✕ 关闭</button>';
     html += '</div>';
     // ★ 初始化多结果状态数组
     es._multiCols = new Array(results.length);
@@ -879,6 +905,27 @@ function renderQueryResults(div, results, total, stmtsArr) {
     div.innerHTML = html;
     // 多结果也同步
     setTimeout(function(){ _syncQueryContent(qid); }, 50);
+
+    // ★ 加载各 tab 的列类型，检测是否包含所有列（用于拦截不完整列时的修改/删除）
+    es._multiAllColsPresent = new Array(results.length);
+    for (var im3 = 0; im3 < results.length; im3++) {
+        (function(idx) {
+            var tname = es._multiTableNames[idx];
+            var cols = es._multiCols[idx];
+            if (tname && cols && cols.length > 0 && es.connData) {
+                eel.table_get_col_types(es.connData, es.execDb, tname, '')(function(r){
+                    if (r && r.ok) {
+                        var tableCols = Object.keys(r.col_types || {});
+                        es._multiAllColsPresent[idx] = tableCols.length === 0 || tableCols.every(function(tc) { return cols.indexOf(tc) !== -1; });
+                    } else {
+                        es._multiAllColsPresent[idx] = false;
+                    }
+                });
+            } else {
+                es._multiAllColsPresent[idx] = false;
+            }
+        })(im3);
+    }
 }
 
 // ===== 多结果辅助函数 =====
@@ -1002,6 +1049,11 @@ function _qUpdateMultiBtns(qid, tabIdx) {
 /** 多语句结果的保存（收集当前 tab 的编辑值） */
 function _qDoSaveMulti(qid, tabIdx) {
     var es = _qState(qid);
+    // ★ 拦截：查询未包含表的所有字段时，不允许修改数据
+    if (es._multiAllColsPresent && es._multiAllColsPresent[tabIdx] === false) {
+        showWarnDialog('修改被拦截', '当前查询未包含表的所有字段，不允许修改数据。\n\n修改操作需要所有字段值来构建精确的 WHERE 条件\n以确保只更新目标行。\n\n请使用 SELECT * 或包含所有字段的查询后重试。');
+        return;
+    }
     if (!es.connData) { showWarnDialog('提示', '连接信息丢失'); return; }
     var changed = (es._multiChanged||[])[tabIdx] || {};
     if (!Object.keys(changed).length) { showWarnDialog('提示', '没有检测到修改'); return; }
@@ -1068,6 +1120,11 @@ function _qCancelEditMulti(qid, tabIdx) {
 /** 多语句删除选中行 */
 function _qDoDeleteMulti(qid, tabIdx) {
     var es = _qState(qid);
+    // ★ 拦截：查询未包含表的所有字段时，不允许删除数据
+    if (es._multiAllColsPresent && es._multiAllColsPresent[tabIdx] === false) {
+        showWarnDialog('删除被拦截', '当前查询未包含表的所有字段，不允许删除数据。\n\n删除操作需要所有字段值来构建精确的 WHERE 条件\n以确保只删除目标行。\n\n请使用 SELECT * 或包含所有字段的查询后重试。');
+        return;
+    }
     var selected = (es._multiSelected||[])[tabIdx] || {};
     var selKeys = Object.keys(selected);
     if (!selKeys.length) { showWarnDialog('提示', '请先选择要删除的行'); return; }
@@ -1112,6 +1169,57 @@ function switchResultTab(containerId, index) {
     ct.querySelectorAll('.result-tab-pane').forEach(function(p,i){ p.classList.toggle('active', i===index); });
 }
 
+/** 关闭单个结果 Tab（仅用于多SQL场景） */
+function closeSingleResultTab(evt, qid, tabIdx, tid) {
+    var ct = document.getElementById(tid);
+    if (!ct) return;
+    var tabBar = ct.querySelector('.result-tab-bar');
+    var tabContent = ct.querySelector('.result-tab-content');
+    if (!tabBar || !tabContent) return;
+
+    var btns = tabBar.querySelectorAll('.result-tab-btn');
+    var panes = tabContent.querySelectorAll('.result-tab-pane');
+    if (tabIdx >= btns.length) return;
+
+    // 只剩1个tab：直接关闭整个结果区域
+    if (btns.length <= 1) {
+        closeQueryResults(qid);
+        return;
+    }
+
+    var wasActive = btns[tabIdx].classList.contains('active');
+
+    // 移除DOM元素
+    btns[tabIdx].remove();
+    panes[tabIdx].remove();
+
+    // 更新剩余按钮的 onclick 和 close 索引
+    var newBtns = tabBar.querySelectorAll('.result-tab-btn');
+    newBtns.forEach(function(b, i) {
+        b.setAttribute('onclick', "switchResultTab('" + tid + "'," + i + ")");
+        var closeSpan = b.querySelector('.tab-close');
+        if (closeSpan) {
+            closeSpan.setAttribute('onclick', "event.stopPropagation();closeSingleResultTab(event,'" + qid + "'," + i + ",'" + tid + "')");
+        }
+    });
+
+    // 更新剩余pane的data-ri
+    var newPanes = tabContent.querySelectorAll('.result-tab-pane');
+    newPanes.forEach(function(p, i) { p.setAttribute('data-ri', i); });
+
+    // 更新多结果状态数组
+    var es = _qState(qid);
+    ['_multiCols','_multiRows','_multiChanged','_multiSelected','_multiStmts','_multiLastClicked','_multiTableNames','_multiAllColsPresent'].forEach(function(k) {
+        if (es[k]) es[k].splice(tabIdx, 1);
+    });
+
+    // 如果关闭的是当前激活tab，切换到相邻tab
+    if (wasActive) {
+        var newIdx = Math.min(tabIdx, newBtns.length - 1);
+        switchResultTab(tid, newIdx);
+    }
+}
+
 // ==================== 工具函数 ====================
 function loadCategoryItems(conn, db, cat, callback, schema) {
     var sch = schema || '';
@@ -1119,7 +1227,22 @@ function loadCategoryItems(conn, db, cat, callback, schema) {
     else if (cat === 'views') eel.db_explore_get_views(conn,db,sch)(function(r){callback(r&&r.ok?(r.views||[]).map(function(v){return{name:v};}):[]);});
     else if (cat === 'procedures') eel.db_explore_get_procedures(conn,db,sch)(function(r){callback(r&&r.ok?(r.procedures||[]).filter(function(p){return p.type==='PROCEDURE';}):[]);});
     else if (cat === 'functions') eel.db_explore_get_procedures(conn,db,sch)(function(r){callback(r&&r.ok?(r.procedures||[]).filter(function(p){return p.type==='FUNCTION';}):[]);});
+    else if (cat === 'triggers') eel.db_explore_get_triggers(conn,db)(function(r){callback(r&&r.ok?(r.triggers||[]):[]);});
+    else if (cat === 'indexes'||cat==='sequences'||cat==='synonyms'||cat==='packages'||cat==='mviews') eel.db_explore_get_objlist(conn,db,cat)(function(r){callback(r&&r.ok?(r.items||[]):[]);});
+    else if (cat === 'queries') loadQueries(cid_from_conn(conn), db, callback);
     else callback([]);
+}
+
+function cid_from_conn(conn) {
+    for (var k in (treeData.connections||{})) {
+        if (treeData.connections[k] === conn) return k;
+    }
+    return '';
+}
+
+function loadQueries(cid, db, callback) {
+    var queries = (treeData.saved_queries||[]).filter(function(q){return q.conn_id===cid && q.db===db;});
+    callback(queries.map(function(q){return{name:q.name,id:q.id};}));
 }
 
 function toggleDbChildren(dbId, arrowId) {
@@ -1154,6 +1277,41 @@ function toggleChildren(childrenId, arrowId) {
     if (!el) return;
     if (el.classList.contains('open')) { el.classList.remove('open'); if(ar)ar.textContent='▸'; }
     else { el.classList.add('open'); if(ar)ar.textContent='▾'; }
+}
+
+// ★ DDL 执行后自动刷新左侧树的表列表
+function autoRefreshTreeTables(cid, connData, execDb, qDb) {
+    if (!treeData || !treeData.connections || !cid) return;
+    var conn = treeData.connections[cid];
+    if (!conn) return;
+    var dbType = connData.db_type || '';
+    // 收集所有可能的 dbKey（Oracle 的 schema=user，PG/MySQL 的 db=execDb）
+    var candidates = [];
+    if (execDb) candidates.push(safeBtoa(execDb));
+    if (qDb && qDb !== execDb) candidates.push(safeBtoa(qDb));
+    if (dbType === 'oracle' && connData.user) candidates.push(safeBtoa(connData.user));
+    candidates.forEach(function(dbKey) {
+        var rowId = 'cat_tables_' + dbKey;
+        var el = document.getElementById(rowId);
+        if (!el) return;
+        var children = el.nextElementSibling;
+        if (!children || !children.classList.contains('tree-children')) return;
+        if (children.classList.contains('open') && children.innerHTML.trim()) {
+            // 已展开：立即刷新
+            children.innerHTML = '<div style="font-size:11px;color:#999;padding:4px 0;padding-left:36px;">🔄 刷新中...</div>';
+            loadCategoryItems(conn, execDb || qDb || '', 'tables', function(items) {
+                var itemPad = 36;
+                var h = items.map(function(it) {
+                    var n = it.name || it;
+                    return '<div class="my-conn-row" style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;" ondblclick="addTableDataTab(\x27'+escapeAttr(n)+'\x27,\x27'+escapeAttr(execDb||qDb||'')+'\x27,\x27\x27,\x27'+cid+'\x27)"><span class="my-conn-icon">📊</span>'+escapeHtml(n)+'</div>';
+                }).join('');
+                children.innerHTML = h || '<div style="padding-left:'+itemPad+'px;color:#999;font-size:11px;">（无数据）</div>';
+            }, '');
+        } else {
+            // 未展开：清空缓存，下次点击自动重新加载
+            children.innerHTML = '';
+        }
+    });
 }
 
 // Redis DB 节点：仅折叠/展开（不加载数据）

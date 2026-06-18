@@ -15,7 +15,7 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
     _query_cancel.clear()
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') == 'postgresql':
+        if cdata.get('db_type') in ('postgresql', 'oracle'):
             pass
         else:
             cdata["db"] = database
@@ -52,7 +52,7 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
     _query_cancel.clear()
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') == 'postgresql':
+        if cdata.get('db_type') in ('postgresql', 'oracle'):
             pass
         else:
             cdata["db"] = database
@@ -87,7 +87,7 @@ def table_get_col_types(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
@@ -179,7 +179,7 @@ def table_save_changes(conn_data, database, table_name, schema, changes):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -209,7 +209,7 @@ def table_exec_save(conn_data, database, table_name, schema, changes):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -257,7 +257,7 @@ def table_delete_rows(conn_data, database, table_name, schema, rows_data):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -283,7 +283,7 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql',):
+        if db_type not in ('postgresql', 'oracle'):
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -309,7 +309,7 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data):
 def table_get_ddl(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') == 'postgresql':
+        if cdata.get('db_type') in ('postgresql', 'oracle'):
             pass
         else:
             cdata["db"] = database

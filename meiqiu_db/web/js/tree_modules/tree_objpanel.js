@@ -57,47 +57,11 @@ function setupObjectPanelDrop() {
 }
 
 function renderObjectPanel() {
-    var panel = document.getElementById('object_panel');
-    // ★ 在销毁 DOM 之前，保存当前活跃 tab 中所有 textarea 的内容到 objectTabs
-    if (panel) {
-        // ★ 对于 query 类型 tab，使用 _syncQueryContent 保存完整内容
-        var layouts = panel.querySelectorAll('[id^="ql_"]');
-        for (var li = 0; li < layouts.length; li++) {
-            var layoutId = layouts[li].id;
-            if (layoutId.indexOf('ql_') === 0) {
-                var qidSync = layoutId.substring(3);
-                _syncQueryContent(qidSync);
-            }
-        }
-        var textareas = panel.querySelectorAll('textarea');
-        for (var ti = 0; ti < textareas.length; ti++) {
-            var ta = textareas[ti];
-            if (!ta.id) continue;
-            // 跳过已被 _syncQueryContent 处理的 query textarea
-            if (ta.id.indexOf('sq_') === 0) continue;
-            for (var j = 0; j < objectTabs.length; j++) {
-                var t = objectTabs[j];
-                if (t.content.indexOf('id="' + ta.id + '"') !== -1) {
-                    t.content = t.content.replace(
-                        new RegExp('(<textarea[^>]*id="' + ta.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*>)([\\s\\S]*?)(</textarea>)', 'i'),
-                        '$1' + escapeHtml(ta.value) + '$3'
-                    );
-                    break;
-                }
-            }
-        }
-        // ★ 保存 query tab 的结果区域（qr_xxx）到独立缓存，作为双重保险
-        var qrDivs = panel.querySelectorAll('[id^="qr_"]');
-        for (var qi = 0; qi < qrDivs.length; qi++) {
-            var qrd = qrDivs[qi];
-            var qid2 = qrd.id.replace(/^qr_/, '');
-            if (_queryEditStates[qid2]) {
-                _queryEditStates[qid2]._cachedHtml = qrd.innerHTML;
-            }
-        }
-    }
+    // ★ 保存当前 tab 的编辑状态
+    _saveCurrentTabState(activeObjTab);
 
     // 增量更新 tab 栏和内容区域，避免全量 innerHTML 重建
+    var panel = document.getElementById('object_panel');
     var tabBar = document.getElementById('obj_tabs_bar');
     var h = '';
     objectTabs.forEach(function(t){
@@ -363,4 +327,164 @@ function closeTab(tabId) {
     renderObjectPanel();
 }
 
-function switchObjTab(tabId) { activeObjTab = tabId; renderObjectPanel(); }
+function switchObjTab(tabId) {
+    if (activeObjTab === tabId) return; // 同一个 tab 不做任何事
+    var oldId = activeObjTab;
+    activeObjTab = tabId;
+    // 保存旧 tab 的 textarea 编辑状态
+    _saveCurrentTabState(oldId);
+    // 只更新 tab 栏 active 类，不重建 DOM
+    var tabBar = document.getElementById('obj_tabs_bar');
+    if (tabBar) {
+        var prevEl = tabBar.querySelector('[data-tabid="' + oldId + '"]');
+        var nextEl = tabBar.querySelector('[data-tabid="' + tabId + '"]');
+        if (prevEl) prevEl.classList.remove('active');
+        if (nextEl) nextEl.classList.add('active');
+        var searchWrap = tabBar.querySelector('.obj-search-wrap');
+        if (searchWrap) searchWrap.style.display = (tabId === 'obj_home') ? '' : 'none';
+    }
+    // 替换内容 + 重绑定
+    var contentDiv = document.getElementById('obj_content');
+    var at = objectTabs.find(function(t){return t.id===tabId;});
+    if (contentDiv && at) {
+        contentDiv.innerHTML = at.content;
+        _afterContentUpdate(at, contentDiv);
+    }
+}
+// 保存当前 tab 的 textarea / query 状态
+function _saveCurrentTabState(tabId) {
+    var panel = document.getElementById('object_panel');
+    if (!panel) return;
+    var layouts = panel.querySelectorAll('[id^="ql_"]');
+    for (var li = 0; li < layouts.length; li++) {
+        var layoutId = layouts[li].id;
+        if (layoutId.indexOf('ql_') === 0) _syncQueryContent(layoutId.substring(3));
+    }
+    var textareas = panel.querySelectorAll('textarea');
+    for (var ti = 0; ti < textareas.length; ti++) {
+        var ta = textareas[ti];
+        if (!ta.id || ta.id.indexOf('sq_') === 0) continue;
+        for (var j = 0; j < objectTabs.length; j++) {
+            var t = objectTabs[j];
+            if (t.content.indexOf('id="' + ta.id + '"') !== -1) {
+                t.content = t.content.replace(
+                    new RegExp('(<textarea[^>]*id="' + ta.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*>)([\\s\\S]*?)(</textarea>)', 'i'),
+                    '$1' + escapeHtml(ta.value) + '$3'
+                );
+                break;
+            }
+        }
+    }
+    var qrDivs = panel.querySelectorAll('[id^="qr_"]');
+    for (var qi = 0; qi < qrDivs.length; qi++) {
+        var qrd = qrDivs[qi];
+        var qid2 = qrd.id.replace(/^qr_/, '');
+        if (_queryEditStates[qid2]) _queryEditStates[qid2]._cachedHtml = qrd.innerHTML;
+    }
+}
+// 内容替换后的事件重绑定（从 renderObjectPanel 提取）
+function _afterContentUpdate(targetTab, contentDiv) {
+    if (!targetTab) return;
+    if (targetTab.type === 'data' || targetTab.type === 'redis') {
+        var tid2 = _tabIdToTid[activeObjTab];
+        if (tid2) {
+            var st2 = _whereStates[tid2];
+            if (st2 && st2.onRender) setTimeout(function(){ st2.onRender(); }, 0);
+            var bindSortFn = window['_bindSort_'+tid2];
+            if (bindSortFn) setTimeout(function(){ bindSortFn(); }, 50);
+            setTimeout(function(){
+                var prevBtn2 = document.getElementById(tid2+'_prev_btn');
+                var nextBtn2 = document.getElementById(tid2+'_next_btn');
+                var showAllBtn2 = document.getElementById(tid2+'_showall_btn');
+                var psizeSel2 = document.getElementById(tid2+'_psize');
+                if (prevBtn2) prevBtn2.onclick = function(){ window['_goPage_'+tid2](-1); };
+                if (nextBtn2) nextBtn2.onclick = function(){ window['_goPage_'+tid2](1); };
+                if (showAllBtn2) showAllBtn2.onclick = function(){ window['_showAllRows_'+tid2](); };
+                if (psizeSel2) psizeSel2.onchange = function(){ window['_changePageSize_'+tid2](); };
+            }, 50);
+        }
+    }
+    if (targetTab.type === 'query') {
+        var qm = activeObjTab.match(/^query_(.+)$/);
+        if (qm) {
+            var qid3 = qm[1];
+            if (_execRunning[qid3]) _execRunning[qid3] = false;
+            if (_execCancelFlags[qid3]) _execCancelFlags[qid3] = false;
+            (function(qidX){
+                setTimeout(function(){
+                    var esX = _queryEditStates[qidX];
+                    var sqlTa = document.getElementById('sq_' + qidX);
+                    var sqlBtn = document.getElementById('btn_exe_' + qidX);
+                    if (!sqlTa || !sqlBtn) return;
+                    sqlBtn.textContent = '▶ 执行';
+                    sqlBtn.style.background = '#2ecc71';
+                    if (esX && Object.prototype.hasOwnProperty.call(esX, '_cachedSql')) {
+                        sqlTa.value = esX._cachedSql;
+                    } else {
+                        var cachedTab = objectTabs.find(function(t){ return t.id === 'query_' + qidX; });
+                        if (cachedTab && Object.prototype.hasOwnProperty.call(cachedTab, '_cachedSql')) {
+                            sqlTa.value = cachedTab._cachedSql;
+                        }
+                    }
+                    var updateBtnLabel = function(){
+                        if (!sqlBtn || sqlBtn.textContent.indexOf('⏹') === 0) return;
+                        if (!sqlTa) return;
+                        var s = sqlTa.selectionStart, e = sqlTa.selectionEnd;
+                        sqlBtn.textContent = (s !== e) ? '▶ 执行选中' : '▶ 执行';
+                    };
+                    sqlTa.addEventListener('mouseup', updateBtnLabel);
+                    sqlTa.addEventListener('keyup', updateBtnLabel);
+                    sqlTa.addEventListener('input', function(){ _queryTextareaChanged(qidX, sqlTa); });
+                    var curTab = objectTabs.find(function(t){ return t.id === 'query_' + qidX; });
+                    var cid2 = curTab ? curTab.cid : '';
+                    var qdb2 = curTab ? curTab.db : '';
+                    var qname2 = curTab ? curTab.label : '';
+                    sqlTa.addEventListener('keydown', function(e){
+                        if(e.ctrlKey && e.key === 'Enter') { e.preventDefault(); execQueryTab(qidX); }
+                        if(e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveQueryTab(qidX, cid2, qdb2, qname2); }
+                    });
+                    updateBtnLabel();
+                }, 0);
+            })(qid3);
+            var es = _queryEditStates[qid3];
+            (function(qidR, esR){
+                function doRestore(){
+                    var rdiv = document.getElementById('qr_' + qidR);
+                    if (!rdiv) return;
+                    if (esR && esR.columns && esR.columns.length > 0) { _qRenderTable(qidR); return; }
+                    var hasResults = rdiv.querySelector('.exp-table') || rdiv.querySelector('table');
+                    var textOnly = rdiv.textContent.trim();
+                    if (!hasResults && textOnly && textOnly !== '' && esR && esR._cachedHtml) {
+                        rdiv.innerHTML = esR._cachedHtml;
+                    }
+                }
+                setTimeout(doRestore, 20);
+                setTimeout(function(){
+                    var rdiv2 = document.getElementById('qr_' + qidR);
+                    if (!rdiv2) return;
+                    var hasTable2 = rdiv2.querySelector('.exp-table') || rdiv2.querySelector('table');
+                    var txt2 = rdiv2.textContent.trim();
+                    if (!hasTable2 && (!txt2 || /^\s*$/.test(txt2))) {
+                        if (esR && esR.columns && esR.columns.length > 0) _qRenderTable(qidR);
+                        else if (esR && esR._cachedHtml) rdiv2.innerHTML = esR._cachedHtml;
+                    }
+                }, 80);
+            })(qid3, es);
+        }
+    }
+    requestAnimationFrame(function(){
+        collapseOverflowTabs();
+        highlightTableRow();
+        setupObjectPanelDrop();
+        if (contentDiv) {
+            var layouts = contentDiv.querySelectorAll('.query-layout');
+            for (var li = 0; li < layouts.length; li++) {
+                var layoutEl = layouts[li];
+                if (!layoutEl.id || layoutEl.id.indexOf('ql_') !== 0) continue;
+                var qid2 = layoutEl.id.substring(3);
+                delete _querySplitterInited['qs_' + qid2];
+                initQuerySplitter('ql_' + qid2, 'qs_' + qid2, 'sq_' + qid2, 'qr_' + qid2);
+            }
+        }
+    });
+}
