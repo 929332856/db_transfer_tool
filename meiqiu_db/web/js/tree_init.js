@@ -42,7 +42,6 @@
                     'drag_copy_table', 'db_run_sql_file',
                     'get_profiles', 'get_last_used', 'save_profile', 'delete_profile',
                     'find_profile', 'test_connection', 'start_transfer', 'stop_transfer',
-                    'import_query_results', 'execute_sql_file',
                     'ping', 'debug_python_info'];
                 var imported = 0;
                 for (var i = 0; i < criticalFns.length; i++) {

@@ -331,10 +331,12 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
 
         // ★ 长文本列显示"展开"按钮改用内容长度判断（TEXT/LONGTEXT>1000, VARCHAR(>500)>500）
 
-        // ★ 数据库真实总行数（首次只加载50行，但DB可能有上万行）
+        // ★ 数据库总行数标记（不用 COUNT(*)，大表 COUNT 太慢）
+        //    用取 N+1 行判断 has_more，省掉 COUNT 查询
+        var _hasMore = r.has_more === true;
         var _totalCount = r.total_count || rows.length;
         // ★ 是否已加载全部数据
-        var _allLoaded = (!r.fast) || (_totalCount <= rows.length);
+        var _allLoaded = (!r.fast) ? (!_hasMore) : true;
 
         function buildTh() {
             var h = '<tr><th class="row-sel-header" id="'+tid+'_sel_all" onclick="window[\'_toggleSelAll_'+tid+'\']()" title="全选/取消全选">#</th>';
@@ -849,10 +851,16 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                 allIndices = f.indices;
             }
             var loadedTotal = allFiltered.length;
-            // ★ 有 WHERE 筛选时用实际筛选结果；无筛选时用 DB 真实总数（支持服务端分页）
+            // ★ 有 WHERE 筛选时用实际筛选结果；无筛选且未全加载时 +1 保证下一页按钮可用
             var st = _whereStates[tid];
             var hasWhere = st && st.whereFn;
-            var displayTotal = (!_allLoaded && !hasWhere) ? Math.max(_totalCount, loadedTotal) : loadedTotal;
+            var displayTotal;
+            if (_allLoaded || hasWhere) {
+                displayTotal = loadedTotal;
+            } else {
+                // ★ 未全加载时 displayTotal = loadedTotal + 1，这样下一页按钮不会被 disabled
+                displayTotal = loadedTotal + 1;
+            }
             if (_pageSize <= 0) {
                 // 全部
                 return { rows: allFiltered, indices: allIndices, total: displayTotal, offset: 0, pageSize: displayTotal };
@@ -873,15 +881,26 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
             var el = document.getElementById(tid+'_pager_info');
             if (!el) return;
             var total = pg.total;
-            if (pg.pageSize >= total) {
-                el.textContent = '前 ' + total + ' 条';
+            if (_allLoaded) {
+                if (pg.pageSize >= total) {
+                    el.textContent = '共 ' + total + ' 条';
+                } else {
+                    el.textContent = '显示 ' + (pg.offset+1) + '-' + Math.min(pg.offset+pg.pageSize, total) + ' / 共 ' + total + ' 条';
+                }
             } else {
-                el.textContent = '显示 ' + (pg.offset+1) + '-' + Math.min(pg.offset+pg.pageSize, total) + ' / 前 ' + total + ' 条';
+                // ★ 未全加载时显示 "前 X+ 条"（实际行数未知，+ 表示还有更多）
+                var knownCount = total - 1;  // displayTotal = loadedCount + 1
+                if (pg.pageSize >= knownCount) {
+                    el.textContent = '前 ' + knownCount + '+ 条';
+                } else {
+                    el.textContent = '显示 ' + (pg.offset+1) + '-' + Math.min(pg.offset+pg.pageSize, knownCount) + ' / 前 ' + knownCount + '+ 条';
+                }
             }
             var prevBtn = document.getElementById(tid+'_prev_btn');
             var nextBtn = document.getElementById(tid+'_next_btn');
             if (prevBtn) prevBtn.disabled = pg.offset <= 0;
-            if (nextBtn) nextBtn.disabled = pg.offset + pg.pageSize >= pg.total;
+            // ★ 未全加载时下一页始终可用
+            if (nextBtn) nextBtn.disabled = _allLoaded ? (pg.offset + pg.pageSize >= pg.total) : false;
         }
 
         var _lastGoPageTs = 0; // ★ 防抖时间戳，防止重复绑定导致一次点击触发多次 goPage
@@ -903,7 +922,7 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
             // ★ 检查目标页数据是否已加载：如果没加载完且目标偏移超出已加载范围
             var neededEnd = newOffset + _pageSize;
             var loadedCount = (_colFilteredPairs ? _colFilteredPairs.length : (getFilteredRows(tid).filtered || []).length);
-            if (neededEnd > loadedCount && !_allLoaded && _totalCount > loadedCount) {
+            if (neededEnd > loadedCount && !_allLoaded) {
                 _pageOffset = newOffset;
                 _fetchPageFromServer(newOffset, _pageSize);
                 return;
@@ -925,7 +944,6 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                 _pageLoading = false;
                 if (wrap) { wrap.style.opacity = '1'; wrap.style.pointerEvents = ''; }
                 if (!rp || !rp.ok) { if (infoEl) infoEl.textContent = '加载失败'; return; }
-                if (rp.total_count) _totalCount = rp.total_count;
                 var newRows = rp.rows || [];
                 // ★ offset=0 时替换（切 pageSize 从0重新拉），否则追加
                 if (offset === 0) {
@@ -933,7 +951,15 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                 } else if (offset >= rows.length) {
                     rows = rows.concat(newRows);
                 }
-                if (rows.length >= _totalCount) _allLoaded = true;
+                // ★ 用 has_more 标志判断是否还有更多数据（不用 COUNT(*)）
+                _totalCount = offset + newRows.length;
+                if (rp.has_more) {
+                    _hasMore = true;
+                    _allLoaded = false;
+                } else {
+                    _hasMore = false;
+                    _allLoaded = true;
+                }
                 var st = _whereStates[tid];
                 if (st) { st.rows = rows; st.filteredCache = null; st.fcCount = null; }
                 render();
@@ -944,7 +970,7 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
         function changePageSize() {
             var newSize = parseInt((document.getElementById(tid+'_psize')||{}).value) || 50;
             // ★ 切 pageSize 时如果新页大小超出已加载行数，从服务端拉取
-            if (newSize > rows.length && !_allLoaded && _totalCount > rows.length) {
+            if (newSize > rows.length && !_allLoaded) {
                 _pageSize = newSize;
                 _pageOffset = 0;
                 _fetchPageFromServer(0, newSize);
@@ -1094,7 +1120,8 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                 comments = r3.comments || {};
                 colTypes = r3.col_types || {};
                 _totalCount = r3.total_count || rows.length;
-                _allLoaded = (!r3.fast) || (_totalCount <= rows.length);
+                _hasMore = r3.has_more === true;
+                _allLoaded = (!r3.fast) ? (!_hasMore) : true;
                 // 清除编辑状态和选择状态
                 _selectedRows = {};
                 _lastClickedIdx = -1;

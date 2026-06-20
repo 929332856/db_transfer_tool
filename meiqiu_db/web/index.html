@@ -32,7 +32,6 @@
             <div class="top-tabs" id="top_tabs">
                 <button class="top-tab-btn active" onclick="showPanel('my_connections')">📁 我的连接</button>
                 <button class="top-tab-btn" onclick="showPanel('sync')">📦 数据库同步</button>
-                <button class="top-tab-btn" onclick="showPanel('query')">📝 查询同步</button>
                 <button class="top-tab-btn" onclick="showPanel('slowquery')">📊 慢SQL分析</button>
             </div>
 
@@ -121,68 +120,8 @@
                 </div>
             </div>
 
-            <!-- 查询同步（独立表单） -->
-            <div class="content-panel" id="panel_query">
-                <div class="db-row">
-                    <div class="db-card">
-                        <h3>📤 源库配置</h3>
-                        <input type="text" id="query_src_host" placeholder="主机 IP 地址">
-                        <input type="text" id="query_src_port" placeholder="端口号" value="3306">
-                        <input type="text" id="query_src_user" placeholder="用户名">
-                        <input type="password" id="query_src_pwd" placeholder="密码">
-                        <input type="text" id="query_src_db" placeholder="数据库名称">
-                        <div class="btn-row">
-                            <button class="btn btn-green" onclick="testConnection('src','query_')">🔍 测试连接</button>
-                            <button class="btn btn-gray" onclick="clearSide('src','query_')">🧹 清空</button>
-                            <span class="test-status" id="query_test_src_status"></span>
-                        </div>
-                    </div>
-                    <div class="db-card">
-                        <h3>📥 目标库配置</h3>
-                        <input type="text" id="query_dst_host" placeholder="主机 IP 地址">
-                        <input type="text" id="query_dst_port" placeholder="端口号" value="3306">
-                        <input type="text" id="query_dst_user" placeholder="用户名">
-                        <input type="password" id="query_dst_pwd" placeholder="密码">
-                        <input type="text" id="query_dst_db" placeholder="数据库名称（不存在自动创建）">
-                        <div class="btn-row">
-                            <button class="btn btn-green" onclick="testConnection('dst','query_')">🔍 测试连接</button>
-                            <button class="btn btn-gray" onclick="clearSide('dst','query_')">🧹 清空</button>
-                            <span class="test-status" id="query_test_dst_status"></span>
-                        </div>
-                    </div>
-                </div>
-                <div class="mgr-row">
-                    <span class="mgr-label">&nbsp;&nbsp;&nbsp;&nbsp;📁 配置方案:</span>
-                    <div class="dropdown" id="query_profile_dropdown">
-                        <button class="dropdown-btn" id="query_profile_btn" onclick="toggleDropdown('query_')">
-                            <span id="query_profile_btn_text">选择配置</span><span class="arrow">▾</span>
-                        </button>
-                        <div class="dropdown-menu" id="query_dropdown_menu"></div>
-                    </div>
-                    <button class="btn btn-blue" onclick="saveProfile('query_')">💾 保存当前配置</button>
-                </div>
-                <textarea id="sql_input" placeholder="输入 SQL 查询语句&#10;SELECT * FROM your_table LIMIT 10"></textarea>
-                <div class="btn-row">
-                    <button class="btn btn-blue" id="btn_run_sql" onclick="executeQuery()">▶ 执行源库查询</button>
-                    <label class="import-label">导入表名:</label>
-                    <input type="text" id="import_table" placeholder="目标表名" class="input-sm">
-                    <button class="btn btn-green btn-import" id="btn_import" onclick="importResults()">📥 导入到目标库</button>
-                    <button class="btn" style="background:#8e44ad;color:#fff;" onclick="importSqlFile()" title="支持 SQL 和 CSV 文件格式">📂 导入文件到目标库</button>
-                    <input type="file" id="sql_file_input" accept=".sql,.csv" style="display:none;" onchange="handleSqlFile(this)">
-                </div>
-                <div style="display:flex;align-items:center;gap:10px;padding:2px 0;flex-wrap:wrap;">
-                    <div class="query-info" id="query_info">查询结果: 未执行</div>
-                    <div id="query_export_btns" style="display:none;gap:6px;">
-                        <button class="btn btn-sm" style="background:#27ae60;" onclick="exportQueryResult()" title="导出查询结果">📥 导出</button>
-                    </div>
-                    <span style="flex:1;"></span>
-                </div>
-                <div class="table-wrapper" id="table_wrapper">
-                    <div class="table-scroll" id="table_scroll">
-                        <table id="result_table"><thead></thead><tbody></tbody></table>
-                    </div>
-                </div>
-            </div>
+
+
 
             <!-- 慢SQL分析 -->
             <div class="content-panel" id="panel_slowquery">

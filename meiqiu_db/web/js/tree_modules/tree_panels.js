@@ -4,7 +4,7 @@ function showPanel(name) {
     var panel = document.getElementById('panel_' + name);
     if (panel) panel.classList.add('active');
     document.querySelectorAll('.top-tab-btn').forEach(function (b) { b.classList.remove('active'); });
-    var tabMap = { my_connections: 0, sync: 1, query: 2, slowquery: 3 };
+    var tabMap = { my_connections: 0, sync: 1, slowquery: 2 };
     var idx = tabMap[name];
     if (idx !== undefined) {
         var btns = document.querySelectorAll('.top-tab-btn');
@@ -13,19 +13,6 @@ function showPanel(name) {
     // 切换到慢SQL面板时，刷新连接选择器
     if (name === 'slowquery' && typeof refreshSqConnSelector === 'function') {
         setTimeout(refreshSqConnSelector, 50);
-    }
-    // ★ 切换到查询同步面板时，强制复位按钮状态（防止 isQueryRunning 卡死导致无法执行）
-    if (name === 'query') {
-        setTimeout(function() {
-            if (typeof isQueryRunning !== 'undefined' && isQueryRunning) {
-                isQueryRunning = false;
-            }
-            var btn = document.getElementById('btn_run_sql');
-            if (btn && btn.textContent.indexOf('⏹') === 0) {
-                btn.textContent = '▶ 执行源库查询';
-                btn.style.background = '';
-            }
-        }, 50);
     }
 }
 

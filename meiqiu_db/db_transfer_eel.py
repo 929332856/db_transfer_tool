@@ -560,96 +560,6 @@ def execute_sql_query(sql: str, data: dict):
         return {"ok": False, "msg": _friendly_error(e, data.get('db_type','mysql'))}
 
 
-@eel.expose
-def execute_sql_file(sql: str, data: dict):
-    """在目标库执行 SQL 文件（后台线程 + 队列推送进度）"""
-    def _run():
-        try:
-            dst_url = (f"mysql+pymysql://{quote_plus(data['dst_user'])}:"
-                       f"{quote_plus(data['dst_pwd'])}@{data['dst_host']}:"
-                       f"{data['dst_port']}/{data['dst_db']}?charset=utf8mb4")
-            dst_engine = create_engine(dst_url, connect_args=_connect_args("mysql", timeout=10))
-
-            # 智能拆分 SQL：忽略引号内的 ;
-            def _split_sql(text):
-                stmts = []
-                buf = []
-                in_single = False
-                in_double = False
-                i = 0
-                while i < len(text):
-                    ch = text[i]
-                    if ch == '\\' and in_single:
-                        buf.append(ch)
-                        if i + 1 < len(text):
-                            buf.append(text[i + 1])
-                            i += 1
-                    elif ch == "'" and not in_double:
-                        in_single = not in_single
-                        buf.append(ch)
-                    elif ch == '"' and not in_single:
-                        in_double = not in_double
-                        buf.append(ch)
-                    elif ch == ';' and not in_single and not in_double:
-                        stmt = ''.join(buf).strip()
-                        if stmt and not stmt.startswith('--'):
-                            stmts.append(stmt)
-                        buf = []
-                    else:
-                        buf.append(ch)
-                    i += 1
-                # 最后残留的
-                stmt = ''.join(buf).strip()
-                if stmt and not stmt.startswith('--'):
-                    stmts.append(stmt)
-                return stmts
-
-            statements = _split_sql(sql)
-            total = len(statements)
-            _progress_q.put(("sql_file_start", {"total": total}))
-            done = 0
-            errors = 0
-            error_samples = []  # 收集错误样本用于弹窗展示
-            with dst_engine.connect() as conn:
-                conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-                for i, stmt in enumerate(statements):
-                    try:
-                        conn.execute(text(stmt))
-                        conn.execute(text("COMMIT"))
-                        done += 1
-                        # 记录 SQL 执行日志
-                        stmt_upper = stmt.strip().upper()
-                        if stmt_upper.startswith("SELECT"):
-                            _log_db_select(stmt)
-                        elif stmt_upper.startswith("INSERT"):
-                            _log_db_insert(stmt)
-                        elif stmt_upper.startswith("UPDATE"):
-                            _log_db_update(stmt)
-                        elif stmt_upper.startswith("DELETE") or stmt_upper.startswith("TRUNCATE") or stmt_upper.startswith("DROP"):
-                            _log_db_delete(stmt)
-                        elif stmt_upper.startswith("SET ") or stmt_upper.startswith("COMMIT") or stmt_upper.startswith("ROLLBACK") or stmt_upper.startswith("BEGIN"):
-                            pass  # 不记录事务控制语句
-                        else:
-                            _db_op_logger.info(f"[EXEC] {stmt}")
-                        if done % 100 == 0 or done == total:
-                            _progress_q.put(("sql_file_progress", {"done": done, "total": total}))
-                    except Exception as se:
-                        errors += 1
-                        conn.execute(text("ROLLBACK"))
-                        if len(error_samples) < 5:
-                            error_samples.append(f"第{i+1}条: {str(se)[:200]}")
-                conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
-            dst_engine.dispose()
-            _progress_q.put(("sql_file_done", {
-                "ok": True, "count": done, "errors": errors,
-                "error_samples": error_samples
-            }))
-        except Exception as e:
-            _progress_q.put(("sql_file_done", {"ok": False, "msg": str(e)}))
-
-    threading.Thread(target=_run, daemon=True).start()
-    return True
-
 
 @eel.expose
 def clear_cancel():
@@ -675,50 +585,6 @@ def cancel_query():
         pass
     return True
 
-
-@eel.expose
-def import_query_results(table_name: str, data: dict):
-    """导入查询结果到目标库"""
-    try:
-        dst_url = (f"mysql+pymysql://{quote_plus(data['dst_user'])}:"
-                   f"{quote_plus(data['dst_pwd'])}@{data['dst_host']}:"
-                   f"{data['dst_port']}/{data['dst_db']}?charset=utf8mb4")
-        dst_engine = create_engine(dst_url, connect_args=_connect_args("mysql", timeout=10))
-
-        with dst_engine.begin() as conn:
-            conn.execute(text("COMMIT"))
-            conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-            # 自动建表
-            col_defs = []
-            for col in _query_columns:
-                sample = _query_rows[0][_query_columns.index(col)] if _query_rows else None
-                if isinstance(sample, int):
-                    col_defs.append(f"`{col}` BIGINT")
-                elif isinstance(sample, float):
-                    col_defs.append(f"`{col}` DOUBLE")
-                elif hasattr(sample, 'isoformat'):
-                    col_defs.append(f"`{col}` DATETIME")
-                else:
-                    col_defs.append(f"`{col}` TEXT")
-            col_def_str = ", ".join(col_defs)
-            conn.execute(text(f"DROP TABLE IF EXISTS `{table_name}`"))
-            conn.execute(text(f"CREATE TABLE `{table_name}` ({col_def_str})"))
-
-            # 批量插入
-            col_list = ", ".join(f"`{c}`" for c in _query_columns)
-            ph_list = ", ".join(f":{c}" for c in _query_columns)
-            insert_sql = text(f"INSERT INTO `{table_name}` ({col_list}) VALUES ({ph_list})")
-            batch_size = 10000
-            for i in range(0, len(_query_rows), batch_size):
-                batch = [dict(zip(_query_columns, r)) for r in _query_rows[i:i + batch_size]]
-                conn.execute(insert_sql, batch)
-            conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
-
-        dst_engine.dispose()
-        return {"ok": True, "msg": f"查询结果已导入 [{table_name}]，共 {len(_query_rows)} 行",
-                "count": len(_query_rows), "table": table_name}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
 
 
 def _connect_args(db_type='mysql', timeout=10):
@@ -800,7 +666,7 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
 
 @eel.expose
 def table_preview_data_fast(conn_data, database, table_name, schema='', order_col='', order_dir=''):
-    """快速预览：只返回前 50 行 + 总行数（用于大表首次打开），避免超时"""
+    """快速预览：取 51 行，不用 COUNT(*)（超大表 COUNT 太慢），用第51行判断是否有更多"""
     _query_cancel.clear()
     try:
         cdata = dict(conn_data)
@@ -817,31 +683,30 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
             order_clause = f' ORDER BY {safe_col} {direction}'
         if _query_cancel.is_set():
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
-        limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=50)
-        count_sql = f"SELECT COUNT(*) AS cnt FROM {tbl}"
+        # ★ 取 51 行，多一行用于判断是否还有更多数据（省掉慢 COUNT）
+        limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=51)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         with engine.connect() as conn:
             _log_db_select(limit_sql + "  -- [FAST] 前50行")
             result = conn.execute(text(limit_sql))
             columns = list(result.keys())
             rows = [_row_to_json(row) for row in result.fetchall()]
-            # 查询总行数
-            try:
-                total_count = conn.execute(text(count_sql)).scalar()
-            except Exception:
-                total_count = len(rows)
+            has_more = len(rows) > 50
+            if has_more:
+                rows = rows[:50]  # 只暴露前50行给前端
             comments = _load_column_comments(conn, db_type, database, table_name, schema)
             col_types = _load_column_types(conn, db_type, database, table_name, schema)
         engine.dispose()
         return {"ok": True, "columns": columns, "rows": rows, "comments": comments,
-                "col_types": col_types, "fast": True, "total_count": total_count}
+                "col_types": col_types, "fast": True, "total_count": len(rows),
+                "has_more": has_more}
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
 
 
 @eel.expose
 def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=50, order_col='', order_dir=''):
-    """服务端分页加载：按 offset/limit 加载指定页数据，同时返回总行数"""
+    """服务端分页加载：取 limit+1 行代替 COUNT(*)，用多出的一行判断是否还有更多"""
     _query_cancel.clear()
     try:
         cdata = dict(conn_data)
@@ -860,23 +725,22 @@ def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
         offset = int(offset)
         limit = int(limit)
-        page_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=limit, offset=offset)
-        count_sql = f"SELECT COUNT(*) AS cnt FROM {tbl}"
+        # ★ 取 limit+1 行，多一行用于判断是否还有更多（省掉慢 COUNT）
+        page_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=limit + 1, offset=offset)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
             _log_db_select(f"{page_sql}  -- [PAGE] offset={offset} limit={limit}")
             result = conn.execute(text(page_sql))
             columns = list(result.keys())
             rows = [_row_to_json(row) for row in result.fetchall()]
-            try:
-                total_count = conn.execute(text(count_sql)).scalar()
-            except Exception:
-                total_count = 0
-            comments = {}
+            has_more = len(rows) > limit
+            if has_more:
+                rows = rows[:limit]  # 只暴露 limit 行给前端
             comments = _load_column_comments(conn, db_type, database, table_name, schema)
             col_types = _load_column_types(conn, db_type, database, table_name, schema)
         engine.dispose()
-        return {"ok": True, "columns": columns, "rows": rows, "total_count": total_count,
+        return {"ok": True, "columns": columns, "rows": rows,
+                "total_count": offset + len(rows), "has_more": has_more,
                 "offset": offset, "limit": limit, "comments": comments, "col_types": col_types}
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
