@@ -32,6 +32,7 @@
                     'table_delete_rows', 'table_exec_delete',
                     'table_get_ddl', 'table_get_design_info', 'table_apply_design',
                     'table_truncate', 'table_delete', 'table_clear',
+                    'get_connection_info', 'get_database_info',
                     'redis_get_databases', 'redis_get_keys', 'redis_get_key_info',
                     'redis_get_keys_meta', 'redis_execute', 'redis_delete_key',
                     'redis_set_string', 'redis_set_hash', 'redis_set_list',

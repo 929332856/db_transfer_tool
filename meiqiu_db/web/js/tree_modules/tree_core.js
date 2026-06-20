@@ -10,7 +10,13 @@ function escapeHtml(str) {
 function escapeAttr(str) {
     if (str == null) return '';
     str = String(str);
-    return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return str
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '&quot;')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\t/g, '\\t')
+        .replace(/'/g, "\\'");
 }
 // 复制文本到剪贴板
 function copyToClipboard(text) {

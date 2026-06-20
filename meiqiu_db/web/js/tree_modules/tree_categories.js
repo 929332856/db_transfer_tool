@@ -69,6 +69,10 @@ function clickOraSchema(cid, db, schema) {
     var conn = treeData.connections[cid];
     if (!conn) return;
     activeConnId = cid; activeConnData = conn; activeDatabase = schema;
+    // ★ Oracle schema 切换时展示该 schema 的数据库信息
+    if (typeof showDbInfo === 'function') {
+        showDbInfo(cid, schema);
+    }
     // ★ 切换到选中的 schema，刷新分类区域显示该 schema 的对象
     var connNode = document.querySelector('.tree-node[data-cid="'+cid+'"]');
     var connChildren = connNode ? connNode.querySelector('.tree-children') : null;

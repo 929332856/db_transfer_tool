@@ -39,7 +39,7 @@
             <!-- 我的连接 + 对象浏览 分栏 -->
             <div class="content-panel active" id="panel_my_connections">
                 <div class="split-view">
-                    <div class="split-left">
+                    <div class="split-left" id="split_left_panel">
                         <div class="my-conn-header">
                             <span class="my-conn-title">📁 我的连接</span>
                             <button class="btn btn-sm" onclick="addFolder('')">📂 新建文件夹</button>
@@ -47,10 +47,18 @@
                         </div>
                         <div class="my-conn-list" id="my_conn_list"></div>
                     </div>
-                    <div class="split-right" id="object_panel">
+                    <div class="conn-splitter" id="conn_splitter" title="拖拽调整宽度"></div>
+                    <div class="split-mid" id="object_panel">
                         <div style="padding:40px;text-align:center;color:#666;">
                             <div style="font-size:36px;margin-bottom:10px;">📄</div>
                             <div>点击左侧表、视图等分类查看对象</div>
+                        </div>
+                    </div>
+                    <div class="info-splitter" id="info_splitter" title="拖拽调整宽度"></div>
+                    <div class="split-right" id="info_panel">
+                        <div style="padding:40px;text-align:center;color:#666;">
+                            <div style="font-size:36px;margin-bottom:10px;">📋</div>
+                            <div>点击左侧连接或数据库查看详情</div>
                         </div>
                     </div>
                 </div>
@@ -162,7 +170,13 @@
                     <button class="btn" style="background:#8e44ad;color:#fff;" onclick="importSqlFile()" title="支持 SQL 和 CSV 文件格式">📂 导入文件到目标库</button>
                     <input type="file" id="sql_file_input" accept=".sql,.csv" style="display:none;" onchange="handleSqlFile(this)">
                 </div>
-                <div class="query-info" id="query_info">查询结果: 未执行</div>
+                <div style="display:flex;align-items:center;gap:10px;padding:2px 0;flex-wrap:wrap;">
+                    <div class="query-info" id="query_info">查询结果: 未执行</div>
+                    <div id="query_export_btns" style="display:none;gap:6px;">
+                        <button class="btn btn-sm" style="background:#27ae60;" onclick="exportQueryResult()" title="导出查询结果">📥 导出</button>
+                    </div>
+                    <span style="flex:1;"></span>
+                </div>
                 <div class="table-wrapper" id="table_wrapper">
                     <div class="table-scroll" id="table_scroll">
                         <table id="result_table"><thead></thead><tbody></tbody></table>
@@ -307,6 +321,7 @@
     <script src="js/tree_modules/tree_core.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_tooltip.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_panels.js" charset="utf-8"></script>
+    <script src="js/tree_modules/tree_infopanel.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_context.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_categories.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_objpanel.js" charset="utf-8"></script>

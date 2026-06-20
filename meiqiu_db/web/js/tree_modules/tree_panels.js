@@ -50,6 +50,9 @@ function renderMyConnectionsList() {
     list.ondragover = onConnRootDragOver;
     list.ondragleave = onConnRootDragLeave;
     list.ondrop = onConnRootDrop;
+    // ★ 初始化可拖拽分隔条
+    if (typeof initConnSplitter === 'function') initConnSplitter();
+    if (typeof initInfoSplitter === 'function') initInfoSplitter();
 }
 
 function getConnectionsByFolder(pid) {
@@ -78,7 +81,7 @@ function renderConn(c, indent) {
     var cid = c.id;
     var pad = indent + 12;
     var icon = getConnIcon(c.db_type||'mysql');
-    return '<div class="tree-node" data-cid="'+cid+'"><div class="my-conn-row conn-row drag-conn-item" draggable="true" style="padding-left:'+pad+'px" ondblclick="expandConn(\''+cid+'\','+pad+')" oncontextmenu="connCtx(event,\''+cid+'\')" ondragstart="onConnDragStart(event,\''+cid+'\')" ondragend="onConnDragEnd(event,\''+cid+'\')">' +
+    return '<div class="tree-node" data-cid="'+cid+'"><div class="my-conn-row conn-row drag-conn-item" draggable="true" style="padding-left:'+pad+'px" onclick="showConnInfo(\''+cid+'\')" ondblclick="expandConn(\''+cid+'\','+pad+')" oncontextmenu="connCtx(event,\''+cid+'\')" ondragstart="onConnDragStart(event,\''+cid+'\')" ondragend="onConnDragEnd(event,\''+cid+'\')">' +
         '<span class="arrow" id="ma_c_'+cid+'" onclick="event.stopPropagation();toggleConnChildren(\''+cid+'\')" style="visibility:hidden">▸</span>' +
         '<span class="my-conn-icon db-icon closed">'+icon+'</span><span class="my-conn-name">'+escapeHtml(c.name)+'</span>' +
         '<span class="my-conn-host">'+escapeHtml(c.host+':'+c.port)+'</span></div>' +
@@ -146,7 +149,7 @@ function expandConn(cid, pad) {
                 (r.databases||[]).forEach(function(dbInfo) {
                     var dbIdx = dbInfo.db;
                     var dbId = cid + '_rdb_' + dbIdx;
-                    html += '<div class="tree-node"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px" ondblclick="expandRedisDb(\''+cid+'\','+dbIdx+',\''+dbId+'\','+(pad+20)+')">' +
+                    html += '<div class="tree-node"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px" onclick="showDbInfo(\''+cid+'\',\''+dbIdx+'\')" ondblclick="expandRedisDb(\''+cid+'\','+dbIdx+',\''+dbId+'\','+(pad+20)+')">' +
                         '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleRedisDb(\''+cid+'\','+dbIdx+',\''+dbId+'\','+(pad+20)+')">▸</span>' +
                         '<span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span>' +
                         '<span class="my-conn-name">DB' + dbIdx + '</span>' +
@@ -172,6 +175,10 @@ function expandConn(cid, pad) {
             if (dbs.length > 0) {
                 activeDatabase = dbs[0];
                 html += renderOraCats(cid, dbs[0], pad+20);
+                // ★ Oracle 展开连接时自动展示首个 Schema 的数据库信息
+                if (typeof showDbInfo === 'function') {
+                    showDbInfo(cid, dbs[0]);
+                }
             }
         } else {
             dbs.forEach(function (db) {
@@ -179,11 +186,11 @@ function expandConn(cid, pad) {
                 var dropAttrs = ' ondragover="onDbDragOver(event,this)" ondragleave="onDbDragLeave(event,this)" ondrop="onDbDrop(event,this,\''+cid+'\',\''+escapeAttr(db)+'\')"';
                 var ctxAttr = ' oncontextmenu="dbCtx(event,\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\')"';
                 if (isPg) {
-                    html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
+                    html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' onclick="showDbInfo(\''+cid+'\',\''+escapeAttr(db)+'\')" ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
                         '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId+'\',\'ar_'+dbId+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db)+'</span></div>' +
                         '<div class="tree-children" id="'+dbId+'"></div></div>';
                 } else {
-                    html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
+                    html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' onclick="showDbInfo(\''+cid+'\',\''+escapeAttr(db)+'\')" ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
                         '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId+'\',\'ar_'+dbId+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db)+'</span></div>' +
                         '<div class="tree-children" id="'+dbId+'">' + renderDbCats(cid, db, pad+40) + '</div></div>';
                 }

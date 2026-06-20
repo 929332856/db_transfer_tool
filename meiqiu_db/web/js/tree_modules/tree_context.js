@@ -222,7 +222,8 @@ function closeDatabase(cid, db, dbId) {
         var iconEl = el.previousElementSibling ? el.previousElementSibling.querySelector('.db-icon') : null;
         if (iconEl) { iconEl.classList.remove('active'); iconEl.classList.add('closed'); }
     }
-    if (activeDatabase === db) {
+    // ★ 同时检查连接和数据库，避免同名但不同连接误匹配
+    if (activeConnId === cid && activeDatabase === db) {
         _redisPanelCtx = null;
         activeDatabase = '';
         // 移除该连接+数据库下所有相关 tab（data_/ddl_/query_/redis_ 等）
@@ -230,13 +231,17 @@ function closeDatabase(cid, db, dbId) {
             if (t.id === 'obj_home') return true;
             return !(t.cid === cid && t.db === db);
         });
-        var homeContent2 = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
-        var homeTab2 = objectTabs.find(function(t){return t.id==='obj_home';});
-        if (!homeTab2) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent2,db:''}); }
-        else { homeTab2.content = homeContent2; }
-        activeObjTab = 'obj_home';
-        activeCatId = null;
-        renderObjectPanel();
+        // ★ 只有当前激活的 tab 属于被关闭的数据库时才刷新面板
+        var stillHasCurrentTab = objectTabs.some(function(t) { return t.id === activeObjTab; });
+        if (!stillHasCurrentTab) {
+            var homeContent2 = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
+            var homeTab2 = objectTabs.find(function(t){return t.id==='obj_home';});
+            if (!homeTab2) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent2,db:''}); }
+            else { homeTab2.content = homeContent2; }
+            activeObjTab = 'obj_home';
+            activeCatId = null;
+            renderObjectPanel();
+        }
     }
 }
 
@@ -257,11 +262,11 @@ function refreshDatabaseList(cid) {
             var dropAttrs2 = ' ondragover="onDbDragOver(event,this)" ondragleave="onDbDragLeave(event,this)" ondrop="onDbDrop(event,this,\''+cid+'\',\''+escapeAttr(db2)+'\')"';
             var ctxAttr2 = ' oncontextmenu="dbCtx(event,\''+cid+'\',\''+escapeAttr(db2)+'\',\''+dbId2+'\')"';
             if (isPg) {
-                html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db2)+'"><div class="my-conn-row" style="padding-left:'+(prevPad+20)+'px"'+dropAttrs2+ctxAttr2+' ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db2)+'\',\''+dbId2+'\',\'ar_'+dbId2+'\')">' +
+                html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db2)+'"><div class="my-conn-row" style="padding-left:'+(prevPad+20)+'px"'+dropAttrs2+ctxAttr2+' onclick="showDbInfo(\''+cid+'\',\''+escapeAttr(db2)+'\')" ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db2)+'\',\''+dbId2+'\',\'ar_'+dbId2+'\')">' +
                     '<span class="arrow" id="ar_'+dbId2+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId2+'\',\'ar_'+dbId2+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db2)+'</span></div>' +
                     '<div class="tree-children" id="'+dbId2+'"></div></div>';
             } else {
-                html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db2)+'"><div class="my-conn-row" style="padding-left:'+(prevPad+20)+'px"'+dropAttrs2+ctxAttr2+' ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db2)+'\',\''+dbId2+'\',\'ar_'+dbId2+'\')">' +
+                html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db2)+'"><div class="my-conn-row" style="padding-left:'+(prevPad+20)+'px"'+dropAttrs2+ctxAttr2+' onclick="showDbInfo(\''+cid+'\',\''+escapeAttr(db2)+'\')" ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db2)+'\',\''+dbId2+'\',\'ar_'+dbId2+'\')">' +
                     '<span class="arrow" id="ar_'+dbId2+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId2+'\',\'ar_'+dbId2+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db2)+'</span></div>' +
                     '<div class="tree-children" id="'+dbId2+'">' + renderDbCats(cid, db2, prevPad+40) + '</div></div>';
             }

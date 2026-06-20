@@ -180,15 +180,34 @@ function addTableDataTab(tn, db, schema, cid) {
     }
 }
 
-// ★ 判断列类型是否为长文本（TEXT 或 varchar(>500)），用于显示"展开"图标
+// ★ 判断列类型是否为长文本（TEXT/LONGTEXT 或 varchar(>500)），用于显示"展开"图标
 function _isLongTextType(colType) {
     if (!colType) return false;
     var lower = colType.toLowerCase();
-    // TEXT 及其变体（排除 tinytext 因为长度很短）
-    if (/\btext\b/.test(lower) && lower.indexOf('tinytext') === -1) return true;
+    // TEXT / LONGTEXT 及其变体（排除 tinytext 因为长度很短）
+    if (/\b(?:longtext|text)\b/.test(lower) && lower.indexOf('tinytext') === -1) return true;
     // VARCHAR / CHAR / CHARACTER VARYING 长度超过 500
     var m = lower.match(/(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)/i);
     if (m && parseInt(m[1]) > 500) return true;
+    return false;
+}
+
+// ★ 判断是否显示"展开"按钮：类型匹配 + 内容长度超过阈值
+// TEXT / LONGTEXT > 200 字符，VARCHAR(>500) > 300 字符
+// ★ 阈值不宜过高：input 格子宽度有限，几百字符的无空格内容已经溢出
+function _shouldShowExpandBtn(colType, val) {
+    if (!colType || val === null || val === undefined) return false;
+    var lower = colType.toLowerCase();
+    var contentLen = String(val).length;
+    // LONGTEXT / TEXT（排除 tinytext）：内容 > 200 字符就显示 📄
+    if (/\b(?:longtext|text)\b/.test(lower) && lower.indexOf('tinytext') === -1) {
+        return contentLen > 200;
+    }
+    // VARCHAR / CHAR / CHARACTER VARYING(>500)：内容 > 300 字符
+    var m = lower.match(/(?:varchar|char|character\s+varying)\s*\(\s*(\d+)\s*\)/i);
+    if (m && parseInt(m[1]) > 500) {
+        return contentLen > 300;
+    }
     return false;
 }
 
@@ -237,6 +256,55 @@ window._showTextPopup = function(uid) {
     document.body.appendChild(overlay);
 };
 
+// ★ 单元格溢出 tooltip：hover 显示被截断的完整内容
+// 有📄查看按钮的单元格跳过；内容未溢出的也跳过
+function _initCellOverflowTooltip(tid) {
+    var wrap = document.getElementById(tid);
+    if (!wrap) return;
+    var scrollWrap = wrap.querySelector('.data-table-scroll');
+    if (!scrollWrap) return;
+
+    // 创建全局 tooltip 元素（只创建一次）
+    var tip = document.getElementById('cell_content_tooltip');
+    if (!tip) {
+        tip = document.createElement('div');
+        tip.id = 'cell_content_tooltip';
+        tip.className = 'cell-tooltip';
+        document.body.appendChild(tip);
+    }
+
+    // ★ 移除旧监听器（通过标记避免重复绑定）
+    if (scrollWrap.getAttribute('data-tooltip-bound') === '1') return;
+    scrollWrap.setAttribute('data-tooltip-bound', '1');
+
+    scrollWrap.addEventListener('mouseover', function(e) {
+        var inp = e.target.closest('.editable-cell');
+        if (!inp) { tip.style.display = 'none'; return; }
+        // 有 📄 按钮的单元格不显示 tooltip
+        var td = inp.closest('td');
+        if (td && td.classList.contains('cell-with-icon')) { tip.style.display = 'none'; return; }
+        // 内容没有溢出格子不显示
+        if (inp.scrollWidth <= inp.clientWidth) { tip.style.display = 'none'; return; }
+        tip.textContent = inp.value;
+        tip.style.display = 'block';
+        tip.style.left = (e.clientX + 12) + 'px';
+        tip.style.top = (e.clientY + 16) + 'px';
+    });
+
+    scrollWrap.addEventListener('mousemove', function(e) {
+        if (tip.style.display === 'block') {
+            tip.style.left = (e.clientX + 12) + 'px';
+            tip.style.top = (e.clientY + 16) + 'px';
+        }
+    });
+
+    scrollWrap.addEventListener('mouseout', function(e) {
+        var inp = e.target.closest('.editable-cell');
+        if (!inp) return;
+        tip.style.display = 'none';
+    });
+}
+
 /** 构建/更新表格数据 UI（加载全量数据，支持客户端分页） */
 function _buildTableDataUI(tn, conn, sch, r, db) {
         if(!r||!r.ok){addOrUpdateTab('data_'+tn,tn,'data','<div style="padding:20px;color:#e74c3c;">❌ '+(r?r.msg:'')+'</div>');return;}
@@ -261,12 +329,7 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
         // 列筛选器状态：{colIndex: filterText}
         var _colFilters = {};
 
-        // ★ 检测哪些列是长文本类型（TEXT / varchar(>500)），显示"展开"图标
-        var _longTextCols = {};
-        cols.forEach(function(c, ci) {
-            var ct = getCType(c);
-            if (ct && _isLongTextType(ct)) _longTextCols[ci] = true;
-        });
+        // ★ 长文本列显示"展开"按钮改用内容长度判断（TEXT/LONGTEXT>1000, VARCHAR(>500)>500）
 
         // ★ 数据库真实总行数（首次只加载50行，但DB可能有上万行）
         var _totalCount = r.total_count || rows.length;
@@ -379,7 +442,8 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
                     'title="左键选择/取消选择行 | 右键菜单">'+(origIdx+1)+'</td>';
                 row.forEach(function(v,ci){
                     var val = v===null ? 'NULL' : String(v);
-                    var isLongText = _longTextCols[ci];
+                    var cType = getCType(cols[ci]);
+                    var isLongText = _shouldShowExpandBtn(cType, v);
                     if (isLongText) {
                         var uid = tid + '_txt_' + origIdx + '_' + ci;
                         // ★ 把文本存到全局对象，避免内联 JS 的转义问题
@@ -1105,6 +1169,10 @@ function _buildTableDataUI(tn, conn, sch, r, db) {
             if (psizeSel) psizeSel.onchange = function(){ window['_changePageSize_'+tid](); };
             // 初始状态
             updatePagerInfo();
+
+            // ★ 单元格溢出 tooltip：普通列内容超过格子宽度时，hover 显示完整内容
+            // 有 📄 查看按钮的单元格不显示 tooltip
+            _initCellOverflowTooltip(tid);
         }, 0);
 
 

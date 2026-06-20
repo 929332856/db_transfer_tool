@@ -36,10 +36,50 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
 .top-tab-btn:hover { color: #ddd; }
 .top-tab-btn.active { color: #fff; border-bottom-color: #5dade2; }
 
-/* ========== 我的连接面板（分栏布局） ========== */
+/* ========== 我的连接面板（三栏布局：左连接 | 中对象tab | 右信息面板） ========== */
 .split-view { display: flex; flex: 1; min-height: 0; gap: 0; }
-.split-left { width: 340px; min-width: 240px; max-width: 500px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid #333; }
-.split-right { flex: 1; min-width: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.split-left { width: 260px; min-width: 180px; max-width: 500px; flex-shrink: 0; display: flex; flex-direction: column; overflow: hidden; }
+.conn-splitter {
+    width: 4px; min-width: 4px; cursor: col-resize; background: #2a2a2a;
+    transition: background 0.15s; flex-shrink: 0; z-index: 10;
+}
+.conn-splitter:hover, .conn-splitter.active { background: #5dade2; }
+.split-mid { flex: 1; min-width: 300px; overflow: hidden; display: flex; flex-direction: column; background: #1e1e1e; }
+.info-splitter {
+    width: 4px; min-width: 4px; cursor: col-resize; background: #2a2a2a;
+    transition: background 0.15s; flex-shrink: 0; z-index: 10;
+}
+.info-splitter:hover, .info-splitter.active { background: #5dade2; }
+.split-right { width: 300px; min-width: 200px; max-width: 550px; flex-shrink: 0; overflow-y: auto; display: flex; flex-direction: column; background: #1e1e1e; }
+
+/* ========== 右侧信息面板（连接/数据库详情） ========== */
+.info-panel { padding: 20px 24px; color: #ccc; font-size: 13px; overflow-y: auto; flex: 1; }
+.info-panel-header { display: flex; align-items: center; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #333; }
+.info-panel-icon { margin-right: 10px; }
+.info-panel-title { font-size: 16px; font-weight: 600; color: #e8e8e8; }
+.info-panel-subtitle { font-size: 12px; color: #888; margin-top: 2px; }
+.info-card { background: #252526; border: 1px solid #333; border-radius: 6px; padding: 14px 16px; margin-bottom: 12px; }
+.info-card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #5dade2; margin-bottom: 10px; font-weight: 600; }
+.info-row { display: flex; align-items: center; padding: 6px 0; font-size: 12px; }
+.info-row + .info-row { border-top: 1px solid #2a2a2a; }
+.info-label { width: 110px; flex-shrink: 0; color: #888; }
+.info-value { color: #d4d4d4; word-break: break-all; flex: 1; min-width: 0; }
+.info-value-mono { font-family: Consolas, "Courier New", monospace; font-size: 11px; color: #6a9955; }
+.info-badge {
+    display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 10px; font-weight: 600;
+    background: #1a3a1a; color: #4ec94e; margin-right: 6px;
+}
+.info-badge.redis { background: #3a1a1a; color: #e74c3c; }
+.info-badge.ora { background: #3a2010; color: #e67e22; }
+.info-stats { display: flex; gap: 12px; flex-wrap: wrap; }
+.info-stat-item {
+    flex: 1; min-width: 90px; background: #1e1e1e; border: 1px solid #333; border-radius: 4px;
+    padding: 10px 12px; text-align: center;
+}
+.info-stat-num { font-size: 20px; font-weight: 700; color: #5dade2; }
+.info-stat-label { font-size: 10px; color: #888; margin-top: 3px; }
+.info-loading { padding: 40px; text-align: center; color: #666; }
+.info-error { padding: 20px; color: #e74c3c; font-size: 12px; background: #2a1515; border-radius: 4px; margin: 16px; }
 .obj-tabs { display: flex; align-items: center; gap: 0; padding: 6px 12px; border-bottom: 1px solid #333; flex-shrink: 0; overflow: hidden; }
 .obj-search-wrap { margin-left: auto; flex-shrink: 0; }
 .obj-search-input {
@@ -478,8 +518,8 @@ td.cell-with-icon:hover .text-expand-icon {
 .import-label { font-size: 11px; margin-left: 6px; white-space: nowrap; }
 .input-sm { width: 120px; height: 28px; }
 
-/* 单元格 Tooltip */
-.cell-tooltip { display: none; position: fixed; z-index: 1500; background: #2c3e50; color: #ecf0f1; padding: 5px 10px; border-radius: 4px; font-size: 11px; pointer-events: none; white-space: nowrap; font-family: "Microsoft YaHei", sans-serif; }
+/* 单元格 overflow Tooltip */
+.cell-tooltip { display: none; position: fixed; z-index: 1500; background: #2c3e50; color: #ecf0f1; padding: 6px 10px; border-radius: 4px; font-size: 11px; pointer-events: none; max-width: 480px; white-space: pre-wrap; word-break: break-all; font-family: "Microsoft YaHei", Consolas, monospace; line-height: 1.5; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
 
 /* 字段注释悬浮 Tooltip */
 .field-cmt-tooltip {

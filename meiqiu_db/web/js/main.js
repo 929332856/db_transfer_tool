@@ -348,6 +348,8 @@ function pollProgress() {
 let isQueryRunning = false;
 let queryDiscard = false;
 let _queryTimeoutId = null;
+/** 最近一次查询结果（columns / rows / total）供导出使用 */
+let _lastQueryResult = null;
 
 function _resetQueryState() {
     if (_queryTimeoutId) { clearTimeout(_queryTimeoutId); _queryTimeoutId = null; }
@@ -406,6 +408,7 @@ function executeQuery() {
             _resetQueryState();
             $('query_info').textContent = '查询结果: 超时';
             $('table_scroll').innerHTML = '<div style="padding:20px;color:#f39c12;">⚠️ 查询超时或无响应，请重试</div>';
+            _hideExportBtns();
             appendLog('⚠️ 查询超时（60秒），已自动取消');
         }
     }, 60000);
@@ -419,14 +422,18 @@ function executeQuery() {
         if (!result) {
             $('query_info').textContent = '查询结果: 出错';
             $('table_scroll').innerHTML = '<div style="padding:20px;color:#ff4444;">❌ 无响应</div>';
+            _hideExportBtns();
             return;
         }
-        if (result.cancelled) { appendLog('⏸ 查询已取消'); return; }
+        if (result.cancelled) { _hideExportBtns(); appendLog('⏸ 查询已取消'); return; }
         if (!result.ok) {
             $('query_info').textContent = '查询结果: 出错';
             $('table_scroll').innerHTML = '<div style="padding:20px;color:#ff4444;">❌ ' + (result.msg || '未知错误') + '</div>';
+            _hideExportBtns();
             return;
         }
+        // 存储供导出使用
+        _lastQueryResult = { columns: result.columns, rows: result.rows, total: result.total || 0 };
         buildResultTable(result.columns, result.rows, result.total || 0, result.comments || {}, result.col_types || {});
         var elapsed = ((Date.now() - queryStartTime) / 1000).toFixed(1);
         appendLog('✅ 查询完成，返回 ' + (result.total || 0) + ' 行（耗时 ' + elapsed + 's）');
@@ -439,9 +446,13 @@ function buildResultTable(columns, rows, total, comments, colTypes) {
     comments = comments || {};
     colTypes = colTypes || {};
     $('query_info').textContent = '查询结果: ' + total + ' 行';
+    // 显示导出按钮
+    var exportBtns = document.getElementById('query_export_btns');
+    if (exportBtns) exportBtns.style.display = 'flex';
     const wrapper = $('table_scroll');
     if (!columns || !columns.length) {
         wrapper.innerHTML = '<div style="padding:20px;">（无返回结果集）</div>';
+        _hideExportBtns();
         return;
     }
 
@@ -749,7 +760,391 @@ function escapeHtml(str) {
 function escapeAttr(str) {
     if (str == null) return '';
     str = String(str);
-    return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return str
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '&quot;')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\t/g, '\\t')
+        .replace(/'/g, "\\'");
+}
+
+// ==================== 查询结果导出（向导模式：格式→路径→执行） ====================
+/** 隐藏导出按钮 */
+function _hideExportBtns() {
+    var el = document.getElementById('query_export_btns');
+    if (el) el.style.display = 'none';
+}
+
+/** 导出状态管理 */
+var _qsExportState = null;   // { step, fmt, tableName, path, rowCount, totalBytes, results, written, pct, done, error, resultInfo }
+var _qsExportTimer = null;
+var _qsExportLogs = [];
+
+/** 格式化字节 */
+function _qsFmtBytes(b) {
+    if (!b && b !== 0) return '0 B';
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1048576).toFixed(1) + ' MB';
+}
+
+/** CSV 值转义 */
+function _csvEscape(val) {
+    if (val === null || val === undefined) return 'NULL';
+    var s = String(val);
+    if (/[,"\n\r]/.test(s)) {
+        return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+}
+
+/** 构建 CSV 内容 */
+function _buildCsvContent(qr) {
+    var cols = qr.columns;
+    var rows = qr.rows;
+    var csv = '\uFEFF';
+    csv += cols.map(function (c) { return _csvEscape(String(c)); }).join(',') + '\r\n';
+    for (var i = 0; i < rows.length; i++) {
+        csv += rows[i].map(function (v) { return _csvEscape(v); }).join(',') + '\r\n';
+    }
+    return csv;
+}
+
+/** 构建 SQL INSERT 内容 */
+function _buildSqlContent(qr, tableName) {
+    var cols = qr.columns;
+    var rows = qr.rows;
+    var colList = '`' + cols.join('`, `') + '`';
+    var sql = '-- ====================================\n';
+    sql += '-- 导出时间: ' + new Date().toISOString() + '\n';
+    sql += '-- 目标表:   `' + tableName + '`\n';
+    sql += '-- 行数:     ' + rows.length + '\n';
+    sql += '-- ====================================\n\n';
+    for (var i = 0; i < rows.length; i++) {
+        var vals = rows[i].map(function (v) {
+            if (v === null || v === undefined) return 'NULL';
+            var s = String(v);
+            return "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+        }).join(', ');
+        sql += 'INSERT INTO `' + tableName + '` (' + colList + ') VALUES (' + vals + ');\n';
+    }
+    return sql;
+}
+
+/** 触发浏览器下载（保留用于非查询导出场景） */
+function _downloadFile(content, filename, mimeType) {
+    var blob = new Blob([content], { type: mimeType + ';charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 100);
+}
+
+// ========== 导出向导入口 ==========
+function exportQueryResult() {
+    var qr = _lastQueryResult;
+    if (!qr || !qr.columns || !qr.columns.length) {
+        showWarnDialog('提示', '没有可导出的查询结果，请先执行查询');
+        return;
+    }
+    _qsExportState = {
+        step: 1, fmt: 'csv', tableName: 'exported_table', path: '',
+        rowCount: qr.rows.length, totalBytes: 0, results: qr,
+        written: 0, pct: 0, done: false, error: null, resultInfo: null
+    };
+    _qsExportLogs = [];
+    _showExportStep1();
+}
+
+// ========== 第1步：选择格式 ==========
+function _showExportStep1() {
+    var s = _qsExportState;
+    var html =
+        '<div style="padding:5px 0;text-align:left;">' +
+            '<h4 style="margin:0 0 12px;color:#4fc3f7;font-size:13px;">📥 第1步：选择导出格式</h4>' +
+            '<div style="font-size:11px;color:#888;margin-bottom:10px;">查询结果共 <b style="color:#f39c12;">' + s.rowCount + '</b> 条记录</div>' +
+            '<div style="display:flex;gap:14px;margin-bottom:10px;">' +
+                '<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;padding:6px 10px;border:1px solid ' + (s.fmt === 'csv' ? '#4fc3f7' : '#444') + ';border-radius:4px;background:' + (s.fmt === 'csv' ? '#1a2e44' : 'transparent') + ';">' +
+                    '<input type="radio" name="export_fmt" value="csv" ' + (s.fmt === 'csv' ? 'checked' : '') + ' onchange="_qsFmtChange(this)" style="accent-color:#4fc3f7;"> 📄 CSV' +
+                '</label>' +
+                '<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;padding:6px 10px;border:1px solid ' + (s.fmt === 'sql' ? '#4fc3f7' : '#444') + ';border-radius:4px;background:' + (s.fmt === 'sql' ? '#1a2e44' : 'transparent') + ';">' +
+                    '<input type="radio" name="export_fmt" value="sql" ' + (s.fmt === 'sql' ? 'checked' : '') + ' onchange="_qsFmtChange(this)" style="accent-color:#4fc3f7;"> 📜 SQL' +
+                '</label>' +
+            '</div>' +
+            '<div id="qs_export_tablename_row" style="display:' + (s.fmt === 'sql' ? 'flex' : 'none') + ';align-items:center;gap:8px;margin-bottom:6px;">' +
+                '<span style="font-size:11px;white-space:nowrap;">目标表名:</span>' +
+                '<input type="text" id="qs_export_table" value="' + escapeAttr(s.tableName) + '" style="flex:1;height:28px;font-size:12px;" placeholder="输入 SQL INSERT 的目标表名">' +
+            '</div>' +
+        '</div>';
+    showModal('📥', '导出查询结果', html, '#4fc3f7',
+        '<button class="btn btn-gray btn-sm" onclick="hideModal()">取消</button>' +
+        '<button class="btn btn-blue btn-sm" onclick="_qsExportNext()">下一步 →</button>');
+}
+
+function _qsFmtChange(el) {
+    _qsExportState.fmt = el.value;
+    var row = document.getElementById('qs_export_tablename_row');
+    if (row) row.style.display = el.value === 'sql' ? 'flex' : 'none';
+    // 更新边框高亮
+    var labels = document.querySelectorAll('#modal_msg label');
+    labels.forEach(function(l) {
+        var r = l.querySelector('input[type=radio]');
+        if (r) {
+            l.style.borderColor = r.checked ? '#4fc3f7' : '#444';
+            l.style.background = r.checked ? '#1a2e44' : 'transparent';
+        }
+    });
+}
+
+// ========== 第2步：选择路径 ==========
+function _qsExportNext() {
+    if (_qsExportState.fmt === 'sql') {
+        var tb = document.getElementById('qs_export_table');
+        _qsExportState.tableName = (tb && tb.value.trim()) ? tb.value.trim() : 'exported_table';
+    }
+    _qsExportState.step = 2;
+    _showExportStep2();
+}
+
+function _showExportStep2() {
+    var s = _qsExportState;
+    var fmtLabel = s.fmt === 'csv' ? 'CSV' : 'SQL';
+    var html =
+        '<div style="padding:5px 0;text-align:left;">' +
+            '<h4 style="margin:0 0 8px;color:#4fc3f7;font-size:13px;">📥 第2步：选择保存路径</h4>' +
+            '<div style="font-size:11px;color:#bbb;margin-bottom:10px;background:#1a2230;padding:6px 10px;border-radius:4px;">' +
+                '格式: <b style="color:#4fc3f7;">' + fmtLabel + '</b> | 行数: <b style="color:#f39c12;">' + s.rowCount + '</b>' +
+                (s.fmt === 'sql' ? ' | 表名: <b>' + escapeHtml(s.tableName) + '</b>' : '') +
+            '</div>' +
+            '<div style="margin-bottom:8px;">' +
+                '<button class="btn btn-sm" style="background:#5dade2;" onclick="_qsPickPath()">📁 选择保存路径</button>' +
+            '</div>' +
+            '<div id="qs_export_path_display" style="font-size:11px;color:' + (s.path ? '#2ecc71' : '#888') + ';word-break:break-all;margin-bottom:6px;min-height:18px;">' +
+                (s.path ? '✅ ' + escapeHtml(s.path) : '⚠ 请选择保存路径') +
+            '</div>' +
+        '</div>';
+    showModal('📥', '导出查询结果', html, '#4fc3f7',
+        '<button class="btn btn-gray btn-sm" onclick="_qsExportBack()">← 上一步</button>' +
+        '<button class="btn btn-green btn-sm" id="qs_export_exec_btn" onclick="_qsExportExec()" ' + (s.path ? '' : 'disabled') + '>▶ 执行</button>');
+}
+
+function _qsPickPath() {
+    eel.export_pick_file(_qsExportState.fmt)(function(path) {
+        if (!path) return;
+        _qsExportState.path = path;
+        var disp = document.getElementById('qs_export_path_display');
+        if (disp) { disp.textContent = '✅ ' + path; disp.style.color = '#2ecc71'; }
+        var btn = document.getElementById('qs_export_exec_btn');
+        if (btn) btn.disabled = false;
+    });
+}
+
+function _qsExportBack() {
+    _qsExportState.step = 1;
+    _showExportStep1();
+}
+
+// ========== 第3步：执行导出 + 进度/结果 ==========
+function _qsExportExec() {
+    var s = _qsExportState;
+    if (!s.path) {
+        showWarnDialog('提示', '请先选择保存路径');
+        return;
+    }
+
+    // 构建导出内容
+    var content;
+    try {
+        if (s.fmt === 'csv') {
+            content = _buildCsvContent(s.results);
+        } else {
+            content = _buildSqlContent(s.results, s.tableName);
+        }
+    } catch (e) {
+        _qsExportLogs.push('[ERROR] 构建内容失败: ' + (e.message || e));
+        showWarnDialog('导出失败', '构建导出内容时出错: ' + (e.message || e));
+        return;
+    }
+    s.totalBytes = content.length;
+
+    // 第3步弹窗
+    _showExportStep3();
+
+    // 启动轮询
+    _qsExportTimer = setInterval(function() {
+        if (!document.getElementById('modal_overlay').classList.contains('show')) {
+            clearInterval(_qsExportTimer); _qsExportTimer = null; return;
+        }
+        eel.poll_queue()(function(msgs) {
+            if (!msgs) return;
+            for (var i = 0; i < msgs.length; i++) {
+                var m = msgs[i];
+                if (m && m[0] === 'query_export_progress') {
+                    var d = m[1];
+                    _qsExportState.written = d.written;
+                    _qsExportState.pct = d.pct;
+                    _updateExportProgress();
+                } else if (m && m[0] === 'export_done') {
+                    clearInterval(_qsExportTimer); _qsExportTimer = null;
+                    _qsExportState.done = true;
+                    _qsExportState.resultInfo = m[1];
+                    _updateExportProgress();
+                    document.getElementById('modal_btns').innerHTML =
+                        '<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';
+                    // 记录日志
+                    var rowInfo = (m[1] && m[1].rows) ? m[1].rows : _qsExportState.rowCount;
+                    appendLog('✅ 导出完成 — ' + (_qsExportState.fmt === 'csv' ? 'CSV' : 'SQL') + ' | ' + rowInfo + ' 行 | ' + _qsFmtBytes(_qsExportState.totalBytes) + ' → ' + _qsExportState.path);
+                } else if (m && m[0] === 'export_error') {
+                    clearInterval(_qsExportTimer); _qsExportTimer = null;
+                    _qsExportState.error = m[1];
+                    _updateExportProgress();
+                    document.getElementById('modal_btns').innerHTML =
+                        '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';
+                    appendLog('❌ 导出失败: ' + ((m[1] && m[1].msg) ? m[1].msg : '未知错误'));
+                }
+            }
+        });
+    }, 200);
+
+    // 发起后台写入
+    eel.export_query_save(s.path, content, s.rowCount)(function(r) {
+        if (r && !r.ok) {
+            clearInterval(_qsExportTimer); _qsExportTimer = null;
+            _qsExportState.error = { msg: r.msg || '未知错误' };
+            _updateExportProgress();
+            document.getElementById('modal_btns').innerHTML =
+                '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';
+            appendLog('❌ 导出失败: ' + (r.msg || '未知错误'));
+        }
+    });
+}
+
+function _showExportStep3() {
+    var s = _qsExportState;
+    var html =
+        '<div style="padding:5px 0;">' +
+            '<h4 style="margin:0 0 6px;color:#4fc3f7;font-size:13px;">📥 正在导出...</h4>' +
+            '<div style="font-size:11px;color:#888;margin-bottom:4px;word-break:break-all;">' + escapeHtml(s.path) + '</div>' +
+            '<div style="font-size:11px;color:#999;margin-bottom:8px;">格式: ' + (s.fmt === 'csv' ? 'CSV' : 'SQL') + ' | 共 <b style="color:#f39c12;">' + s.rowCount + '</b> 行</div>' +
+            '<div class="progress-bar" style="height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;margin-bottom:6px;">' +
+                '<div id="qsexport_progress_bar" class="progress-fill" style="width:0%;height:100%;background:#27ae60;border-radius:4px;transition:width .3s;"></div>' +
+            '</div>' +
+            '<div id="qsexport_progress_info" style="font-size:11px;color:#888;text-align:center;">准备写入文件...</div>' +
+            '<div id="qsexport_result_detail" style="margin-top:8px;font-size:11px;display:none;"></div>' +
+        '</div>';
+    showModal('📥', '导出查询结果', html, '#4fc3f7',
+        '<button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;" onclick="_qsCancelExport()">⏹ 中断</button>' +
+        '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>');
+}
+
+function _updateExportProgress() {
+    var s = _qsExportState;
+    var bar = document.getElementById('qsexport_progress_bar');
+    var info = document.getElementById('qsexport_progress_info');
+    var detail = document.getElementById('qsexport_result_detail');
+
+    if (s.error) {
+        if (bar) { bar.style.width = (s.pct || 0) + '%'; bar.style.background = '#e74c3c'; }
+        if (info) { info.textContent = '❌ 导出失败'; info.style.color = '#e74c3c'; }
+        if (detail) {
+            detail.style.display = 'block';
+            detail.innerHTML = '<div style="background:#2a1515;border:1px solid #c0392b;border-radius:4px;padding:8px 10px;color:#e74c3c;font-family:Consolas,monospace;">' +
+                '<div style="font-weight:bold;margin-bottom:4px;">错误信息:</div>' +
+                '<div>' + escapeHtml(s.error.msg || '未知错误') + '</div></div>';
+        }
+    } else if (s.done) {
+        if (bar) { bar.style.width = '100%'; bar.style.background = '#2ecc71'; }
+        var rowCount = (s.resultInfo && s.resultInfo.rows) ? s.resultInfo.rows : s.rowCount;
+        if (info) {
+            info.textContent = '✅ 导出成功 — ' + _qsFmtBytes(s.totalBytes) + ' | ' + rowCount + ' 行';
+            info.style.color = '#2ecc71';
+        }
+        if (detail) {
+            detail.style.display = 'block';
+            detail.innerHTML = '<div style="background:#1a2a1a;border:1px solid #27ae60;border-radius:4px;padding:8px 10px;">' +
+                '<div style="color:#2ecc71;margin-bottom:3px;">✅ 导出成功</div>' +
+                '<div style="font-size:10px;color:#aaa;">文件: ' + escapeHtml(s.path) + '</div>' +
+                '<div style="font-size:10px;color:#aaa;">大小: ' + _qsFmtBytes(s.totalBytes) + ' | 行数: ' + rowCount + ' | 格式: ' + (s.fmt === 'csv' ? 'CSV' : 'SQL') + '</div></div>';
+        }
+    } else if (s.pct !== undefined) {
+        if (bar) bar.style.width = s.pct + '%';
+        if (info) info.textContent = '已写入 ' + _qsFmtBytes(s.written || 0) + ' / ' + _qsFmtBytes(s.totalBytes) + ' (' + s.pct + '%)';
+    }
+}
+
+function _qsCancelExport() {
+    if (_qsExportTimer) { clearInterval(_qsExportTimer); _qsExportTimer = null; }
+    hideModal();
+    appendLog('⏹ 导出已中断');
+}
+
+/** 快速导出到文件（tree_query.js 使用）：弹出保存对话框 + 进度条 */
+function _qsExportToFile(content, fmt) {
+    eel.export_pick_file(fmt)(function(path) {
+        if (!path) return;
+        var title = fmt === 'csv' ? '📥 导出 CSV' : '📥 导出 SQL';
+        var html =
+            '<div style="padding:10px 0;">' +
+                '<h4 style="margin:0 0 8px;">' + title + '</h4>' +
+                '<div style="font-size:11px;color:#aaa;margin-bottom:8px;word-break:break-all;">' + escapeHtml(path) + '</div>' +
+                '<div class="progress-bar" style="height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;margin-bottom:6px;">' +
+                    '<div id="qsexport_progress_bar" class="progress-fill" style="width:0%;height:100%;background:#27ae60;border-radius:4px;transition:width .3s;"></div>' +
+                '</div>' +
+                '<div id="qsexport_progress_info" style="font-size:11px;color:#888;text-align:center;">准备写入...</div>' +
+            '</div>';
+        showModal('📥', title, html, '#4fc3f7',
+            '<button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;" onclick="_qsCancelExport()">⏹ 中断</button>' +
+            '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>');
+
+        var totalBytes = content.length;
+        _qsExportTimer = setInterval(function() {
+            if (!document.getElementById('modal_overlay').classList.contains('show')) {
+                clearInterval(_qsExportTimer); _qsExportTimer = null; return;
+            }
+            eel.poll_queue()(function(msgs) {
+                if (!msgs) return;
+                for (var i = 0; i < msgs.length; i++) {
+                    var m = msgs[i];
+                    if (m && m[0] === 'query_export_progress') {
+                        var d = m[1];
+                        var bar = document.getElementById('qsexport_progress_bar');
+                        if (bar) bar.style.width = d.pct + '%';
+                        var info = document.getElementById('qsexport_progress_info');
+                        if (info) info.textContent = '已写入 ' + _qsFmtBytes(d.written) + ' / ' + _qsFmtBytes(d.total) + ' (' + d.pct + '%)';
+                    } else if (m && m[0] === 'export_done') {
+                        clearInterval(_qsExportTimer); _qsExportTimer = null;
+                        var bar = document.getElementById('qsexport_progress_bar');
+                        if (bar) bar.style.width = '100%';
+                        var info = document.getElementById('qsexport_progress_info');
+                        if (info) { info.textContent = '✅ 导出完成 — ' + _qsFmtBytes(m[1].written || totalBytes); info.style.color = '#2ecc71'; }
+                        document.getElementById('modal_btns').innerHTML =
+                            '<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';
+                    } else if (m && m[0] === 'export_error') {
+                        clearInterval(_qsExportTimer); _qsExportTimer = null;
+                        var errMsg = m[1] && m[1].msg ? m[1].msg : '未知错误';
+                        var bar2 = document.getElementById('qsexport_progress_bar');
+                        if (bar2) bar2.style.background = '#e74c3c';
+                        var info2 = document.getElementById('qsexport_progress_info');
+                        if (info2) { info2.textContent = '❌ 导出失败: ' + errMsg; info2.style.color = '#e74c3c'; }
+                        document.getElementById('modal_btns').innerHTML =
+                            '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';
+                    }
+                }
+            });
+        }, 200);
+
+        eel.export_query_save(path, content)(function(r) {
+            if (r && !r.ok) {
+                clearInterval(_qsExportTimer); _qsExportTimer = null;
+                showWarnDialog('导出失败', r.msg || '未知错误');
+            }
+        });
+    });
 }
 
 // ========== 初始化 ==========

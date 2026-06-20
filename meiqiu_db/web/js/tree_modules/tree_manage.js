@@ -114,14 +114,17 @@ function closeConnection(cid) {
         activeConnData = null;
         activeDatabase = '';
     }
-    // 确保 obj_home 存在并展示占位内容
-    var homeContent3 = '<div style="padding:40px;text-align:center;color:#666;"><div>请选择一个连接</div></div>';
-    var homeTab3 = objectTabs.find(function(t){return t.id==='obj_home';});
-    if (!homeTab3) { objectTabs.unshift({id:'obj_home',label:'对象',type:'home',content:homeContent3,db:''}); }
-    else { homeTab3.content = homeContent3; }
-    activeObjTab = 'obj_home';
-    activeCatId = null;
-    renderObjectPanel();
+    // ★ 只有当前激活的 tab 属于被关闭的连接时才刷新面板
+    var stillHasCurrentTab = objectTabs.some(function(t) { return t.id === activeObjTab; });
+    if (!stillHasCurrentTab) {
+        var homeContent3 = '<div style="padding:40px;text-align:center;color:#666;"><div>请选择一个连接</div></div>';
+        var homeTab3 = objectTabs.find(function(t){return t.id==='obj_home';});
+        if (!homeTab3) { objectTabs.unshift({id:'obj_home',label:'对象',type:'home',content:homeContent3,db:''}); }
+        else { homeTab3.content = homeContent3; }
+        activeObjTab = 'obj_home';
+        activeCatId = null;
+        renderObjectPanel();
+    }
 }
 
 function addFolder(pid) { showInputDialog('新建文件夹','名称：',function(n){if(!n||!n.trim())return;eel.tree_add_folder(pid||'',n.trim())(function(r){if(r&&r.ok){treeData.folders=treeData.folders||[];var f={id:r.id,name:n.trim(),parent:pid||''};treeData.folders.push(f);addFolderToTree(f);}});}); }

@@ -3497,16 +3497,49 @@ def export_wizard_start(conn_data, database, tables, settings, schema=''):
 
 
 @eel.expose
-def export_pick_file():
-    """打开文件保存对话框，返回路径"""
+def export_pick_file(fmt='sql'):
+    """打开文件保存对话框，返回路径（fmt: 'csv' | 'sql'）"""
     import tkinter.filedialog as fd, tkinter
     root = tkinter.Tk(); root.withdraw(); root.attributes('-topmost', True)
+    if fmt == 'csv':
+        def_ext = '.csv'
+        filetypes = [("CSV文件", "*.csv"), ("所有文件", "*.*")]
+    else:
+        def_ext = '.sql'
+        filetypes = [("SQL文件", "*.sql"), ("所有文件", "*.*")]
     path = fd.asksaveasfilename(
-        title="选择导出位置", defaultextension=".sql",
-        filetypes=[("SQL文件", "*.sql"), ("CSV文件", "*.csv"), ("所有文件", "*.*")]
+        title="选择导出位置", defaultextension=def_ext, filetypes=filetypes
     )
     root.destroy()
     return path or ""
+
+
+@eel.expose
+def export_query_save(path, content, rows=0):
+    """后台保存查询导出内容，向前端推送写入进度。rows 为导出行数"""
+    _progress_q.queue.clear()
+    threading.Thread(target=_export_query_write, args=(path, content, rows), daemon=True).start()
+    return {"ok": True}
+
+
+def _export_query_write(path, content, rows=0):
+    """分块写入文件并推送进度"""
+    try:
+        total = len(content)
+        chunk_size = 512 * 1024  # 512KB chunks
+        written = 0
+        with open(path, 'w', encoding='utf-8') as f:
+            while written < total:
+                end = min(written + chunk_size, total)
+                f.write(content[written:end])
+                written = end
+                pct = round((written / total) * 100)
+                _progress_q.put(("query_export_progress", {"pct": pct, "written": written, "total": total}))
+        _progress_q.put(("export_done", {"path": path, "written": total, "rows": rows}))
+    except Exception as e:
+        import traceback
+        err_detail = traceback.format_exc()
+        _progress_q.put(("export_error", {"msg": str(e), "detail": err_detail}))
 
 
 @eel.expose
@@ -3724,7 +3757,7 @@ def slow_query_get_databases(data: dict):
 
 @eel.expose
 def slow_query_check_enabled(data: dict):
-    """检查慢查询是否已开启"""
+    """检查慢查询是否已开启（MySQL 用 slow_query_log，OceanBase 用 SQL_AUDIT）"""
     try:
         cdata = dict(data)
         if "user" not in cdata:
@@ -3733,26 +3766,60 @@ def slow_query_check_enabled(data: dict):
                 "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
                 "db": "", "db_type": cdata.get("db_type", "mysql")
             }
+        db_type = cdata.get("db_type", "mysql")
         url = _conn_url(cdata)
         engine = create_engine(url, connect_args=_connect_args("mysql", timeout=10))
         with engine.connect() as conn:
-            # 检查 slow_query_log 是否开启
-            row = conn.execute(text(
-                "SHOW VARIABLES LIKE 'slow_query_log'"
-            )).fetchone()
-            enabled = row[1] == 'ON' if row else False
+            if db_type == 'ob-mysql':
+                # OceanBase：检查 ob_enable_sql_audit（审计视图是否可用）
+                try:
+                    row = conn.execute(text(
+                        "SHOW VARIABLES LIKE 'ob_enable_sql_audit'"
+                    )).fetchone()
+                except Exception:
+                    row = None
+                enabled = row[1] == 'ON' if row else True  # OB 默认开启 SQL 审计
 
-            # 获取慢查询阈值
-            threshold_row = conn.execute(text(
-                "SHOW VARIABLES LIKE 'long_query_time'"
-            )).fetchone()
-            threshold = float(threshold_row[1]) if threshold_row else 10.0
+                # 尝试获取 SQL 审计百分比
+                try:
+                    pct_row = conn.execute(text(
+                        "SHOW VARIABLES LIKE 'ob_sql_audit_percentage'"
+                    )).fetchone()
+                    audit_pct = int(pct_row[1]) if pct_row else 100
+                except Exception:
+                    audit_pct = 100
 
-            # 慢日志文件路径（如果开启）
-            log_file_row = conn.execute(text(
-                "SHOW VARIABLES LIKE 'slow_query_log_file'"
-            )).fetchone()
-            log_file = log_file_row[1] if log_file_row else ""
+                # OB 阈值用 trace_log_slow_query_watermark
+                try:
+                    th_row = conn.execute(text(
+                        "SHOW VARIABLES LIKE 'trace_log_slow_query_watermark'"
+                    )).fetchone()
+                except Exception:
+                    th_row = None
+                if th_row:
+                    threshold = _parse_ob_time_to_sec(th_row[1])
+                else:
+                    threshold = 1.0
+
+                log_file = f"SQL审计采样率: {audit_pct}% (查询 oceanbase.GV$OB_SQL_AUDIT)"
+            else:
+                # MySQL：检查 slow_query_log 是否开启
+                row = conn.execute(text(
+                    "SHOW VARIABLES LIKE 'slow_query_log'"
+                )).fetchone()
+                enabled = row[1] == 'ON' if row else False
+
+                # 获取慢查询阈值
+                threshold_row = conn.execute(text(
+                    "SHOW VARIABLES LIKE 'long_query_time'"
+                )).fetchone()
+                threshold = float(threshold_row[1]) if threshold_row else 10.0
+
+                # 慢日志文件路径（如果开启）
+                log_file_row = conn.execute(text(
+                    "SHOW VARIABLES LIKE 'slow_query_log_file'"
+                )).fetchone()
+                log_file = log_file_row[1] if log_file_row else ""
 
         engine.dispose()
         return {
@@ -3765,9 +3832,30 @@ def slow_query_check_enabled(data: dict):
         return {"ok": False, "msg": str(e)}
 
 
+def _parse_ob_time_to_sec(val: str) -> float:
+    """解析 OceanBase 时间字符串（如 '1s'、'100ms'）为秒"""
+    if val is None:
+        return 1.0
+    v = str(val).strip().lower()
+    if v.endswith('ms'):
+        return float(v[:-2]) / 1000.0
+    if v.endswith('s'):
+        return float(v[:-1])
+    if v.endswith('m'):
+        return float(v[:-1]) * 60
+    if v.endswith('h'):
+        return float(v[:-1]) * 3600
+    if v.endswith('us'):
+        return float(v[:-2]) / 1000000.0
+    try:
+        return float(v)
+    except ValueError:
+        return 1.0
+
+
 @eel.expose
 def slow_query_enable(data: dict, long_time: float = 2.0):
-    """开启慢查询记录"""
+    """开启慢查询记录（MySQL 用慢日志，OceanBase 用 SQL 审计）"""
     try:
         cdata = dict(data)
         if "user" not in cdata:
@@ -3776,20 +3864,42 @@ def slow_query_enable(data: dict, long_time: float = 2.0):
                 "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
                 "db": "", "db_type": cdata.get("db_type", "mysql")
             }
+        db_type = cdata.get("db_type", "mysql")
         url = _conn_url(cdata)
         engine = create_engine(url, connect_args=_connect_args("mysql", timeout=10))
         with engine.connect() as conn:
-            # 先尝试 FILE 模式，失败则回退到 TABLE 模式
-            try:
-                conn.execute(text("SET GLOBAL slow_query_log = 'ON'"))
-            except Exception:
-                # 文件路径不存在，改为输出到 mysql.slow_log 表
-                conn.execute(text("SET GLOBAL log_output = 'TABLE'"))
-                conn.execute(text("SET GLOBAL slow_query_log = 'ON'"))
-            conn.execute(text(f"SET GLOBAL long_query_time = {long_time}"))
-            conn.execute(text("SET GLOBAL log_queries_not_using_indexes = 'ON'"))
+            if db_type == 'ob-mysql':
+                # OceanBase：确保 SQL 审计已开启 + 设置采样率为 100%
+                try:
+                    conn.execute(text("SET GLOBAL ob_enable_sql_audit = ON"))
+                except Exception:
+                    pass  # OB 默认开启，忽略权限不足
+                try:
+                    conn.execute(text("SET GLOBAL ob_sql_audit_percentage = 100"))
+                except Exception:
+                    pass
+                # 设置慢查询水位线（用于 trace log）
+                try:
+                    conn.execute(text(
+                        f"SET GLOBAL trace_log_slow_query_watermark = '{long_time}s'"
+                    ))
+                except Exception:
+                    pass
+                msg = (f"OceanBase SQL 审计已配置，慢查询阈值 {long_time}s\n"
+                       f"（通过 oceanbase.GV$OB_SQL_AUDIT 视图查询）")
+            else:
+                # MySQL：先尝试 FILE 模式，失败则回退到 TABLE 模式
+                try:
+                    conn.execute(text("SET GLOBAL slow_query_log = 'ON'"))
+                except Exception:
+                    # 文件路径不存在，改为输出到 mysql.slow_log 表
+                    conn.execute(text("SET GLOBAL log_output = 'TABLE'"))
+                    conn.execute(text("SET GLOBAL slow_query_log = 'ON'"))
+                conn.execute(text(f"SET GLOBAL long_query_time = {long_time}"))
+                conn.execute(text("SET GLOBAL log_queries_not_using_indexes = 'ON'"))
+                msg = f"慢查询已开启，阈值 {long_time}s"
         engine.dispose()
-        return {"ok": True, "msg": f"慢查询已开启，阈值 {long_time}s"}
+        return {"ok": True, "msg": msg}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
@@ -3798,8 +3908,9 @@ def slow_query_enable(data: dict, long_time: float = 2.0):
 def slow_query_get_list(data: dict, start_time: str = '', end_time: str = '',
                          limit: int = 100):
     """
-    从 performance_schema 获取全局慢查询排行列表（不按数据库过滤）
-    返回：按平均耗时倒序排列的 TOP 慢 SQL，标注每条SQL的来源数据库
+    获取全局慢查询排行列表（按平均耗时倒序）
+    MySQL：从 performance_schema.events_statements_summary_by_digest
+    OceanBase：从 oceanbase.GV$OB_SQL_AUDIT 聚合查询
     """
     try:
         cdata = dict(data)
@@ -3820,41 +3931,91 @@ def slow_query_get_list(data: dict, start_time: str = '', end_time: str = '',
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=30))
 
         with engine.connect() as conn:
-            # 先确认 performance_schema.events_statements_summary_by_digest 表是否存在
-            check = conn.execute(text("""
-                SELECT COUNT(*) FROM information_schema.tables
-                WHERE table_schema='performance_schema'
-                  AND table_name='events_statements_summary_by_digest'
-            """)).scalar()
+            if db_type == 'ob-mysql':
+                # ===== OceanBase 路径：从 GV$OB_SQL_AUDIT 聚合 =====
+                # 先检查视图是否存在
+                try:
+                    check = conn.execute(text("""
+                        SELECT COUNT(*) FROM information_schema.tables
+                        WHERE table_schema='oceanbase'
+                          AND table_name='GV$OB_SQL_AUDIT'
+                    """)).scalar()
+                except Exception:
+                    check = 0
 
-            if not check or check == 0:
-                engine.dispose()
-                return {"ok": False, "msg": "当前数据库不支持 performance_schema 慢查询统计",
-                        "rows": [], "total": 0}
+                if not check or check == 0:
+                    engine.dispose()
+                    return {"ok": False, "msg": "当前 OceanBase 不可访问 GV$OB_SQL_AUDIT 视图",
+                            "rows": [], "total": 0}
 
-            # 全局查询所有数据库的慢SQL，按 AVG_TIMER > 1秒 过滤
-            # 按平均耗时倒序排列，让最慢的SQL排在最前面
-            sql = text("""
-                SELECT
-                    SCHEMA_NAME as schema_name,
-                    DIGEST_TEXT as digest_text,
-                    COUNT_STAR as count_star,
-                    SUM_TIMER_WAIT/1000000000000.0 as total_time_sec,
-                    AVG_TIMER_WAIT/1000000000000.0 as avg_time_sec,
-                    MAX_TIMER_WAIT/1000000000000.0 as max_time_sec,
-                    SUM_ROWS_SENT as rows_sent,
-                    SUM_ROWS_EXAMINED as rows_examined,
-                    SUM_ERRORS as errors,
-                    SUM_WARNINGS as warnings,
-                    FIRST_SEEN as first_seen,
-                    LAST_SEEN as last_seen
-                FROM performance_schema.events_statements_summary_by_digest
-                WHERE AVG_TIMER_WAIT > 1000000000000
-                ORDER BY AVG_TIMER_WAIT DESC
-                LIMIT :lim
-            """)
-            exec_result = conn.execute(sql, {"lim": limit})
-            columns, rows = _rows_to_dicts(exec_result)
+                # OceanBase 聚合：按 QUERY_SQL + DB_NAME 分组，ELAPSED_TIME 单位微秒
+                where_parts = ["ELAPSED_TIME > 1000000", "QUERY_SQL IS NOT NULL"]
+                params = {"lim": limit}
+                if start_time:
+                    where_parts.append("REQUEST_TIME >= :st")
+                    params["st"] = start_time
+                if end_time:
+                    where_parts.append("REQUEST_TIME <= :et")
+                    params["et"] = end_time
+
+                where_clause = " AND ".join(where_parts)
+                sql = text(f"""
+                    SELECT
+                        DB_NAME as schema_name,
+                        SUBSTR(QUERY_SQL, 1, 4000) as digest_text,
+                        COUNT(1) as count_star,
+                        SUM(ELAPSED_TIME)/1000000.0 as total_time_sec,
+                        AVG(ELAPSED_TIME)/1000000.0 as avg_time_sec,
+                        MAX(ELAPSED_TIME)/1000000.0 as max_time_sec,
+                        SUM(RETURN_ROWS) as rows_sent,
+                        SUM(AFFECTED_ROWS) as rows_examined,
+                        SUM(CASE WHEN RET_CODE != 0 THEN 1 ELSE 0 END) as errors,
+                        0 as warnings,
+                        MIN(REQUEST_TIME) as first_seen,
+                        MAX(REQUEST_TIME) as last_seen
+                    FROM oceanbase.GV$OB_SQL_AUDIT
+                    WHERE {where_clause}
+                    GROUP BY DB_NAME, SUBSTR(QUERY_SQL, 1, 4000)
+                    ORDER BY AVG(ELAPSED_TIME) DESC
+                    LIMIT :lim
+                """)
+                exec_result = conn.execute(sql, params)
+                columns, rows = _rows_to_dicts(exec_result)
+
+            else:
+                # ===== MySQL 路径：从 performance_schema =====
+                check = conn.execute(text("""
+                    SELECT COUNT(*) FROM information_schema.tables
+                    WHERE table_schema='performance_schema'
+                      AND table_name='events_statements_summary_by_digest'
+                """)).scalar()
+
+                if not check or check == 0:
+                    engine.dispose()
+                    return {"ok": False, "msg": "当前数据库不支持 performance_schema 慢查询统计",
+                            "rows": [], "total": 0}
+
+                sql = text("""
+                    SELECT
+                        SCHEMA_NAME as schema_name,
+                        DIGEST_TEXT as digest_text,
+                        COUNT_STAR as count_star,
+                        SUM_TIMER_WAIT/1000000000000.0 as total_time_sec,
+                        AVG_TIMER_WAIT/1000000000000.0 as avg_time_sec,
+                        MAX_TIMER_WAIT/1000000000000.0 as max_time_sec,
+                        SUM_ROWS_SENT as rows_sent,
+                        SUM_ROWS_EXAMINED as rows_examined,
+                        SUM_ERRORS as errors,
+                        SUM_WARNINGS as warnings,
+                        FIRST_SEEN as first_seen,
+                        LAST_SEEN as last_seen
+                    FROM performance_schema.events_statements_summary_by_digest
+                    WHERE AVG_TIMER_WAIT > 1000000000000
+                    ORDER BY AVG_TIMER_WAIT DESC
+                    LIMIT :lim
+                """)
+                exec_result = conn.execute(sql, {"lim": limit})
+                columns, rows = _rows_to_dicts(exec_result)
 
         engine.dispose()
 
@@ -3872,8 +4033,9 @@ def slow_query_get_list(data: dict, start_time: str = '', end_time: str = '',
 def slow_query_get_log(data: dict, start_time: str = '', end_time: str = '',
                         limit: int = 200):
     """
-    从 mysql.slow_log 表读取历史慢日志记录（需 slow_query_log=ON 且 log_output=TABLE）
-    与 performance_schema 不同：这是按时间排序的原始日志，每条慢SQL都有精确的开始时间
+    读取慢查询原始日志
+    MySQL：从 mysql.slow_log 表（需 log_output=TABLE）
+    OceanBase：从 oceanbase.GV$OB_SQL_AUDIT（按时间排序的审计记录）
     """
     try:
         cdata = dict(data)
@@ -3894,46 +4056,77 @@ def slow_query_get_log(data: dict, start_time: str = '', end_time: str = '',
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=30))
 
         with engine.connect() as conn:
-            # 检查 slow_log 表是否存在
-            check = conn.execute(text("""
-                SELECT COUNT(*) FROM information_schema.tables
-                WHERE table_schema='mysql' AND table_name='slow_log'
-            """)).scalar()
+            if db_type == 'ob-mysql':
+                # ===== OceanBase 路径：GV$OB_SQL_AUDIT 按时间排列 =====
+                where_parts = ["ELAPSED_TIME > 1000000", "QUERY_SQL IS NOT NULL"]
+                params = {"lim": limit}
+                if start_time:
+                    where_parts.append("REQUEST_TIME >= :st")
+                    params["st"] = start_time
+                if end_time:
+                    where_parts.append("REQUEST_TIME <= :et")
+                    params["et"] = end_time
+                where_clause = " AND ".join(where_parts)
 
-            if not check or check == 0:
-                engine.dispose()
-                return {"ok": False, "msg": "mysql.slow_log 表不存在，请先开启慢查询记录并设置 log_output=TABLE",
-                        "rows": [], "total": 0}
+                sql = text(f"""
+                    SELECT
+                        REQUEST_TIME as start_time,
+                        CONCAT(USER_NAME, '@', CLIENT_IP) as user_host,
+                        ELAPSED_TIME/1000000.0 as query_time,
+                        0 as lock_time,
+                        RETURN_ROWS as rows_sent,
+                        AFFECTED_ROWS as rows_examined,
+                        DB_NAME as db,
+                        SUBSTR(QUERY_SQL, 1, 4000) as sql_text
+                    FROM oceanbase.GV$OB_SQL_AUDIT
+                    WHERE {where_clause}
+                    ORDER BY ELAPSED_TIME DESC
+                    LIMIT :lim
+                """)
+                exec_result = conn.execute(sql, params)
+                columns, rows = _rows_to_dicts(exec_result)
 
-            # 构建查询
-            where_parts = []
-            params = {"lim": limit}
-            if start_time:
-                where_parts.append("start_time >= :st")
-                params["st"] = start_time
-            if end_time:
-                where_parts.append("start_time <= :et")
-                params["et"] = end_time
+            else:
+                # ===== MySQL 路径：mysql.slow_log =====
+                check = conn.execute(text("""
+                    SELECT COUNT(*) FROM information_schema.tables
+                    WHERE table_schema='mysql' AND table_name='slow_log'
+                """)).scalar()
 
-            where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+                if not check or check == 0:
+                    engine.dispose()
+                    return {"ok": False, "msg": "mysql.slow_log 表不存在，请先开启慢查询记录并设置 log_output=TABLE",
+                            "rows": [], "total": 0}
 
-            sql = text(f"""
-                SELECT
-                    start_time,
-                    user_host,
-                    query_time,
-                    lock_time,
-                    rows_sent,
-                    rows_examined,
-                    db,
-                    sql_text
-                FROM mysql.slow_log
-                {where_clause}
-                ORDER BY query_time DESC
-                LIMIT :lim
-            """)
-            exec_result = conn.execute(sql, params)
-            columns, rows = _rows_to_dicts(exec_result)
+                # 构建查询
+                where_parts = []
+                params = {"lim": limit}
+                if start_time:
+                    where_parts.append("start_time >= :st")
+                    params["st"] = start_time
+                if end_time:
+                    where_parts.append("start_time <= :et")
+                    params["et"] = end_time
+
+                where_clause = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+                sql = text(f"""
+                    SELECT
+                        start_time,
+                        user_host,
+                        query_time,
+                        lock_time,
+                        rows_sent,
+                        rows_examined,
+                        db,
+                        sql_text
+                    FROM mysql.slow_log
+                    {where_clause}
+                    ORDER BY query_time DESC
+                    LIMIT :lim
+                """)
+                exec_result = conn.execute(sql, params)
+                columns, rows = _rows_to_dicts(exec_result)
 
         engine.dispose()
 
@@ -3961,7 +4154,7 @@ def slow_query_get_detail(conn_data: dict, database: str, digest_text: str):
             }
         db_type = cdata.get("db_type", "mysql")
         if db_type not in ('mysql', 'ob-mysql'):
-            return {"ok": False, "msg": "仅支持 MySQL"}
+            return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
 
         url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:"
@@ -3969,63 +4162,137 @@ def slow_query_get_detail(conn_data: dict, database: str, digest_text: str):
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=15))
 
         with engine.connect() as conn:
-            # 1. 获取汇总统计
-            summary_sql = f"""
-                SELECT
-                    SCHEMA_NAME, DIGEST_TEXT, COUNT_STAR,
-                    SUM_TIMER_WAIT/1000000000000.0 as total_time,
-                    AVG_TIMER_WAIT/1000000000000.0 as avg_time,
-                    MAX_TIMER_WAIT/1000000000000.0 as max_time,
-                    MIN_TIMER_WAIT/1000000000000.0 as min_time,
-                    SUM_ROWS_SENT, SUM_ROWS_EXAMINED, SUM_ROWS_AFFECTED,
-                    SUM_CREATED_TMP_TABLES, SUM_CREATED_TMP_DISK_TABLES,
-                    SUM_SORT_MERGE_PASSES, SUM_SORT_ROWS,
-                    SUM_ERRORS, SUM_WARNINGS,
-                    FIRST_SEEN, LAST_SEEN
-                FROM performance_schema.events_statements_summary_by_digest
-                WHERE SCHEMA_NAME = :db AND DIGEST_TEXT = :dtxt
-                LIMIT 1
-            """
-            summary = conn.execute(text(summary_sql), {
-                "db": database, "dtxt": digest_text
-            }).fetchone()
+            if db_type == 'ob-mysql':
+                # ===== OceanBase 路径：GV$OB_SQL_AUDIT 聚合统计 + 最近样本 =====
+                sql_prefix = digest_text[:200] if digest_text else ''
 
-            if not summary:
-                engine.dispose()
-                return {"ok": False, "msg": "未找到该SQL的统计数据"}
+                summary_sql = text("""
+                    SELECT
+                        DB_NAME as schema_name,
+                        SUBSTR(QUERY_SQL, 1, 4000) as digest_text,
+                        COUNT(1) as count_star,
+                        SUM(ELAPSED_TIME)/1000000.0 as total_time,
+                        AVG(ELAPSED_TIME)/1000000.0 as avg_time,
+                        MAX(ELAPSED_TIME)/1000000.0 as max_time,
+                        MIN(ELAPSED_TIME)/1000000.0 as min_time,
+                        SUM(RETURN_ROWS) as rows_sent,
+                        SUM(AFFECTED_ROWS) as rows_examined,
+                        SUM(CASE WHEN RET_CODE != 0 THEN 1 ELSE 0 END) as errors,
+                        0 as warnings,
+                        MIN(REQUEST_TIME) as first_seen,
+                        MAX(REQUEST_TIME) as last_seen
+                    FROM oceanbase.GV$OB_SQL_AUDIT
+                    WHERE DB_NAME = :db
+                      AND SUBSTR(QUERY_SQL, 1, 200) = :prefix
+                    GROUP BY DB_NAME, SUBSTR(QUERY_SQL, 1, 4000)
+                    LIMIT 1
+                """)
+                summary = conn.execute(summary_sql, {
+                    "db": database, "prefix": sql_prefix
+                }).fetchone()
 
-            # 使用 _mapping 安全构建 dict，同时处理 Decimal/datetime
-            detail = {}
-            for k, v in summary._mapping.items():
-                key = k.lower().replace(' ', '_') if isinstance(k, str) else str(k)
-                detail[key] = _json_safe(v)
+                if not summary:
+                    engine.dispose()
+                    return {"ok": False, "msg": "未找到该SQL的统计数据"}
 
-            # 2. 从 events_statements_history 获取最近几次执行的完整SQL
-            recent_sqls = []
-            try:
-                history_sql = f"""
-                    SELECT SQL_TEXT, TIMER_START, TIMER_END, LOCK_TIME,
-                           ROWS_SENT, ROWS_EXAMINED, ERRORS, WARNINGS
-                    FROM performance_schema.events_statements_history
-                    WHERE SCHEMA_NAME = :db
-                      AND SUBSTRING(SQL_TEXT, 1, 200) = SUBSTRING(:dtxt, 1, 200)
-                    ORDER BY TIMER_START DESC
-                    LIMIT 5
-                """
-                hist_result = conn.execute(text(history_sql), {
+                detail = {}
+                for k, v in summary._mapping.items():
+                    key = k.lower().replace(' ', '_') if isinstance(k, str) else str(k)
+                    detail[key] = _json_safe(v)
+
+                # 最近样本：从 GV$OB_SQL_AUDIT 取最新 5 条
+                recent_sqls = []
+                try:
+                    hist_sql = text("""
+                        SELECT
+                            SUBSTR(QUERY_SQL, 1, 4000) as SQL_TEXT,
+                            REQUEST_TIME as TIMER_START,
+                            ELAPSED_TIME as TIMER_END_TIME,
+                            0 as LOCK_TIME,
+                            RETURN_ROWS as ROWS_SENT,
+                            AFFECTED_ROWS as ROWS_EXAMINED,
+                            CASE WHEN RET_CODE != 0 THEN 1 ELSE 0 END as ERRORS,
+                            0 as WARNINGS,
+                            TRACE_ID, USER_NAME, CLIENT_IP, RET_CODE, PLAN_ID
+                        FROM oceanbase.GV$OB_SQL_AUDIT
+                        WHERE DB_NAME = :db
+                          AND SUBSTR(QUERY_SQL, 1, 200) = :prefix
+                        ORDER BY REQUEST_TIME DESC
+                        LIMIT 5
+                    """)
+                    hist_result = conn.execute(hist_sql, {
+                        "db": database, "prefix": sql_prefix
+                    }).fetchall()
+                    for hr in hist_result:
+                        hdict = {}
+                        for k, v in hr._mapping.items():
+                            key = str(k)
+                            if key == 'TIMER_END_TIME' and isinstance(v, (int, float)):
+                                hdict['ELAPSED'] = f"{v/1000000.0:.4f}s" if v > 0 else "0"
+                                hdict[key] = _json_safe(v)
+                            else:
+                                hdict[key] = _json_safe(v)
+                        recent_sqls.append(hdict)
+                except Exception:
+                    pass
+
+            else:
+                # ===== MySQL 路径 =====
+                summary_sql = text("""
+                    SELECT
+                        SCHEMA_NAME, DIGEST_TEXT, COUNT_STAR,
+                        SUM_TIMER_WAIT/1000000000000.0 as total_time,
+                        AVG_TIMER_WAIT/1000000000000.0 as avg_time,
+                        MAX_TIMER_WAIT/1000000000000.0 as max_time,
+                        MIN_TIMER_WAIT/1000000000000.0 as min_time,
+                        SUM_ROWS_SENT, SUM_ROWS_EXAMINED, SUM_ROWS_AFFECTED,
+                        SUM_CREATED_TMP_TABLES, SUM_CREATED_TMP_DISK_TABLES,
+                        SUM_SORT_MERGE_PASSES, SUM_SORT_ROWS,
+                        SUM_ERRORS, SUM_WARNINGS,
+                        FIRST_SEEN, LAST_SEEN
+                    FROM performance_schema.events_statements_summary_by_digest
+                    WHERE SCHEMA_NAME = :db AND DIGEST_TEXT = :dtxt
+                    LIMIT 1
+                """)
+                summary = conn.execute(summary_sql, {
                     "db": database, "dtxt": digest_text
-                }).fetchall()
-                for hr in hist_result:
-                    hdict = {}
-                    for k, v in hr._mapping.items():
-                        key = str(k)
-                        if isinstance(v, (int, float)) and key in ('TIMER_START', 'TIMER_END', 'LOCK_TIME'):
-                            hdict[key] = f"{v/1000000000000.0:.4f}s" if v > 0 else "0"
-                        else:
-                            hdict[key] = _json_safe(v)
-                    recent_sqls.append(hdict)
-            except Exception:
-                pass  # 历史表可能不可访问
+                }).fetchone()
+
+                if not summary:
+                    engine.dispose()
+                    return {"ok": False, "msg": "未找到该SQL的统计数据"}
+
+                detail = {}
+                for k, v in summary._mapping.items():
+                    key = k.lower().replace(' ', '_') if isinstance(k, str) else str(k)
+                    detail[key] = _json_safe(v)
+
+                # 从 events_statements_history 获取最近几次执行的完整SQL
+                recent_sqls = []
+                try:
+                    history_sql = text("""
+                        SELECT SQL_TEXT, TIMER_START, TIMER_END, LOCK_TIME,
+                               ROWS_SENT, ROWS_EXAMINED, ERRORS, WARNINGS
+                        FROM performance_schema.events_statements_history
+                        WHERE SCHEMA_NAME = :db
+                          AND SUBSTRING(SQL_TEXT, 1, 200) = SUBSTRING(:dtxt, 1, 200)
+                        ORDER BY TIMER_START DESC
+                        LIMIT 5
+                    """)
+                    hist_result = conn.execute(history_sql, {
+                        "db": database, "dtxt": digest_text
+                    }).fetchall()
+                    for hr in hist_result:
+                        hdict = {}
+                        for k, v in hr._mapping.items():
+                            key = str(k)
+                            if isinstance(v, (int, float)) and key in ('TIMER_START', 'TIMER_END', 'LOCK_TIME'):
+                                hdict[key] = f"{v/1000000000000.0:.4f}s" if v > 0 else "0"
+                            else:
+                                hdict[key] = _json_safe(v)
+                        recent_sqls.append(hdict)
+                except Exception:
+                    pass
 
         engine.dispose()
         return {"ok": True, "detail": detail, "recent_sqls": recent_sqls}
@@ -4072,21 +4339,412 @@ def slow_query_get_running(conn_data: dict):
         url = _conn_url(cdata)
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
-            exec_result = conn.execute(text(
-                "SELECT ID as id, USER as user_, HOST as host, DB as db, "
-                "COMMAND as command, TIME as time_, STATE as state, "
-                "INFO as info "
-                "FROM INFORMATION_SCHEMA.PROCESSLIST "
-                "WHERE COMMAND != 'Sleep' AND INFO IS NOT NULL AND INFO != '' "
-                "AND TIME >= 1 "
-                "ORDER BY TIME DESC LIMIT 50"
-            ))
+            if db_type == 'ob-mysql':
+                # OceanBase：用 GV$OB_PROCESSLIST 获取更全的信息
+                try:
+                    exec_result = conn.execute(text(
+                        "SELECT /*+ READ_CONSISTENCY(WEAK) */ "
+                        "ID as id, USER as user_, HOST as host, DB as db, "
+                        "COMMAND as command, TIME as time_, STATE as state, "
+                        "SUBSTR(INFO, 1, 500) as info "
+                        "FROM oceanbase.GV$OB_PROCESSLIST "
+                        "WHERE COMMAND != 'Sleep' AND INFO IS NOT NULL AND INFO != '' "
+                        "AND TIME >= 1 "
+                        "ORDER BY TIME DESC LIMIT 50"
+                    ))
+                except Exception:
+                    # 回退到标准 INFORMATION_SCHEMA
+                    exec_result = conn.execute(text(
+                        "SELECT ID as id, USER as user_, HOST as host, DB as db, "
+                        "COMMAND as command, TIME as time_, STATE as state, "
+                        "INFO as info "
+                        "FROM INFORMATION_SCHEMA.PROCESSLIST "
+                        "WHERE COMMAND != 'Sleep' AND INFO IS NOT NULL AND INFO != '' "
+                        "AND TIME >= 1 "
+                        "ORDER BY TIME DESC LIMIT 50"
+                    ))
+            else:
+                exec_result = conn.execute(text(
+                    "SELECT ID as id, USER as user_, HOST as host, DB as db, "
+                    "COMMAND as command, TIME as time_, STATE as state, "
+                    "INFO as info "
+                    "FROM INFORMATION_SCHEMA.PROCESSLIST "
+                    "WHERE COMMAND != 'Sleep' AND INFO IS NOT NULL AND INFO != '' "
+                    "AND TIME >= 1 "
+                    "ORDER BY TIME DESC LIMIT 50"
+                ))
             columns = list(exec_result.keys())
             rows = [dict(row._mapping) for row in exec_result.fetchall()]
         engine.dispose()
         return {"ok": True, "columns": columns, "rows": rows}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+
+
+# ==================== 右侧信息面板：连接/数据库详情 ====================
+
+@eel.expose
+def get_connection_info(conn_data):
+    """获取连接级别的详情信息（版本、状态等）
+    支持: mysql / ob-mysql / oracle / postgresql / redis"""
+    try:
+        db_type = conn_data.get("db_type", "mysql")
+
+        if db_type == 'redis':
+            import redis as rds
+            try:
+                r = rds.Redis(
+                    host=conn_data['host'], port=int(conn_data.get('port', '6379')),
+                    password=conn_data.get('pwd') or None,
+                    socket_connect_timeout=5, socket_timeout=10,
+                    decode_responses=True, encoding='utf-8', encoding_errors='replace',
+                    protocol=2
+                )
+            except TypeError:
+                r = rds.Redis(
+                    host=conn_data['host'], port=int(conn_data.get('port', '6379')),
+                    password=conn_data.get('pwd') or None,
+                    socket_connect_timeout=5, socket_timeout=10,
+                    decode_responses=True, encoding='utf-8', encoding_errors='replace'
+                )
+            info = r.info('server')
+            db_count = int(r.config_get('databases').get('databases', 16))
+            db_count = min(db_count, 16)
+            keys_total = 0
+            for i in range(db_count):
+                try:
+                    _r2 = rds.Redis(
+                        host=conn_data['host'], port=int(conn_data.get('port', '6379')),
+                        password=conn_data.get('pwd') or None, db=i,
+                        socket_connect_timeout=3, socket_timeout=5,
+                        decode_responses=True, protocol=2
+                    )
+                except TypeError:
+                    _r2 = rds.Redis(
+                        host=conn_data['host'], port=int(conn_data.get('port', '6379')),
+                        password=conn_data.get('pwd') or None, db=i,
+                        socket_connect_timeout=3, socket_timeout=5,
+                        decode_responses=True
+                    )
+                try:
+                    keys_total += _r2.dbsize()
+                except Exception:
+                    pass
+            return {"ok": True, "info": {
+                "type": "Redis",
+                "version": info.get('redis_version', ''),
+                "os": info.get('os', ''),
+                "arch": info.get('arch_bits', '') + ' bits',
+                "uptime_days": str(int(info.get('uptime_in_seconds', 0)) // 86400) + ' 天',
+                "db_count": db_count,
+                "keys_total": keys_total,
+                "connected_clients": info.get('connected_clients', ''),
+                "used_memory": _format_memory(int(info.get('used_memory', 0))),
+                "max_memory": _format_memory(int(info.get('maxmemory', 0)) or 0),
+                "eviction_policy": info.get('maxmemory_policy', ''),
+                "replication_role": info.get('role', 'master') if 'role' in info else '单机',
+                "gcc_version": info.get('gcc_version', ''),
+                "tcp_port": info.get('tcp_port', conn_data.get('port', '6379')),
+            }}
+
+        cdata = dict(conn_data)
+        if db_type not in ('oracle', 'redis'):
+            cdata.setdefault("db", "")
+        engine = create_engine(
+            _conn_url(cdata),
+            connect_args=_connect_args(db_type, timeout=10)
+        )
+        info = {"type": db_type.upper() if db_type == 'ob-mysql' else db_type.title()}
+
+        with engine.connect() as c:
+            if db_type in ('mysql', 'ob-mysql'):
+                ver = c.execute(text("SELECT VERSION()")).fetchone()[0]
+                charset = c.execute(text("SELECT @@character_set_server")).fetchone()[0]
+                collation = c.execute(text("SELECT @@collation_server")).fetchone()[0]
+                info["version"] = ver
+                info["charset"] = charset
+                info["collation"] = collation
+                try:
+                    uptime = c.execute(text("SHOW GLOBAL STATUS LIKE 'Uptime'")).fetchone()
+                    info["uptime_secs"] = int(uptime[1]) if uptime else 0
+                except:
+                    info["uptime_secs"] = 0
+
+            elif db_type == 'postgresql':
+                ver = c.execute(text("SELECT version()")).fetchone()[0]
+                charset = c.execute(text("SHOW server_encoding")).fetchone()[0]
+                info["version"] = ver.split(',')[0] if ',' in ver else ver
+                info["charset"] = charset
+                info["collation"] = ""
+                try:
+                    uptime = c.execute(text(
+                        "SELECT EXTRACT(EPOCH FROM NOW() - pg_postmaster_start_time())::bigint"
+                    )).fetchone()[0]
+                    info["uptime_secs"] = int(uptime) if uptime else 0
+                except:
+                    info["uptime_secs"] = 0
+
+            elif db_type == 'oracle':
+                ver = c.execute(text("SELECT BANNER FROM v$version WHERE ROWNUM=1")).fetchone()[0]
+                info["version"] = ver
+                info["charset"] = c.execute(text(
+                    "SELECT value FROM nls_database_parameters WHERE parameter='NLS_CHARACTERSET'"
+                )).fetchone()[0]
+                info["collation"] = c.execute(text(
+                    "SELECT value FROM nls_database_parameters WHERE parameter='NLS_SORT'"
+                )).fetchone()[0]
+                try:
+                    uptime = c.execute(text(
+                        "SELECT (SYSDATE - STARTUP_TIME) * 86400 FROM v$instance"
+                    )).fetchone()[0]
+                    info["uptime_secs"] = int(uptime) if uptime else 0
+                except:
+                    info["uptime_secs"] = 0
+
+            elif db_type == 'mssql':
+                ver = c.execute(text("SELECT @@VERSION")).fetchone()[0]
+                info["version"] = ver.split('\n')[0] if ver else ''
+                info["charset"] = ""
+                info["collation"] = c.execute(text("SELECT SERVERPROPERTY('Collation')")).fetchone()[0]
+                info["uptime_secs"] = 0
+
+        engine.dispose()
+        return {"ok": True, "info": info}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
+def _format_memory(size_bytes):
+    """格式化内存大小"""
+    if not size_bytes or size_bytes <= 0:
+        return "0 B"
+    if size_bytes >= 1073741824:
+        return f"{size_bytes / 1073741824:.1f} GB"
+    if size_bytes >= 1048576:
+        return f"{size_bytes / 1048576:.0f} MB"
+    if size_bytes >= 1024:
+        return f"{size_bytes / 1024:.0f} KB"
+    return f"{size_bytes} B"
+
+
+@eel.expose
+def get_database_info(conn_data, database):
+    """获取数据库级别的详情（大小、对象数量等）
+    支持: mysql / ob-mysql / oracle / postgresql / redis"""
+    try:
+        db_type = conn_data.get("db_type", "mysql")
+
+        if db_type == 'redis':
+            import redis as rds
+            try:
+                r = rds.Redis(
+                    host=conn_data['host'], port=int(conn_data.get('port', '6379')),
+                    password=conn_data.get('pwd') or None,
+                    db=int(database) if database else 0,
+                    socket_connect_timeout=5, socket_timeout=10,
+                    decode_responses=True, encoding='utf-8', encoding_errors='replace',
+                    protocol=2
+                )
+            except TypeError:
+                r = rds.Redis(
+                    host=conn_data['host'], port=int(conn_data.get('port', '6379')),
+                    password=conn_data.get('pwd') or None,
+                    db=int(database) if database else 0,
+                    socket_connect_timeout=5, socket_timeout=10,
+                    decode_responses=True, encoding='utf-8', encoding_errors='replace'
+                )
+            dbsize = r.dbsize()
+            info_result = r.info('keyspace')
+            db_key = f"db{database}"
+            keyspace_info = info_result.get(db_key, {}) if isinstance(info_result, dict) else {}
+            return {"ok": True, "info": {
+                "name": f"DB{database}",
+                "type": "Redis DB",
+                "key_count": dbsize,
+                "expires": keyspace_info.get('expires', 0) if isinstance(keyspace_info, dict) else 0,
+                "avg_ttl": keyspace_info.get('avg_ttl', 0) if isinstance(keyspace_info, dict) else 0,
+                "db_index": int(database),
+            }}
+
+        cdata = dict(conn_data)
+        if db_type != 'oracle':
+            cdata["db"] = database
+        engine = create_engine(
+            _conn_url(cdata),
+            connect_args=_connect_args(db_type, timeout=10)
+        )
+
+        info = {"name": database, "type": db_type.upper() if db_type == 'ob-mysql' else db_type.title()}
+        with engine.connect() as c:
+            if db_type == 'mysql':
+                charset_row = c.execute(text(
+                    "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
+                    "FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME=:db"
+                ), {"db": database}).fetchone()
+                info["charset"] = charset_row[0] if charset_row else ""
+                info["collation"] = charset_row[1] if charset_row else ""
+
+                tables_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE'"
+                ), {"db": database}).fetchone()[0]
+                views_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='VIEW'"
+                ), {"db": database}).fetchone()[0]
+                proc_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES "
+                    "WHERE ROUTINE_SCHEMA=:db"
+                ), {"db": database}).fetchone()[0]
+                size_row = c.execute(text(
+                    "SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) "
+                    "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db"
+                ), {"db": database}).fetchone()
+                info["tables_count"] = tables_cnt or 0
+                info["views_count"] = views_cnt or 0
+                info["routines_count"] = proc_cnt or 0
+                info["size_str"] = _format_size(size_row[0] if size_row else 0)
+
+            elif db_type == 'ob-mysql':
+                charset_row = c.execute(text(
+                    "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
+                    "FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME=:db"
+                ), {"db": database}).fetchone()
+                info["charset"] = charset_row[0] if charset_row else ""
+                info["collation"] = charset_row[1] if charset_row else ""
+
+                tables_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE'"
+                ), {"db": database}).fetchone()[0]
+                views_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='VIEW'"
+                ), {"db": database}).fetchone()[0]
+                proc_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES "
+                    "WHERE ROUTINE_SCHEMA=:db"
+                ), {"db": database}).fetchone()[0]
+
+                # ★ OceanBase INFORMATION_SCHEMA.TABLES 的 DATA_LENGTH/INDEX_LENGTH 固定为0
+                # 使用 OB 内部表 oceanbase.__all_virtual_table 获取真实数据大小
+                size_bytes = 0
+                try:
+                    size_row = c.execute(text(
+                        "SELECT COALESCE(SUM(data_size), 0) "
+                        "FROM oceanbase.__all_virtual_table "
+                        "WHERE table_type IN (0, 3)"
+                    )).fetchone()
+                    size_bytes = size_row[0] if size_row else 0
+                except Exception:
+                    # 降级：尝试 CDB_OB_TABLE_LOCATIONS（部分 OB 版本需 DBA 权限）
+                    try:
+                        size_row = c.execute(text(
+                            "SELECT COALESCE(SUM(data_size + required_size), 0) "
+                            "FROM oceanbase.CDB_OB_TABLE_LOCATIONS"
+                        )).fetchone()
+                        size_bytes = size_row[0] if size_row else 0
+                    except Exception:
+                        # 最终降级：INFORMATION_SCHEMA（可能为0）
+                        try:
+                            size_row = c.execute(text(
+                                "SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) "
+                                "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db"
+                            ), {"db": database}).fetchone()
+                            size_bytes = size_row[0] if size_row else 0
+                        except Exception:
+                            size_bytes = 0
+
+                info["tables_count"] = tables_cnt or 0
+                info["views_count"] = views_cnt or 0
+                info["routines_count"] = proc_cnt or 0
+                info["size_str"] = _format_size(size_bytes)
+
+            elif db_type == 'postgresql':
+                charset_row = c.execute(text("SHOW server_encoding")).fetchone()
+                info["charset"] = charset_row[0] if charset_row else ""
+                info["collation"] = ""
+
+                tables_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM pg_catalog.pg_class c "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                    "WHERE c.relkind='r' AND n.nspname NOT IN ('pg_catalog','information_schema')"
+                )).fetchone()[0]
+                views_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM pg_catalog.pg_class c "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                    "WHERE c.relkind='v' AND n.nspname NOT IN ('pg_catalog','information_schema')"
+                )).fetchone()[0]
+                proc_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM pg_proc p "
+                    "JOIN pg_namespace n ON n.oid=p.pronamespace "
+                    "WHERE n.nspname NOT IN ('pg_catalog','information_schema')"
+                )).fetchone()[0]
+                size_row = c.execute(text(
+                    "SELECT pg_database_size(:db)"
+                ), {"db": database}).fetchone()
+                info["tables_count"] = tables_cnt or 0
+                info["views_count"] = views_cnt or 0
+                info["routines_count"] = proc_cnt or 0
+                info["size_str"] = _format_size(size_row[0] if size_row else 0)
+
+            elif db_type == 'oracle':
+                info["charset"] = c.execute(text(
+                    "SELECT value FROM nls_database_parameters "
+                    "WHERE parameter='NLS_CHARACTERSET'"
+                )).fetchone()[0]
+                info["collation"] = c.execute(text(
+                    "SELECT value FROM nls_database_parameters WHERE parameter='NLS_SORT'"
+                )).fetchone()[0]
+
+                tables_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER=:db"
+                ), {"db": database}).fetchone()[0]
+                views_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM ALL_VIEWS WHERE OWNER=:db"
+                ), {"db": database}).fetchone()[0]
+                proc_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM ALL_OBJECTS "
+                    "WHERE OWNER=:db AND OBJECT_TYPE IN ('PROCEDURE','FUNCTION')"
+                ), {"db": database}).fetchone()[0]
+                size_row = c.execute(text(
+                    "SELECT COALESCE(SUM(BYTES),0) FROM DBA_SEGMENTS WHERE OWNER=:db"
+                ), {"db": database}).fetchone()
+                info["tables_count"] = tables_cnt or 0
+                info["views_count"] = views_cnt or 0
+                info["routines_count"] = proc_cnt or 0
+                info["size_str"] = _format_size(size_row[0] if size_row else 0)
+
+            elif db_type == 'mssql':
+                info["collation"] = c.execute(text(
+                    "SELECT collation_name FROM sys.databases WHERE name=:db"
+                ), {"db": database}).fetchone()
+                info["collation"] = info["collation"][0] if info["collation"] else ""
+                info["charset"] = ""
+                tables_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM sys.tables"
+                )).fetchone()[0]
+                views_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM sys.views"
+                )).fetchone()[0]
+                proc_cnt = c.execute(text(
+                    "SELECT COUNT(*) FROM sys.procedures"
+                )).fetchone()[0]
+                try:
+                    size_row = c.execute(text(
+                        "SELECT SUM(size)*8*1024 FROM sys.database_files WHERE type=0"
+                    )).fetchone()
+                except:
+                    size_row = None
+                info["tables_count"] = tables_cnt or 0
+                info["views_count"] = views_cnt or 0
+                info["routines_count"] = proc_cnt or 0
+                info["size_str"] = _format_size(size_row[0] if size_row else 0)
+
+        engine.dispose()
+        return {"ok": True, "info": info}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
 
 
 # ==================== 清理函数 ====================

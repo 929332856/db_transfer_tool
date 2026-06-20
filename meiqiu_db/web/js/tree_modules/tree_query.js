@@ -388,6 +388,112 @@ function _qRowCtx(qid, e, rowIdx) {
     ]);
 }
 
+// ==================== 查询结果导出（向导模式：格式→路径→执行） ====================
+/** 统一导出入口（支持单结果和多结果 Tab） */
+function _qExportResult(qid, tabIdx) {
+    var es = _qState(qid);
+    var cols, rows, tableName;
+    if (tabIdx !== undefined && tabIdx !== null) {
+        // 多结果 Tab
+        cols = (es._multiCols || [])[tabIdx] || [];
+        rows = (es._multiRows || [])[tabIdx] || [];
+        tableName = (es._multiTableNames || [])[tabIdx] || 'exported_table';
+    } else {
+        // 单结果
+        cols = es.columns || [];
+        rows = es.rows || [];
+        tableName = es._tableName || 'exported_table';
+    }
+    if (!cols.length) { showWarnDialog('提示', '没有可导出的结果'); return; }
+
+    // ★ 借用 main.js 的导出向导状态
+    if (typeof _qsExportState === 'undefined') {
+        showWarnDialog('提示', '导出向导未就绪，请刷新页面'); return;
+    }
+    _qsExportState = {
+        step: 1, fmt: 'csv', tableName: tableName, path: '',
+        rowCount: rows.length, totalBytes: 0,
+        results: { columns: cols, rows: rows },
+        written: 0, pct: 0, done: false, error: null, resultInfo: null
+    };
+    if (typeof _qsExportLogs !== 'undefined') _qsExportLogs = [];
+    if (typeof _showExportStep1 === 'function') _showExportStep1();
+    else showWarnDialog('提示', '导出向导函数未就绪，请刷新页面');
+}
+
+/** 导出单结果 CSV */
+function _qExportCSV(qid) {
+    var es = _qState(qid);
+    if (!es.columns || !es.columns.length) { showWarnDialog('提示', '没有可导出的结果'); return; }
+    var csv = '\uFEFF';
+    csv += es.columns.map(function(c) { return _csvEscape(String(c)); }).join(',') + '\r\n';
+    for (var i = 0; i < es.rows.length; i++) {
+        csv += es.rows[i].map(function(v) { return _csvEscape(v); }).join(',') + '\r\n';
+    }
+    _qsExportToFile(csv, 'csv');
+}
+
+/** 导出单结果 SQL INSERT */
+function _qExportSQL(qid) {
+    var es = _qState(qid);
+    if (!es.columns || !es.columns.length) { showWarnDialog('提示', '没有可导出的结果'); return; }
+    var tableName = prompt('请输入导出目标表名:', es._tableName || 'exported_table');
+    if (!tableName || !tableName.trim()) return;
+    tableName = tableName.trim();
+    var colList = '`' + es.columns.join('`, `') + '`';
+    var sql = '-- 导出时间: ' + new Date().toISOString() + '\n';
+    sql += '-- 目标表:   `' + tableName + '`\n';
+    sql += '-- 行数:     ' + es.rows.length + '\n\n';
+    for (var i = 0; i < es.rows.length; i++) {
+        var vals = es.rows[i].map(function(v) {
+            if (v === null || v === undefined) return 'NULL';
+            var s = String(v);
+            return "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+        }).join(', ');
+        sql += 'INSERT INTO `' + tableName + '` (' + colList + ') VALUES (' + vals + ');\n';
+    }
+    _qsExportToFile(sql, 'sql');
+}
+
+/** 导出多结果 CSV */
+function _qExportCSVMulti(qid, tabIdx) {
+    var es = _qState(qid);
+    var cols = (es._multiCols || [])[tabIdx] || [];
+    var rows = (es._multiRows || [])[tabIdx] || [];
+    if (!cols.length) { showWarnDialog('提示', '没有可导出的结果'); return; }
+    var csv = '\uFEFF';
+    csv += cols.map(function(c) { return _csvEscape(String(c)); }).join(',') + '\r\n';
+    for (var i = 0; i < rows.length; i++) {
+        csv += rows[i].map(function(v) { return _csvEscape(v); }).join(',') + '\r\n';
+    }
+    _qsExportToFile(csv, 'csv');
+}
+
+/** 导出多结果 SQL INSERT */
+function _qExportSQLMulti(qid, tabIdx) {
+    var es = _qState(qid);
+    var cols = (es._multiCols || [])[tabIdx] || [];
+    var rows = (es._multiRows || [])[tabIdx] || [];
+    if (!cols.length) { showWarnDialog('提示', '没有可导出的结果'); return; }
+    var tname = (es._multiTableNames || [])[tabIdx] || 'exported_table';
+    var tableName = prompt('请输入导出目标表名:', tname);
+    if (!tableName || !tableName.trim()) return;
+    tableName = tableName.trim();
+    var colList = '`' + cols.join('`, `') + '`';
+    var sql = '-- 导出时间: ' + new Date().toISOString() + '\n';
+    sql += '-- 目标表:   `' + tableName + '`\n';
+    sql += '-- 行数:     ' + rows.length + '\n\n';
+    for (var i = 0; i < rows.length; i++) {
+        var vals = rows[i].map(function(v) {
+            if (v === null || v === undefined) return 'NULL';
+            var s = String(v);
+            return "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+        }).join(', ');
+        sql += 'INSERT INTO `' + tableName + '` (' + colList + ') VALUES (' + vals + ');\n';
+    }
+    _qsExportToFile(sql, 'sql');
+}
+
 /** 更新按钮状态 */
 function _qUpdateBtns(qid) {
     var es = _qState(qid);
@@ -596,6 +702,7 @@ function _qRebuildSingleTab(qid, tabIdx) {
             '<button class="btn btn-sm" id="'+qid+'_mqcancel_'+tabIdx+'" onclick="_qCancelEditMulti(\''+qid+'\','+tabIdx+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
             '<span style="flex:1;"></span>' +
             '<button class="btn btn-sm" id="'+qid+'_mqdel_'+tabIdx+'" onclick="_qDoDeleteMulti(\''+qid+'\','+tabIdx+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
+            '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\','+tabIdx+')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
             '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
         tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows.length+' 行'+(es._multiServerMs[tabIdx]!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(es._multiServerMs[tabIdx])+'</span>':'')+'</div>';
         tabBody += '<div style="overflow:auto;"><table class="exp-table"><thead><tr>';
@@ -639,6 +746,7 @@ function _qRenderTable(qid) {
         '<button class="btn btn-sm" id="'+qid+'_qcancel_btn" onclick="_qCancelEdit(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
         '<span style="flex:1;"></span>' +
         '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
+        '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
         '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
     html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — ' + rc + ' 行'+(es.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(es.server_ms)+'</span>':'')+'</div>';
 
@@ -741,6 +849,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     '<button class="btn btn-sm" id="'+qid+'_qcancel_btn" onclick="_qCancelEdit(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
                     '<span style="flex:1;"></span>' +
                     '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
+                    '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
                     '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
                 html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rc+' 行'+(r0.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r0.server_ms)+'</span>':'')+'</div>';
                 html += '<div style="overflow:auto;"><table class="exp-table"><thead><tr>';
@@ -868,6 +977,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     '<button class="btn btn-sm" id="'+qid+'_mqcancel_'+i2+'" onclick="_qCancelEditMulti(\''+qid+'\','+i2+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
                     '<span style="flex:1;"></span>' +
                     '<button class="btn btn-sm" id="'+qid+'_mqdel_'+i2+'" onclick="_qDoDeleteMulti(\''+qid+'\','+i2+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
+                    '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\','+i2+')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
                     '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
                 tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows2.length+' 行'+(r2.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r2.server_ms)+'</span>':'')+'</div>';
                 tabBody += '<div style="overflow:auto;"><table class="exp-table"><thead><tr>';
