@@ -281,7 +281,7 @@ def tree_load():
     data = _load_tree()
     return data
 @eel.expose
-def tree_save(data): _save_tree(data); return True
+def tree_save(data): _save_tree(data); return {"ok": True, "msg": "保存成功"}
 @eel.expose
 def tree_backup_now():
     """手动触发备份"""

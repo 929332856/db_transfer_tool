@@ -1771,7 +1771,7 @@ def tree_load():
     data = _load_tree()
     return data
 @eel.expose
-def tree_save(data): _save_tree(data); return True
+def tree_save(data): _save_tree(data); return {"ok": True, "msg": "保存成功"}
 @eel.expose
 def tree_backup_now():
     """手动触发备份"""
@@ -4612,6 +4612,29 @@ def get_database_info(conn_data, database):
 
 
 # ==================== 清理函数 ====================
+def _get_descendant_pids(pid, _depth=0):
+    """递归获取 pid 的所有后代进程 ID 列表（从浅到深）"""
+    import subprocess
+    result = []
+    if _depth > 10:  # 防止无限递归
+        return result
+    try:
+        r = subprocess.run(
+            ['wmic', 'process', 'where', f'ParentProcessId={pid}', 'get', 'ProcessId'],
+            capture_output=True, text=True, timeout=5,
+            creationflags=0x08000000
+        )
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                cp = int(line)
+                result.append(cp)
+                result.extend(_get_descendant_pids(cp, _depth + 1))
+    except Exception:
+        pass
+    return result
+
+
 def _force_cleanup_and_exit():
     """关闭窗口后彻底清理所有子进程，防止 Chrome/Edge/gevent 后台残留"""
     pid = os.getpid()
@@ -4629,23 +4652,18 @@ def _force_cleanup_and_exit():
     if sys.platform == 'win32':
         import subprocess
         try:
-            # 查找当前进程的所有子进程
-            r = subprocess.run(
-                ['wmic', 'process', 'where', f'ParentProcessId={pid}', 'get', 'ProcessId'],
-                capture_output=True, text=True, timeout=5,
-                creationflags=0x08000000  # CREATE_NO_WINDOW
-            )
-            for line in r.stdout.splitlines():
-                line = line.strip()
-                if line.isdigit():
-                    try:
-                        subprocess.run(
-                            ['taskkill', '/F', '/T', '/PID', line],
-                            capture_output=True, timeout=3,
-                            creationflags=0x08000000
-                        )
-                    except Exception:
-                        pass
+            # 递归查找所有后代进程（解决 Chrome/Edge 多层进程树问题）
+            all_children = _get_descendant_pids(pid)
+            # 从最深层往浅层杀，防止父进程被杀后子进程变为孤儿
+            for cp in reversed(all_children):
+                try:
+                    subprocess.run(
+                        ['taskkill', '/F', '/T', '/PID', str(cp)],
+                        capture_output=True, timeout=3,
+                        creationflags=0x08000000
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
     else:
@@ -4683,6 +4701,8 @@ if __name__ == "__main__":
                     eel._eel_js = f.read()
     else:
         web_dir = "web"
+    # 导入 DataGrip 导入模块（注册 eel 暴露函数）
+    import modules.datagrip_import
     eel.init(web_dir)
     try:
         eel.start("index.html", size=(1280, 860), port=0, cmdline_args=[])

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0Ij48Y2lyY2xlIGN4PSIzMiIgY3k9IjMyIiByPSIzMSIgZmlsbD0iIzVkYWRlMiIgc3Ryb2tlPSIjMmU4NmMxIiBzdHJva2Utd2lkdGg9IjIiLz48dGV4dCB4PSIzMiIgeT0iNDEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2ZmZmZmZiI+TVE8L3RleHQ+PC9zdmc+">
     <link rel="stylesheet" href="css/style.css">
     <script type="text/javascript" src="/eel.js"></script>
     <script type="text/javascript">
@@ -19,7 +20,7 @@
 
     <!-- ========== 顶部标题栏（已去掉，由窗口标题栏显示） ========== -->
     <header class="top-bar" style="display:none;">
-        <span class="logo">⚡ MQDB</span>
+        <span class="logo">MQ</span>
         <span class="subtitle">MySQL / OB-MySQL 数据库管理</span>
     </header>
 
@@ -28,6 +29,16 @@
         <!-- ========== 内容区 ========== -->
         <main class="main-content full-width" id="main_content">
 
+            <!-- 顶部工具栏 -->
+            <div class="top-toolbar" id="top_toolbar">
+                <div class="top-import-wrap">
+                    <button class="top-import-btn" onclick="toggleImportDropdown(event)" title="导入数据库连接">📥 导入数据库连接 ▾</button>
+                    <div class="top-import-dropdown" id="import_dropdown">
+                        <div class="top-import-item" onclick="showDgImportDialog();hideImportDropdown()">📄 DataGrip 导入</div>
+                        <div class="top-import-item import-disabled" title="即将支持">📄 Navicat 导入 <span style="color:#666;font-size:10px;">（即将上线）</span></div>
+                    </div>
+                </div>
+            </div>
             <!-- 顶部 Tab 栏 -->
             <div class="top-tabs" id="top_tabs">
                 <button class="top-tab-btn active" onclick="showPanel('my_connections')">📁 我的连接</button>
@@ -253,6 +264,21 @@
 
     <!-- 隐藏文件选择器（导入向导使用） -->
     <input type="file" id="hidden_import_file" style="display:none;" accept=".sql,.csv" onchange="onImportFileSelected(event)">
+
+    <!-- DataGrip 导入：隐藏文件选择器 -->
+    <input type="file" id="dg_xml_file" style="display:none;" accept=".xml" onchange="onDgXmlFileSelected(event)">
+    <input type="file" id="dg_local_file" style="display:none;" accept=".xml" onchange="onDgLocalFileSelected(event)">
+
+    <!-- DataGrip 导入弹窗 -->
+    <div class="modal-overlay" id="dg_import_overlay" style="z-index:5090;">
+        <div class="modal-box" style="min-width:560px;max-width:660px;position:relative;" id="dg_import_box">
+            <span onclick="hideDgImport()" style="position:absolute;top:10px;right:14px;font-size:16px;color:#999;z-index:1;line-height:1;cursor:pointer;" title="关闭">✕</span>
+            <div style="font-size:32px;margin-bottom:2px;">📥</div>
+            <div style="font-size:14px;font-weight:bold;margin-bottom:14px;">DataGrip 连接导入</div>
+            <div id="dg_import_content" style="text-align:left;font-size:12px;"></div>
+            <div id="dg_import_btns" style="display:flex;justify-content:center;gap:8px;margin-top:14px;"></div>
+        </div>
+    </div>
 
     <script></script>
     <script src="js/main.js" charset="utf-8"></script>

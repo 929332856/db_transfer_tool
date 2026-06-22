@@ -1333,3 +1333,284 @@ function slowQueryKill(pid) {
         });
     });
 }
+
+
+// ==================== DataGrip 连接导入 ====================
+var _dgXmlContent = null;
+var _dgLocalContent = null;
+var _dgParsedResult = null;
+
+/** 生成唯一 ID */
+function _dgGenId(prefix) {
+    return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).substr(2, 8);
+}
+
+/** 切换导入下拉菜单 */
+function toggleImportDropdown(e) {
+    e.stopPropagation();
+    var dd = document.getElementById('import_dropdown');
+    dd.classList.toggle('show');
+}
+
+/** 关闭导入下拉菜单 */
+function hideImportDropdown() {
+    document.getElementById('import_dropdown').classList.remove('show');
+}
+
+/** 点击其他区域关闭下拉 */
+document.addEventListener('click', function(e) {
+    var wrap = document.querySelector('.top-import-wrap');
+    if (wrap && !wrap.contains(e.target)) {
+        hideImportDropdown();
+    }
+});
+
+/** 打开 DataGrip 导入弹窗 */
+function showDgImportDialog() {
+    _dgXmlContent = null;
+    _dgLocalContent = null;
+    _dgParsedResult = null;
+    _renderDgStep1();
+    document.getElementById('dg_import_overlay').classList.add('show');
+}
+
+/** 关闭 DataGrip 导入弹窗 */
+function hideDgImport() {
+    document.getElementById('dg_import_overlay').classList.remove('show');
+}
+
+/** 步骤1：上传两个 XML 文件 */
+function _renderDgStep1() {
+    var html =
+        '<div class="dg-step-title">📂 第1步：选择 DataGrip 配置文件</div>' +
+        '<div style="font-size:11px;color:#888;margin-bottom:12px;">请分别选择 dataSources.xml 和 dataSources.local.xml（位于 .idea 目录下），支持拖拽或点击上传</div>' +
+
+        // dataSources.xml 上传区
+        '<div class="dg-file-upload-area' + (_dgXmlContent ? ' has-file' : '') + '" id="dg_drop_xml"' +
+            ' onclick="document.getElementById(\'dg_xml_file\').click()"' +
+            ' ondragover="event.preventDefault();this.classList.add(\'drag-over\')"' +
+            ' ondragleave="this.classList.remove(\'drag-over\')"' +
+            ' ondrop="event.preventDefault();this.classList.remove(\'drag-over\');_dgHandleDrop(event,\'xml\')">' +
+            '<div class="dg-file-icon">📄</div>' +
+            '<div class="dg-file-label">拖拽或点击上传 <b>dataSources.xml</b></div>' +
+            (_dgXmlContent ? '<div class="dg-file-name">✅ 已选择</div>' : '') +
+        '</div>' +
+
+        // dataSources.local.xml 上传区
+        '<div class="dg-file-upload-area' + (_dgLocalContent ? ' has-file' : '') + '" id="dg_drop_local"' +
+            ' onclick="document.getElementById(\'dg_local_file\').click()"' +
+            ' ondragover="event.preventDefault();this.classList.add(\'drag-over\')"' +
+            ' ondragleave="this.classList.remove(\'drag-over\')"' +
+            ' ondrop="event.preventDefault();this.classList.remove(\'drag-over\');_dgHandleDrop(event,\'local\')">' +
+            '<div class="dg-file-icon">📄</div>' +
+            '<div class="dg-file-label">拖拽或点击上传 <b>dataSources.local.xml</b></div>' +
+            (_dgLocalContent ? '<div class="dg-file-name">✅ 已选择</div>' : '') +
+        '</div>' +
+
+        '<div style="font-size:11px;color:#888;margin-bottom:8px;">💡 提示：密码无法导入，需后续手动填写</div>';
+
+    document.getElementById('dg_import_content').innerHTML = html;
+
+    var canNext = _dgXmlContent && _dgLocalContent;
+    document.getElementById('dg_import_btns').innerHTML =
+        '<button class="btn btn-gray btn-sm" onclick="hideDgImport()">取消</button>' +
+        '<button class="btn btn-green btn-sm" id="dg_next_btn" onclick="_dgGoParse()" ' + (canNext ? '' : 'disabled') + '>下一步 →</button>';
+}
+
+/** 步骤2：解析并预览 */
+function _dgGoParse() {
+    if (!_dgXmlContent || !_dgLocalContent) {
+        showWarnDialog('提示', '请先选择两个文件');
+        return;
+    }
+
+    // 显示加载
+    document.getElementById('dg_import_content').innerHTML =
+        '<div style="text-align:center;padding:30px;color:#888;">' +
+            '<div style="font-size:28px;margin-bottom:10px;">⏳</div>' +
+            '<div>正在解析 DataGrip 配置...</div>' +
+        '</div>';
+
+    eel.datagrip_parse_import(_dgXmlContent, _dgLocalContent)(function(r) {
+        if (!r || !r.ok) {
+            document.getElementById('dg_import_content').innerHTML =
+                '<div style="text-align:center;padding:20px;color:#e74c3c;">' +
+                    '<div style="font-size:28px;margin-bottom:10px;">❌</div>' +
+                    '<div>解析失败：' + escapeHtml((r && r.msg) || '未知错误') + '</div>' +
+                '</div>';
+            document.getElementById('dg_import_btns').innerHTML =
+                '<button class="btn btn-gray btn-sm" onclick="hideDgImport()">关闭</button>' +
+                '<button class="btn btn-sm" onclick="_renderDgStep1()">← 返回</button>';
+            return;
+        }
+
+        _dgParsedResult = r;
+        _renderDgStep2(r);
+    });
+}
+
+/** 渲染步骤2：预览解析结果 */
+function _renderDgStep2(r) {
+    var conns = r.connections || [];
+    var groups = r.groups || [];
+    var count = r.count || 0;
+
+    // 构建预览表格
+    var rowsHtml = '';
+    var maxPreview = 20;
+    var previewConns = conns.slice(0, maxPreview);
+
+    previewConns.forEach(function(c) {
+        var groupTag = c.group ? '<span class="dg-group-tag">📁 ' + escapeHtml(c.group) + '</span>' : '<span style="color:#666;">—</span>';
+        var typeTag = '<span class="dg-type-tag">' + escapeHtml(c.db_type || 'mysql') + '</span>';
+        rowsHtml += '<tr>' +
+            '<td>' + escapeHtml(c.name) + '</td>' +
+            '<td>' + groupTag + '</td>' +
+            '<td>' + typeTag + '</td>' +
+            '<td>' + escapeHtml(c.host + ':' + c.port) + '</td>' +
+            '<td>' + escapeHtml(c.user || '(空)') + '</td>' +
+            '</tr>';
+    });
+
+    if (conns.length > maxPreview) {
+        rowsHtml += '<tr><td colspan="5" style="text-align:center;color:#888;padding:8px;">... 还有 ' + (conns.length - maxPreview) + ' 个连接未显示</td></tr>';
+    }
+
+    var html =
+        '<div class="dg-step-title">📋 第2步：确认导入的连接</div>' +
+        '<div class="dg-info-row">' +
+            '<span>📊 解析到 <span class="dg-info-num">' + count + '</span> 个连接</span>' +
+            '<span>📁 <span class="dg-info-num">' + groups.length + '</span> 个分组</span>' +
+            '<span>🔗 将替换「我的连接」中所有现有连接</span>' +
+        '</div>' +
+        '<div style="max-height:340px;overflow-y:auto;border:1px solid #333;border-radius:4px;">' +
+            '<table class="dg-preview-table">' +
+                '<thead><tr>' +
+                    '<th>连接名</th><th>分组</th><th>类型</th><th>主机:端口</th><th>用户名</th>' +
+                '</tr></thead>' +
+                '<tbody>' + rowsHtml + '</tbody>' +
+            '</table>' +
+        '</div>' +
+        '<div style="font-size:11px;color:#e67e22;margin-top:10px;padding:8px;background:#2a2010;border-radius:4px;">' +
+            '⚠️ 注意：导入将<b>清空</b>现有连接和文件夹，并替换为上述 ' + count + ' 个连接。密码需后续手动补充。' +
+        '</div>';
+
+    document.getElementById('dg_import_content').innerHTML = html;
+    document.getElementById('dg_import_btns').innerHTML =
+        '<button class="btn btn-gray btn-sm" onclick="_renderDgStep1()">← 返回</button>' +
+        '<button class="btn btn-green btn-sm" onclick="_dgConfirmImport()">✅ 确认导入</button>';
+}
+
+/** 确认导入：替换 treeData 并保存 */
+function _dgConfirmImport() {
+    if (!_dgParsedResult || !_dgParsedResult.ok) return;
+
+    var r = _dgParsedResult;
+    var conns = r.connections || [];
+    var groups = r.groups || [];
+
+    // 确保 treeData 存在
+    if (typeof treeData === 'undefined' || !treeData) {
+        showErrorDialog('错误', '树数据未初始化，请刷新页面');
+        return;
+    }
+
+    // 清空现有数据
+    treeData.folders = [];
+    treeData.connections = {};
+
+    // 创建文件夹映射 (group name -> folder id)
+    var groupFolderIds = {};
+    groups.forEach(function(gName) {
+        var fid = _dgGenId('f');
+        treeData.folders.push({
+            id: fid,
+            name: gName,
+            parent: ''
+        });
+        groupFolderIds[gName] = fid;
+    });
+
+    // 创建连接
+    conns.forEach(function(c) {
+        var cid = _dgGenId('c');
+        var parentId = c.group ? (groupFolderIds[c.group] || '') : '';
+        treeData.connections[cid] = {
+            id: cid,
+            name: c.name,
+            host: c.host,
+            port: c.port,
+            user: c.user,
+            pwd: c.pwd || '',
+            db_type: c.db_type || 'mysql',
+            parent: parentId
+        };
+    });
+
+    // 保存到文件
+    try {
+        eel.tree_save(treeData)(function(saveResult) {
+            hideDgImport();
+
+            if (saveResult && saveResult.ok) {
+                // 刷新「我的连接」列表
+                if (typeof renderMyConnectionsList === 'function') {
+                    renderMyConnectionsList();
+                }
+                // 切换到我的连接面板
+                showPanel('my_connections');
+                showOkDialog('导入成功',
+                    '已导入 <b>' + conns.length + '</b> 个连接、<b>' + groups.length + '</b> 个分组。<br>' +
+                    '<span style="color:#e67e22;">⚠️ 密码为空，请手动补充</span>');
+            } else {
+                showErrorDialog('保存失败', (saveResult && saveResult.msg) || '无法保存树数据');
+            }
+        });
+    } catch (err) {
+        hideDgImport();
+        showErrorDialog('错误', '保存时发生异常：' + (err.message || err));
+    }
+}
+
+/** 文件选择回调：dataSources.xml */
+function onDgXmlFileSelected(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+        _dgXmlContent = ev.target.result;
+        _renderDgStep1();
+    };
+    reader.readAsText(file, 'UTF-8');
+    e.target.value = ''; // 允许重复选择同一文件
+}
+
+/** 拖拽文件处理 */
+function _dgHandleDrop(e, slot) {
+    var files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    var file = files[0];
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+        if (slot === 'xml') {
+            _dgXmlContent = ev.target.result;
+        } else {
+            _dgLocalContent = ev.target.result;
+        }
+        _renderDgStep1();
+    };
+    reader.readAsText(file, 'UTF-8');
+}
+
+/** 文件选择回调：dataSources.local.xml */
+function onDgLocalFileSelected(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+        _dgLocalContent = ev.target.result;
+        _renderDgStep1();
+    };
+    reader.readAsText(file, 'UTF-8');
+    e.target.value = '';
+}
