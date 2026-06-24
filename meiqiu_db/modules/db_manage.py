@@ -288,23 +288,41 @@ def db_create(conn_data, db_name, charset='utf8mb4', collation='utf8mb4_unicode_
 
 @eel.expose
 def tree_save_query(qid, name, sql, conn_id, db=''):
-    tree = _load_tree()
-    if not qid: qid = f"q_{int(time.time() * 1000)}"
-    tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
-    tree.setdefault("saved_queries", []).append({"id": qid, "name": name, "sql": sql, "conn_id": conn_id or "", "db": db or ""})
-    _save_tree(tree)
-    return {"ok": True, "id": qid}
+    try:
+        tree = _load_tree()
+        if not qid: qid = f"q_{int(time.time() * 1000)}"
+        tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
+        tree.setdefault("saved_queries", []).append({"id": qid, "name": name, "sql": sql, "conn_id": conn_id or "", "db": db or ""})
+        ok = _save_tree(tree)
+        if not ok:
+            print(f"[tree] tree_save_query: 保存树文件失败, qid={qid}, name={name}")
+            return {"ok": False, "msg": "保存配置文件失败，请检查磁盘空间和权限"}
+        return {"ok": True, "id": qid}
+    except Exception as e:
+        print(f"[tree] tree_save_query 异常: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"ok": False, "msg": f"保存查询失败: {str(e)}"}
 
 @eel.expose
 def tree_delete_query(qid):
-    tree = _load_tree()
-    tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
-    _save_tree(tree)
-    return True
+    try:
+        tree = _load_tree()
+        tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
+        ok = _save_tree(tree)
+        if not ok:
+            return {"ok": False, "msg": "保存配置文件失败"}
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "msg": f"删除查询失败: {str(e)}"}
 
 @eel.expose
 def tree_get_query(qid):
     tree = _load_tree()
-    for q in tree.get("saved_queries", []):
-        if q.get("id") == qid: return q
+    queries = tree.get("saved_queries", [])
+    for q in queries:
+        if q.get("id") == qid:
+            print(f"[tree] tree_get_query: 找到查询 qid={qid}, name={q.get('name','')}, conn_id={q.get('conn_id','')}")
+            return q
+    print(f"[tree] tree_get_query: 未找到查询 qid={qid}, 当前共有 {len(queries)} 个查询, 所有ID: {[q.get('id') for q in queries]}")
     return None

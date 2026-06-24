@@ -14,6 +14,10 @@ function showPanel(name) {
     if (name === 'slowquery' && typeof refreshSqConnSelector === 'function') {
         setTimeout(refreshSqConnSelector, 50);
     }
+    // 切换到数据库同步面板时，刷新已有连接下拉框
+    if (name === 'sync' && typeof refreshSyncConnSelectors === 'function') {
+        setTimeout(refreshSyncConnSelectors, 50);
+    }
 }
 
 // ==================== 我的连接列表 ====================

@@ -83,6 +83,8 @@ function connCtx(e, cid) {
 }
 
 function closeConnection(cid) {
+    // ★ 立即取消该连接下所有正在执行的查询（防止锁表）
+    try { if (typeof eel !== 'undefined' && eel.cancel_query) { eel.cancel_query()(); } } catch(e) { console.warn('cancel_query failed:', e); }
     var children = document.getElementById('mc_c_' + cid);
     var arrow = document.getElementById('ma_c_' + cid);
     if (children) {
@@ -132,7 +134,32 @@ function renameFolder(fid) { var f=(treeData.folders||[]).find(function(x){retur
 function deleteFolder(fid) { showConfirmDialog('确认','删除文件夹及其中连接？',function(){eel.tree_delete_folder(fid)(function(){function collectKids(pid){var r=[pid];(treeData.folders||[]).forEach(function(f){if(f.parent===pid)r=r.concat(collectKids(f.id));});return r;}var kids=collectKids(fid);var conns=[];for(var k in treeData.connections){if(kids.indexOf(treeData.connections[k].parent)!==-1)conns.push(k);}treeData.folders=(treeData.folders||[]).filter(function(f){return kids.indexOf(f.id)===-1;});conns.forEach(function(k){delete treeData.connections[k];});removeFolderNode(fid);});}); }
 function deleteConnection(cid) { showConfirmDialog('确认','删除此连接？',function(){eel.tree_delete_connection(cid)(function(){delete treeData.connections[cid];removeConnNode(cid);});}); }
 
-function addQuery(cid, db, schema) { var sch = schema || ''; showInputDialog('新建查询','名称：',function(n){if(!n||!n.trim())return;eel.tree_save_query('',n.trim(),'',cid||activeConnId||'',db||'')(function(r){if(r&&r.ok){var qc=treeData.saved_queries||[];qc.push({id:r.id,name:n.trim(),sql:'',conn_id:cid||activeConnId||'',db:db||''});refreshQueriesTree(cid||activeConnId||'',db||'',sch);}});}); }
+function addQuery(cid, db, schema) {
+    var sch = schema || '';
+    var useCid = cid || activeConnId || '';
+    var useDb = db || '';
+    showInputDialog('新建查询','名称：',function(n){
+        if (!n || !n.trim()) return;
+        eel.tree_save_query('', n.trim(), '', useCid, useDb)(
+            function(r) {
+                if (r && r.ok) {
+                    var qc = treeData.saved_queries || [];
+                    qc.push({
+                        id: r.id,
+                        name: n.trim(),
+                        sql: '',
+                        conn_id: useCid,
+                        db: useDb
+                    });
+                    refreshQueriesTree(useCid, useDb, sch);
+                } else {
+                    var errMsg = (r && r.msg) ? r.msg : '未知错误，请查看控制台日志';
+                    showErrorDialog('创建失败', errMsg);
+                }
+            }
+        );
+    });
+}
 
 function showCreateDatabase(cid) {
     var conn = treeData && treeData.connections ? treeData.connections[cid] : null;

@@ -222,26 +222,27 @@ function closeDatabase(cid, db, dbId) {
         var iconEl = el.previousElementSibling ? el.previousElementSibling.querySelector('.db-icon') : null;
         if (iconEl) { iconEl.classList.remove('active'); iconEl.classList.add('closed'); }
     }
-    // ★ 同时检查连接和数据库，避免同名但不同连接误匹配
-    if (activeConnId === cid && activeDatabase === db) {
+    // ★ 清理该连接+数据库下的状态
+    var wasActiveDb = (activeConnId === cid && activeDatabase === db);
+    if (wasActiveDb) {
         _redisPanelCtx = null;
         activeDatabase = '';
-        // 移除该连接+数据库下所有相关 tab（data_/ddl_/query_/redis_ 等）
-        objectTabs = objectTabs.filter(function(t) {
-            if (t.id === 'obj_home') return true;
-            return !(t.cid === cid && t.db === db);
-        });
-        // ★ 只有当前激活的 tab 属于被关闭的数据库时才刷新面板
-        var stillHasCurrentTab = objectTabs.some(function(t) { return t.id === activeObjTab; });
-        if (!stillHasCurrentTab) {
-            var homeContent2 = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
-            var homeTab2 = objectTabs.find(function(t){return t.id==='obj_home';});
-            if (!homeTab2) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent2,db:''}); }
-            else { homeTab2.content = homeContent2; }
-            activeObjTab = 'obj_home';
-            activeCatId = null;
-            renderObjectPanel();
-        }
+    }
+    // ★ 始终移除该连接+数据库下所有相关 tab（data_/ddl_/query_/redis_ 等），不区分当前活跃数据库
+    objectTabs = objectTabs.filter(function(t) {
+        if (t.id === 'obj_home') return true;
+        return !(t.cid === cid && t.db === db);
+    });
+    // ★ 如果当前激活的 tab 已被移除，切回 home
+    var stillHasCurrentTab = objectTabs.some(function(t) { return t.id === activeObjTab; });
+    if (!stillHasCurrentTab) {
+        var homeContent2 = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
+        var homeTab2 = objectTabs.find(function(t){return t.id==='obj_home';});
+        if (!homeTab2) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent2,db:''}); }
+        else { homeTab2.content = homeContent2; }
+        activeObjTab = 'obj_home';
+        activeCatId = null;
+        renderObjectPanel();
     }
 }
 
@@ -312,9 +313,11 @@ function expandCat(cat, cid, db, dbKey, pad, schema) {
                 var h = items.map(function (it) {
                     var n = it.name || it;
                     var qual = sch || db;  // PG 用 schema，其他用 db
+                    var dataAttrs = (cat==='tables') ? ' data-tname="'+escapeAttr(n)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+cid+'"' : '';
+                    var onClick = (cat==='tables') ? ' onclick="treeTableClick(event,this)"' : '';
                     var ctx = (cat==='tables') ? ' oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : '';
-                    var dragAttr = (cat==='tables') ? ' draggable="true" class="my-conn-row drag-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ondragend="onTableDragEnd(event)"' : ' class="my-conn-row"';
-                    return '<div'+dragAttr+' style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;'+(cat!=='tables'?'padding-top:5px;padding-bottom:5px;':'')+'" ondblclick="addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"'+ctx+'><span class="my-conn-icon">'+catIcon+'</span>'+escapeHtml(n)+'</div>';
+                    var dragAttr = (cat==='tables') ? ' draggable="true" class="my-conn-row drag-table-item tree-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ondragend="onTableDragEnd(event)"' : ' class="my-conn-row"';
+                    return '<div'+dragAttr+dataAttrs+' style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;'+(cat!=='tables'?'padding-top:5px;padding-bottom:5px;':'')+'" ondblclick="addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"'+onClick+ctx+'><span class="my-conn-icon">'+catIcon+'</span><span class="tree-table-name">'+escapeHtml(n)+'</span></div>';
                 }).join('');
                 children.innerHTML = h || '<div style="padding-left:'+itemPad+'px;color:#999;font-size:11px;">（无数据）</div>';
             }, sch);
@@ -345,9 +348,11 @@ function refreshCatItem(cat, cid, db, schema, dbKey, pad) {
         var h = items.map(function(it) {
             var n = it.name || it;
             var qual = sch || db;
+            var dataAttrs = (cat==='tables') ? ' data-tname="'+escapeAttr(n)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+cid+'"' : '';
+            var onClick = (cat==='tables') ? ' onclick="treeTableClick(event,this)"' : '';
             var ctx = (cat==='tables') ? ' oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : '';
-            var dragAttr = (cat==='tables') ? ' draggable="true" class="my-conn-row drag-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ondragend="onTableDragEnd(event)"' : ' class="my-conn-row"';
-            return '<div'+dragAttr+' style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;'+(cat!=='tables'?'padding-top:5px;padding-bottom:5px;':'')+'" ondblclick="addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"'+ctx+'><span class="my-conn-icon">'+catIcon+'</span>'+escapeHtml(n)+'</div>';
+            var dragAttr = (cat==='tables') ? ' draggable="true" class="my-conn-row drag-table-item tree-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ondragend="onTableDragEnd(event)"' : ' class="my-conn-row"';
+            return '<div'+dragAttr+dataAttrs+' style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;'+(cat!=='tables'?'padding-top:5px;padding-bottom:5px;':'')+'" ondblclick="addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"'+onClick+ctx+'><span class="my-conn-icon">'+catIcon+'</span><span class="tree-table-name">'+escapeHtml(n)+'</span></div>';
         }).join('');
         children.innerHTML = h || '<div style="padding-left:'+itemPad+'px;color:#999;font-size:11px;">（无数据）</div>';
         // 同步刷新右侧对象面板（仅表分类）
@@ -434,4 +439,122 @@ function refreshQueriesTree(cid, db, schema) {
     if (homeTab && activeCatId === rowId) {
         clickQueries(cid, db, schema);
     }
+}
+
+// ==================== 左侧树表名内联重命名 ====================
+var _treeRenameState = null;      // { div, oldName, db, schema, cid, nameSpan }
+var _treeLastSelect = null;
+
+// 左侧树表项点击：选择 / 再次点击进入重命名
+function treeTableClick(e, div) {
+    if (_treeRenameState) return;
+    if (e.detail > 1) return; // 双击忽略
+    // 清除所有高亮
+    document.querySelectorAll('.tree-table-item').forEach(function(d) {
+        d.classList.remove('tree-table-selected');
+    });
+    div.classList.add('tree-table-selected');
+
+    if (_treeLastSelect === div) {
+        // 同一项再次点击 → 进入重命名模式
+        _startTreeRename(div);
+        _treeLastSelect = null;
+    } else {
+        _treeLastSelect = div;
+    }
+}
+
+// F2 触发左侧树表名重命名
+function treeTableRenameByF2() {
+    if (_treeRenameState) return;
+    var sel = document.querySelector('.tree-table-item.tree-table-selected');
+    if (!sel) return;
+    _startTreeRename(sel);
+}
+
+function _startTreeRename(div) {
+    var tn = div.getAttribute('data-tname');
+    var db = div.getAttribute('data-db');
+    var sch = div.getAttribute('data-sch');
+    var cid = div.getAttribute('data-cid');
+    if (!tn || !db) return;
+
+    var nameSpan = div.querySelector('.tree-table-name');
+    if (!nameSpan) return;
+
+    var oldName = nameSpan.textContent.trim();
+    // 保存原始 HTML 结构以备恢复
+    var iconEl = div.querySelector('.my-conn-icon');
+
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.value = oldName;
+    input.style.cssText = 'background:#1a1a1a;border:1px solid #4a90d9;border-radius:3px;color:#e0e0e0;padding:1px 4px;font-size:11px;outline:none;width:120px;margin-left:4px;vertical-align:middle;';
+    nameSpan.style.display = 'none';
+    div.insertBefore(input, nameSpan.nextSibling);
+    input.focus();
+    input.select();
+
+    _treeRenameState = {
+        div: div, oldName: oldName, db: db, schema: sch, cid: cid,
+        nameSpan: nameSpan, input: input
+    };
+
+    input.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); _commitTreeRename(); }
+        if (ev.key === 'Escape') { ev.preventDefault(); _cancelTreeRename(); }
+    });
+    input.addEventListener('blur', function() {
+        setTimeout(function() {
+            if (_treeRenameState) _commitTreeRename();
+        }, 100);
+    });
+}
+
+function _commitTreeRename() {
+    var s = _treeRenameState;
+    if (!s) return;
+    var newName = s.input.value.trim();
+    _treeRenameState = null;
+    // 恢复原始显示
+    if (s.nameSpan) s.nameSpan.style.display = '';
+    if (s.input && s.input.parentNode) s.input.parentNode.removeChild(s.input);
+    s.div.classList.remove('tree-table-selected');
+
+    if (!newName || newName === s.oldName) return;
+
+    var cid = s.cid || activeConnId || '';
+    var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
+    if (!conn) { showErrorDialog('重命名失败', '未找到连接信息'); return; }
+
+    eel.table_rename(conn, s.db, s.oldName, newName, s.schema)(function(r) {
+        if (r && r.ok) {
+            showOkDialog('成功', r.msg);
+            // 更新 DOM 中的表名
+            if (s.nameSpan) s.nameSpan.textContent = newName;
+            // 刷新左侧树和对象面板
+            refreshTableFolder(cid, s.db, s.schema);
+            setTimeout(function() {
+                if (activeConnId === cid && activeDatabase === s.db) {
+                    loadCategoryItems(conn, s.db, 'tables', function(items) {
+                        var home = objectTabs.find(function(t){ return t.id === 'obj_home'; });
+                        if (home) {
+                            home.content = buildObjHomeContent(items, 'tables', s.db, s.schema, cid);
+                            renderObjectPanel();
+                        }
+                    }, s.schema);
+                }
+            }, 300);
+        } else {
+            showErrorDialog('重命名失败', (r && r.msg) ? r.msg : '未知错误');
+        }
+    });
+}
+
+function _cancelTreeRename() {
+    var s = _treeRenameState;
+    if (!s) return;
+    if (s.nameSpan) s.nameSpan.style.display = '';
+    if (s.input && s.input.parentNode) s.input.parentNode.removeChild(s.input);
+    _treeRenameState = null;
 }

@@ -4,7 +4,7 @@ function buildObjHomeContent(items, cat, db, schema, cid) {
     var h = '';
     if (cat === 'tables') {
         h += '<table class="exp-table"><thead><tr><th style="width:28%">名称</th><th style="width:10%;text-align:right;">行</th><th style="width:12%;text-align:right;">数据长度</th><th style="width:22%">修改日期</th><th style="width:28%">注释</th></tr></thead><tbody>';
-        items.forEach(function(t){h+='<tr draggable="true" class="drag-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" ondragend="onTableDragEnd(event)" ondblclick="addTableDataTab(\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" oncontextmenu="tableCtx(event,\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')"><td>'+escapeHtml(t.name)+'</td><td style="text-align:right;">'+escapeHtml(String(t.rows||''))+'</td><td style="text-align:right;">'+escapeHtml(t.data_size||'')+'</td><td>'+escapeHtml(t.update_time||'')+'</td><td>'+escapeHtml(t.comment||'')+'</td></tr>';});
+        items.forEach(function(t){h+='<tr draggable="true" class="drag-table-item" data-tname="'+escapeAttr(t.name)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+escapeAttr(cid||'')+'" ondragstart="onTableDragStart(event,\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" ondragend="onTableDragEnd(event)" ondblclick="addTableDataTab(\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" oncontextmenu="tableCtx(event,\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" onclick="objPanelTableClick(event,this)"><td class="tbl-name-cell">'+escapeHtml(t.name)+'</td><td style="text-align:right;">'+escapeHtml(String(t.rows||''))+'</td><td style="text-align:right;">'+escapeHtml(t.data_size||'')+'</td><td>'+escapeHtml(t.update_time||'')+'</td><td>'+escapeHtml(t.comment||'')+'</td></tr>';});
         h += '</tbody></table>';
     } else if (cat === 'views') {
         h += '<table class="exp-table"><thead><tr><th style="width:60%">名称</th><th style="width:40%">数据库</th></tr></thead><tbody>';
@@ -71,7 +71,8 @@ function renderObjectPanel() {
         if(t.id!=='obj_home') h += '<span class="tab-close" onclick="event.stopPropagation();closeTab(\''+t.id+'\')">✕</span>';
         h += '</span>';
     });
-    if (activeObjTab === 'obj_home') h += '<div class="obj-search-wrap"><input class="obj-search-input" id="obj_search" placeholder="🔍 搜索表名..." oninput="filterObjectTable()"></div>';
+    var showSearch = (activeObjTab === 'obj_home'); 
+    h += '<div class="obj-search-wrap" style="display:' + (showSearch ? '' : 'none') + '"><input class="obj-search-input" id="obj_search" placeholder="🔍 搜索表名..." oninput="filterObjectTable()"></div>';
 
     if (tabBar) {
         // 增量更新 tab 栏（避免 innerHTML 销毁重建事件）
@@ -106,17 +107,7 @@ function renderObjectPanel() {
                 if (bindSortFn) {
                     setTimeout(function(){ bindSortFn(); }, 50);
                 }
-                // ★ 重新绑定分页按钮（DOM 重建后旧监听器已丢失）
-                setTimeout(function(){
-                    var prevBtn2 = document.getElementById(tid2+'_prev_btn');
-                    var nextBtn2 = document.getElementById(tid2+'_next_btn');
-                    var showAllBtn2 = document.getElementById(tid2+'_showall_btn');
-                    var psizeSel2 = document.getElementById(tid2+'_psize');
-                    if (prevBtn2) prevBtn2.onclick = function(){ window['_goPage_'+tid2](-1); };
-                    if (nextBtn2) nextBtn2.onclick = function(){ window['_goPage_'+tid2](1); };
-                    if (showAllBtn2) showAllBtn2.onclick = function(){ window['_showAllRows_'+tid2](); };
-                    if (psizeSel2) psizeSel2.onchange = function(){ window['_changePageSize_'+tid2](); };
-                }, 50);
+                // ★ 分页按钮已使用内联 onclick，无需重新绑定
             }
         }
         // ★ query 类型 tab 切换后，重新绑定事件 + 恢复结果（保留数据不丢失）
@@ -392,16 +383,7 @@ function _afterContentUpdate(targetTab, contentDiv) {
             if (st2 && st2.onRender) setTimeout(function(){ st2.onRender(); }, 0);
             var bindSortFn = window['_bindSort_'+tid2];
             if (bindSortFn) setTimeout(function(){ bindSortFn(); }, 50);
-            setTimeout(function(){
-                var prevBtn2 = document.getElementById(tid2+'_prev_btn');
-                var nextBtn2 = document.getElementById(tid2+'_next_btn');
-                var showAllBtn2 = document.getElementById(tid2+'_showall_btn');
-                var psizeSel2 = document.getElementById(tid2+'_psize');
-                if (prevBtn2) prevBtn2.onclick = function(){ window['_goPage_'+tid2](-1); };
-                if (nextBtn2) nextBtn2.onclick = function(){ window['_goPage_'+tid2](1); };
-                if (showAllBtn2) showAllBtn2.onclick = function(){ window['_showAllRows_'+tid2](); };
-                if (psizeSel2) psizeSel2.onchange = function(){ window['_changePageSize_'+tid2](); };
-            }, 50);
+            // ★ 分页按钮使用内联 onclick，无需重新绑定
         }
     }
     if (targetTab.type === 'query') {
@@ -487,4 +469,122 @@ function _afterContentUpdate(targetTab, contentDiv) {
             }
         }
     });
+}
+
+// ==================== 表名内联重命名（对象面板） ====================
+var _objPanelRenameState = null; // { tr, oldName, db, schema, cid, nameCell }
+var _objPanelLastSelect = null;
+
+// 对象面板表行点击：选择 / 再次点击进入重命名
+function objPanelTableClick(e, tr) {
+    if (_objPanelRenameState) return; // 正在重命名中，忽略
+    // 高亮当前行
+    document.querySelectorAll('#obj_content .exp-table tbody tr').forEach(function(r) {
+        r.classList.remove('table-row-selected');
+    });
+    tr.classList.add('table-row-selected');
+
+    if (_objPanelLastSelect === tr) {
+        // 同一行再次点击 → 进入重命名模式
+        _startObjPanelRename(tr);
+        _objPanelLastSelect = null;
+    } else {
+        _objPanelLastSelect = tr;
+    }
+}
+
+// 对象面板 F2 重命名入口
+function objPanelRenameByF2() {
+    if (_objPanelRenameState) return;
+    var sel = document.querySelector('#obj_content .exp-table tbody tr.table-row-selected');
+    if (!sel) return;
+    _startObjPanelRename(sel);
+}
+
+function _startObjPanelRename(tr) {
+    var tn = tr.getAttribute('data-tname');
+    var db = tr.getAttribute('data-db');
+    var sch = tr.getAttribute('data-sch');
+    var cid = tr.getAttribute('data-cid');
+    if (!tn || !db) return;
+
+    var nameCell = tr.querySelector('td.tbl-name-cell');
+    if (!nameCell) return;
+
+    var oldName = nameCell.textContent.trim();
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.value = oldName;
+    input.className = 'table-rename-input';
+    input.style.cssText = 'width:100%;height:20px;background:#1a1a1a;border:1px solid #4a90d9;border-radius:3px;color:#e0e0e0;padding:1px 4px;font-size:11px;outline:none;';
+    nameCell.textContent = '';
+    nameCell.appendChild(input);
+    input.focus();
+    input.select();
+
+    _objPanelRenameState = {
+        tr: tr, oldName: oldName, db: db, schema: sch, cid: cid,
+        nameCell: nameCell, input: input
+    };
+
+    input.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); _commitObjPanelRename(); }
+        if (ev.key === 'Escape') { ev.preventDefault(); _cancelObjPanelRename(); }
+    });
+    input.addEventListener('blur', function() {
+        setTimeout(function() {
+            if (_objPanelRenameState) _commitObjPanelRename();
+        }, 100);
+    });
+}
+
+function _commitObjPanelRename() {
+    var s = _objPanelRenameState;
+    if (!s) return;
+    var newName = s.input.value.trim();
+    _objPanelRenameState = null;
+    // 恢复原始显示（取消编辑状态）
+    s.nameCell.textContent = s.oldName;
+    s.tr.classList.remove('table-row-selected');
+
+    if (!newName || newName === s.oldName) return;
+
+    var cid = s.cid || activeConnId || '';
+    var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
+    if (!conn) { showErrorDialog('重命名失败', '未找到连接信息'); return; }
+
+    eel.table_rename(conn, s.db, s.oldName, newName, s.schema)(function(r) {
+        if (r && r.ok) {
+            showOkDialog('成功', r.msg);
+            // 刷新左侧树中的表文件夹
+            refreshTableFolder(cid, s.db, s.schema);
+            // 刷新对象面板内容
+            setTimeout(function() {
+                if (activeConnId === cid && activeDatabase === s.db) {
+                    loadCategoryItems(conn, s.db, 'tables', function(items) {
+                        var home = objectTabs.find(function(t){ return t.id === 'obj_home'; });
+                        if (home) {
+                            home.content = buildObjHomeContent(items, 'tables', s.db, s.schema, cid);
+                            renderObjectPanel();
+                        }
+                    }, s.schema);
+                }
+            }, 300);
+        } else {
+            showErrorDialog('重命名失败', (r && r.msg) ? r.msg : '未知错误');
+        }
+    });
+}
+
+function _cancelObjPanelRename() {
+    var s = _objPanelRenameState;
+    if (!s) return;
+    s.nameCell.textContent = s.oldName;
+    _objPanelRenameState = null;
+}
+
+// 清除面板选中的行（当 panel 内容变化时调用）
+function _clearObjPanelSelection() {
+    _objPanelLastSelect = null;
+    if (_objPanelRenameState) _cancelObjPanelRename();
 }

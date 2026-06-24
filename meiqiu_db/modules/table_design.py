@@ -1,10 +1,12 @@
 """
-表设计器：设计信息获取、设计变更应用、表截断/删除/清空
+表设计器：设计信息获取、设计变更应用、表截断/删除/清空/重命名/备份
 """
 import eel
-from sqlalchemy import text, create_engine
+from datetime import datetime as dt
+from sqlalchemy import text, create_engine, inspect
 from modules import _query_cancel
 from modules.conn_utils import _connect_args, _conn_url, _safe_ident, _build_table_ref, _friendly_error
+from modules.config_state import _log_db_delete, _db_op_logger
 
 @eel.expose
 def table_get_design_info(conn_data, database, table_name, schema=''):
@@ -392,3 +394,97 @@ def table_delete(conn_data, database, table_name, schema=''):
 
 @eel.expose
 def table_clear(conn_data, database, table_name, schema=''):
+    try:
+        cdata = dict(conn_data)
+        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
+        tbl = _build_table_ref(cdata, database, table_name, schema)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
+        sql = f"DELETE FROM {tbl}"
+        with engine.begin() as conn: conn.execute(text(sql))
+        engine.dispose()
+        _log_db_delete(sql)
+        return {"ok": True, "msg": f"表 [{table_name}] 已清空"}
+    except Exception as e: return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type','mysql'))}
+
+
+@eel.expose
+def table_rename(conn_data, database, old_name, new_name, schema=''):
+    """重命名表"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql', 'oracle'):
+            cdata["db"] = database
+        old_tbl = _build_table_ref(cdata, database, old_name, schema)
+        new_tbl = _build_table_ref(cdata, database, new_name, schema)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        if db_type == 'mssql':
+            sql = f"EXEC sp_rename '{old_tbl}', '{new_name}'"
+        elif db_type in ('mysql', 'ob-mysql'):
+            sql = f"RENAME TABLE `{database}`.`{old_name}` TO `{database}`.`{new_name}`"
+        elif db_type == 'postgresql':
+            q = schema if schema else database
+            sql = f'ALTER TABLE "{q}"."{old_name}" RENAME TO "{new_name}"'
+        elif db_type == 'oracle':
+            sql = f'ALTER TABLE "{database}"."{old_name}" RENAME TO "{new_name}"'
+        else:
+            sql = f"RENAME TABLE `{database}`.`{old_name}` TO `{database}`.`{new_name}`"
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        engine.dispose()
+        _db_op_logger.info(f"[RENAME] {old_tbl} → {new_tbl}")
+        return {"ok": True, "msg": f"表 [{old_name}] 已重命名为 [{new_name}]"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
+@eel.expose
+def table_backup(conn_data, database, table_name, schema=''):
+    """备份表：创建结构+数据相同的副本，表名=当前日期(MMDD_HH)，重名追加_1"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql', 'oracle'):
+            cdata["db"] = database
+        src_tbl = _build_table_ref(cdata, database, table_name, schema)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=30))
+
+        # 生成备份表名: MMDD_HH
+        base_name = dt.now().strftime("%m%d_%H")
+        backup_name = base_name
+        # 检测重名，追加 _1, _2 ...
+        existing = set()
+        try:
+            insp = inspect(engine)
+            schema_name = schema if db_type == 'postgresql' else (database if db_type == 'oracle' else None)
+            args = [schema_name] if schema_name else []
+            existing = set(insp.get_table_names(*args))
+        except Exception:
+            pass
+        suffix = 0
+        orig_backup = backup_name
+        while backup_name in existing:
+            suffix += 1
+            backup_name = f"{orig_backup}_{suffix}"
+        dst_tbl = _build_table_ref(cdata, database, backup_name, schema)
+
+        with engine.begin() as conn:
+            if db_type in ('mysql', 'ob-mysql'):
+                conn.execute(text(f"CREATE TABLE `{database}`.`{backup_name}` LIKE `{database}`.`{table_name}`"))
+                conn.execute(text(f"INSERT INTO `{database}`.`{backup_name}` SELECT * FROM `{database}`.`{table_name}`"))
+            elif db_type == 'postgresql':
+                q = schema if schema else database
+                conn.execute(text(f'CREATE TABLE "{q}"."{backup_name}" (LIKE "{q}"."{table_name}" INCLUDING ALL)'))
+                conn.execute(text(f'INSERT INTO "{q}"."{backup_name}" SELECT * FROM "{q}"."{table_name}"'))
+            elif db_type == 'oracle':
+                conn.execute(text(f'CREATE TABLE "{database}"."{backup_name}" AS SELECT * FROM "{database}"."{table_name}"'))
+            elif db_type == 'mssql':
+                conn.execute(text(f"SELECT * INTO [{database}].[{backup_name}] FROM [{database}].[{table_name}]"))
+            else:
+                conn.execute(text(f"CREATE TABLE `{database}`.`{backup_name}` LIKE `{database}`.`{table_name}`"))
+                conn.execute(text(f"INSERT INTO `{database}`.`{backup_name}` SELECT * FROM `{database}`.`{table_name}`"))
+        engine.dispose()
+        _db_op_logger.info(f"[BACKUP] {src_tbl} → {dst_tbl}")
+        return {"ok": True, "msg": f"表 [{table_name}] 已备份为 [{backup_name}]"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}

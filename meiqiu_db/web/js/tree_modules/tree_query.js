@@ -53,9 +53,9 @@ function execQueryTab(qid) {
         activeConnId = curTabSync.cid;
         activeConnData = treeData.connections[curTabSync.cid];
     }
-    // ★ 强制清理可能卡死的标记（切换 tab 后按钮可能被 _execRunning 误判为正在执行）
-    _execRunning[qid] = false;
-    _execCancelFlags[qid] = false;
+    // ★ 生成新的执行令牌，旧 chain 检测令牌不匹配即放弃
+    _execToken[qid] = (_execToken[qid] || 0) + 1;
+    var myToken = _execToken[qid];
 
     if (!activeConnData) {
         var resultsDivPreCheck = document.getElementById('qr_'+qid);
@@ -63,142 +63,140 @@ function execQueryTab(qid) {
         return;
     }
 
-    // 检查是否有选中文本
+    // ★ 直接从 textarea 取 SQL（跳过 tree_get_query 后端调用，避免阻塞和延迟）
     var ta = document.getElementById('sq_'+qid);
-    var selection = '';
+    var resultsDiv = document.getElementById('qr_'+qid);
+    var btnExe = document.getElementById('btn_exe_'+qid);
+
+    if (!ta) {
+        // textarea 不存在 → 可能是 tab 刚打开 DOM 还没渲染，走异步查询
+        _resetExeBtnLate(qid, btnExe);
+        eel.tree_get_query(qid)(function(q){
+            if (_execToken[qid] !== myToken) return; // 令牌过期
+            if(!q) {
+                if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ 查询未找到（id='+escapeHtml(String(qid))+'），请重新打开</div>';
+                return;
+            }
+            _execQueryWithSql(qid, q.sql || '', myToken, curTabSync, ta, resultsDiv, btnExe);
+        });
+        return;
+    }
+
+    var fullSql = ta.value;
+    _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, btnExe);
+}
+
+/** ★ 核心执行逻辑（textarea 存在时直接调用，免去 tree_get_query 的延迟） */
+function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, btnExe) {
+    // 检查选中文本
+    var sel = '';
     if (ta) {
-        var start = ta.selectionStart, end = ta.selectionEnd;
-        if (start !== end) {
-            selection = ta.value.substring(start, end).trim();
+        var st2 = ta.selectionStart, en2 = ta.selectionEnd;
+        if (st2 !== en2) sel = ta.value.substring(st2, en2).trim();
+    }
+    var sqlToExec = sel || fullSql;
+    var stmts = sqlToExec.split(';').filter(function(s){return s.trim();});
+
+    if (!stmts.length) { _resetExeBtnLate(qid, btnExe); return; }
+
+    // ★ 取消/超时检测：如果上一次执行仍在进行
+    if (_execRunning[qid]) {
+        var elapsedSinceStart = Date.now() - (_execStartTime[qid] || 0);
+        if (elapsedSinceStart > 120000) {
+            console.warn('[execQueryTab] _execRunning 卡死 ' + Math.round(elapsedSinceStart/1000) + 's，强制清除');
+            _execRunning[qid] = false;
+            _execCancelFlags[qid] = false;
+        } else {
+            cancelExecQuery(qid);
+            return;
         }
     }
-    eel.tree_get_query(qid)(function(q){
-        var resultsDiv0 = document.getElementById('qr_'+qid);
-        if(!q) {
-            if (resultsDiv0) resultsDiv0.innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ 查询未找到（id='+escapeHtml(String(qid))+'），请重新打开</div>';
+
+    // ★ 再次确认 activeConnData 仍然有效
+    if (!activeConnData) {
+        if (curTabSync && curTabSync.cid && treeData && treeData.connections && treeData.connections[curTabSync.cid]) {
+            activeConnId = curTabSync.cid;
+            activeConnData = treeData.connections[curTabSync.cid];
+        } else {
+            if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ 连接已断开，请先在左侧树中展开对应连接</div>';
             return;
         }
-        var sqlEl = document.getElementById('sq_'+qid);
-        var fullSql = sqlEl ? sqlEl.value : (q.sql||'');
+    }
 
-        // 检查当前选中
-        var sel = '';
-        if (sqlEl) {
-            var st2 = sqlEl.selectionStart, en2 = sqlEl.selectionEnd;
-            if (st2 !== en2) sel = sqlEl.value.substring(st2, en2).trim();
-        }
-        var sqlToExec = sel || fullSql;
-        var stmts = sqlToExec.split(';').filter(function(s){return s.trim();});
-        var resultsDiv = document.getElementById('qr_'+qid) || resultsDiv0;
-        var btnExe = document.getElementById('btn_exe_'+qid);
+    _execCancelFlags[qid] = false;
+    _execRunning[qid] = true;
+    _execStartTime[qid] = Date.now();
 
-        // 提前重置按钮，防卡死
-        function _resetExeBtn() {
+    if (btnExe) { btnExe.textContent = '⏹ 取消'; btnExe.style.background = '#e74c3c'; }
+    if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
+    var layout = resultsDiv ? resultsDiv.parentElement : null;
+    if (layout) layout.classList.add('split');
+
+    // ★ Redis 连接：逐行执行 Redis 命令
+    if (activeConnData.db_type === 'redis') {
+        execRedisQueryTab(qid, btnExe, resultsDiv, sqlToExec);
+        return;
+    }
+
+    var allResults = [];
+    var qDb = curTabSync ? curTabSync.db : '';
+    var sqlDb = detectDbFromSql(fullSql);
+    var isOra = (activeConnData.db_type || '') === 'oracle';
+    var execDb = isOra ? (activeConnData.db || '') : (sqlDb || qDb || activeConnData.db || '');
+
+    var execIdx = 0;
+    var hasDDL = false;
+
+    function execNext() {
+        // ★ 令牌检测：新执行已启动，旧 chain 立即放弃
+        if (_execToken[qid] !== myToken) return;
+
+        if (_execCancelFlags[qid]) {
+            _execCancelFlags[qid] = false;
+            _execRunning[qid] = false;
             if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
-        }
-
-        if(!stmts.length) { _resetExeBtn(); return; }
-
-        // 如果正在执行中，取消（★ 用 _execRunning 可靠判定，避免 _execCancelFlags 卡住导致永远无法执行）
-        // ★ 增加超时检测：如果 _execRunning 卡死超过 120 秒（说明 eel 回调丢失），强制清除并允许重新执行
-        if (_execRunning[qid]) {
-            var elapsedSinceStart = Date.now() - (_execStartTime[qid] || 0);
-            if (elapsedSinceStart > 120000) {
-                // 超过 2 分钟卡死 → 强制清除僵尸状态
-                console.warn('[execQueryTab] _execRunning 卡死 ' + Math.round(elapsedSinceStart/1000) + 's，强制清除');
-                _execRunning[qid] = false;
-                _execCancelFlags[qid] = false;
-            } else {
-                cancelExecQuery(qid);
-                return;
-            }
-        }
-
-        // ★ 再次确认 activeConnData 仍然有效（异步回调中可能已被其他操作修改）
-        if (!activeConnData) {
-            // 再次尝试从 tab 恢复
-            if (curTabSync && curTabSync.cid && treeData && treeData.connections && treeData.connections[curTabSync.cid]) {
-                activeConnId = curTabSync.cid;
-                activeConnData = treeData.connections[curTabSync.cid];
-            } else {
-                resultsDiv.innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ 连接已断开，请先在左侧树中展开对应连接</div>';
-                return;
-            }
-        }
-
-        _execCancelFlags[qid] = false;
-        _execRunning[qid] = true; // ★ 标记正在执行（用于取消判定和 tab 切换后按钮复位）
-        // ★ 记录开始时间，防止按钮立即闪回
-        _execStartTime[qid] = Date.now();
-        // 切换按钮为取消状态
-        if (btnExe) { btnExe.textContent = '⏹ 取消'; btnExe.style.background = '#e74c3c'; }
-        resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
-        // 切换分栏
-        var layout = resultsDiv.parentElement;
-        if(layout) layout.classList.add('split');
-
-        // ★ Redis 连接：逐行执行 Redis 命令
-        if (activeConnData.db_type === 'redis') {
-            execRedisQueryTab(qid, btnExe, resultsDiv, sqlToExec);
+            if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#f39c12;">⏸ 查询已取消</div>';
             return;
         }
-
-        var allResults = [];
-        // 确定执行数据库优先级：SQL 显式前缀 > 查询自身 db > 连接默认 db（不含 activeDatabase 等外部状态）
-        // ★ Oracle 特殊处理：db 必须是 service_name/SID（原始连接），不能是 schema 名
-        var curTab = objectTabs.find(function(t){return t.id==='query_'+qid;});
-        var qDb = curTab ? curTab.db : '';
-        var sqlDb = detectDbFromSql(fullSql);
-        var isOra = (activeConnData.db_type || '') === 'oracle';
-        var execDb = isOra ? (activeConnData.db || '') : (sqlDb || qDb || activeConnData.db || '');
-        // ★ 顺序执行：逐条发送，等上一条完成后才发下一条
-        var execIdx = 0;
-        var hasDDL = false; // 是否有 DDL 需要刷新树
-        function execNext() {
-            if (_execCancelFlags[qid]) {
-                _execCancelFlags[qid] = false;
-                _execRunning[qid] = false;
+        if (execIdx >= stmts.length) {
+            _execRunning[qid] = false;
+            _execCancelFlags[qid] = false;
+            var elapsed = Date.now() - (_execStartTime[qid] || 0);
+            var minDelay = Math.max(0, 300 - elapsed);
+            setTimeout(function() {
                 if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
-                resultsDiv.innerHTML = '<div style="padding:10px;color:#f39c12;">⏸ 查询已取消</div>';
-                return;
-            }
-            if (execIdx >= stmts.length) {
-                // ★ 全部执行完毕
-                _execRunning[qid] = false;
-                _execCancelFlags[qid] = false;
-                var elapsed = Date.now() - (_execStartTime[qid] || 0);
-                var minDelay = Math.max(0, 300 - elapsed);
-                setTimeout(function() {
-                    if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
-                    renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
-                    // ★ DDL 执行后自动刷新左侧树的表列表
-                    if (hasDDL) { autoRefreshTreeTables(activeConnId, activeConnData, execDb, qDb); }
-                }, minDelay);
-                return;
-            }
-            var i = execIdx;
-            var clean = stmts[i].trim();
-            if (!clean) {
-                allResults[i] = null;
-                execIdx++;
-                execNext();
-                return;
-            }
-            // 更新进度
-            resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中 ('+(i+1)+'/'+stmts.length+')...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
-            var data = {src_host:activeConnData.host, src_port:activeConnData.port, src_user:activeConnData.user, src_pwd:activeConnData.pwd, src_db:execDb, db_type:activeConnData.db_type||'mysql', ora_mode:activeConnData.ora_mode||'service_name'};
-            eel.execute_sql_query(clean, data)(function(result){
-                allResults[i] = result;
-                // 检测 DDL：无返回列 + 执行成功 = DDL/写入操作
-                if (result && result.ok && !result.cancelled && (!result.columns || !result.columns.length) && result.total === undefined) {
-                    hasDDL = true;
-                }
-                execIdx++;
-                execNext();
-            });
+                if (resultsDiv) renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
+                if (hasDDL) { autoRefreshTreeTables(activeConnId, activeConnData, execDb, qDb); }
+            }, minDelay);
+            return;
         }
-        execNext();
-    });
+        var i = execIdx;
+        var clean = stmts[i].trim();
+        if (!clean) {
+            allResults[i] = null;
+            execIdx++;
+            execNext();
+            return;
+        }
+        if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中 ('+(i+1)+'/'+stmts.length+')...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
+        var data = {src_host:activeConnData.host, src_port:activeConnData.port, src_user:activeConnData.user, src_pwd:activeConnData.pwd, src_db:execDb, db_type:activeConnData.db_type||'mysql', ora_mode:activeConnData.ora_mode||'service_name'};
+        eel.execute_sql_query(clean, data)(function(result){
+            // ★ 令牌检测：异步回调返回时，确认仍是当前执行
+            if (_execToken[qid] !== myToken) return;
+            allResults[i] = result;
+            if (result && result.ok && !result.cancelled && (!result.columns || !result.columns.length) && result.total === undefined) {
+                hasDDL = true;
+            }
+            execIdx++;
+            execNext();
+        });
+    }
+    execNext();
+}
+
+/** 延迟复位按钮（用于执行取消/错误时的统一入口） */
+function _resetExeBtnLate(qid, btnExe) {
+    if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
 }
 
 function cancelExecQuery(qid) {

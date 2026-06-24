@@ -215,16 +215,45 @@ def clear_cancel():
 
 @eel.expose
 def cancel_query():
-    """取消所有查询 — 设置全局取消标记"""
+    """取消所有查询 — 设置全局取消标记，并尝试杀掉正在运行的数据库查询"""
+    global _query_conn_id, _query_src_data
     _query_cancel.set()
     # ★ 同时设置主模块的取消标记（确保主模块函数也能感知到）
     try:
         import __main__
         if hasattr(__main__, '_query_cancel'):
             __main__._query_cancel.set()
+        # ★ 尝试调用主模块的 kill 逻辑
+        if hasattr(__main__, '_kill_db_query'):
+            __main__._kill_db_query()
+    except Exception:
+        pass
+    # ★ 也主动尝试 kill（用 modules 的全局变量）
+    try:
+        _modules_kill_db_query()
     except Exception:
         pass
     return True
+
+
+def _modules_kill_db_query():
+    """尝试杀掉 modules 包内记录的当前查询"""
+    cid = _query_conn_id
+    src = _query_src_data
+    if not cid or not src:
+        return
+    try:
+        db_type = src.get('db_type', 'mysql')
+        if db_type not in ('mysql', 'ob-mysql'):
+            return
+        from modules.conn_utils import _connect_args, _conn_url
+        from sqlalchemy import create_engine, text
+        kill_engine = create_engine(_conn_url(src), connect_args=_connect_args(db_type, timeout=5))
+        with kill_engine.connect() as kc:
+            kc.execute(text(f"KILL QUERY {cid}"))
+        kill_engine.dispose()
+    except Exception:
+        pass
 
 
 

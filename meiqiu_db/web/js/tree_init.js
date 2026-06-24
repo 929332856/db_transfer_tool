@@ -20,7 +20,7 @@
             if (typeof eel.tree_load !== 'function' && typeof eel._import_py_function === 'function') {
                 _diag('[tree_init] tree_load missing, manual import...', 'warn');
                 // 手动导入关键函数（其余函数按需在主流程中也会触发导入）
-                var criticalFns = ['tree_load', 'tree_diag', 'tree_save', 'tree_backup_now', 'tree_add_folder',
+                var criticalFns = ['tree_load', 'tree_diag', 'tree_save', 'tree_add_folder',
                     'tree_rename_folder', 'tree_delete_folder', 'tree_add_connection',
                     'tree_update_connection', 'tree_delete_connection', 'tree_move_connection',
                     'tree_save_query', 'tree_get_query', 'tree_delete_query', 'tree_test_conn',
@@ -43,6 +43,7 @@
                     'get_profiles', 'get_last_used', 'save_profile', 'delete_profile',
                     'find_profile', 'test_connection', 'start_transfer', 'stop_transfer',
                     'datagrip_parse_import',
+                    'settings_get', 'settings_save', 'settings_get_paths',
                     'ping', 'debug_python_info'];
                 var imported = 0;
                 for (var i = 0; i < criticalFns.length; i++) {
@@ -95,6 +96,36 @@
             if (++attempts < maxAttempts) { setTimeout(tryLoad, 1000); }
         }
     }
+    // 初始化主题（先读 localStorage 即时渲染，再异步获取后端设置同步）
+    function _initTheme() {
+        // 1. 立即从 localStorage 读取（防止 eel 延迟导致的闪烁）
+        var lsTheme = localStorage.getItem('mqdb_theme');
+        if (lsTheme === 'light') {
+            document.documentElement.classList.add('light-theme');
+            if (typeof _settingsData !== 'undefined') _settingsData.theme = 'light';
+        } else if (lsTheme === 'dark') {
+            document.documentElement.classList.remove('light-theme');
+            if (typeof _settingsData !== 'undefined') _settingsData.theme = 'dark';
+        }
+        // 2. 异步获取后端主题设置（以覆盖 localStorage）
+        try {
+            if (typeof eel !== 'undefined' && typeof eel.settings_get === 'function') {
+                eel.settings_get()(function(data) {
+                    if (data && data.theme === 'light') {
+                        document.documentElement.classList.add('light-theme');
+                        localStorage.setItem('mqdb_theme', 'light');
+                        if (typeof _settingsData !== 'undefined') _settingsData.theme = 'light';
+                    } else {
+                        document.documentElement.classList.remove('light-theme');
+                        localStorage.setItem('mqdb_theme', 'dark');
+                        if (typeof _settingsData !== 'undefined') _settingsData.theme = 'dark';
+                    }
+                });
+            }
+        } catch(e) {}
+    }
     // 立即尝试，如果 eel 还没就绪则轮询等待
     tryLoad();
+    // ★ 立即初始化主题（localStorage 同步读取，无延迟）
+    _initTheme();
 })();

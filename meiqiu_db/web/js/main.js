@@ -727,6 +727,17 @@ window.addEventListener('load', function () {
     appendLog('✅ 工具已就绪');
 });
 
+// ========== 全局 F2 重命名（对象面板 + 左侧树） ==========
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'F2') {
+        e.preventDefault();
+        // 优先检查对象面板是否有选中行
+        if (typeof objPanelRenameByF2 === 'function') objPanelRenameByF2();
+        // 左侧树表名重命名
+        if (typeof treeTableRenameByF2 === 'function') treeTableRenameByF2();
+    }
+});
+
 
 
 // ========== 慢 SQL 查询分析 ==========
@@ -1613,4 +1624,237 @@ function onDgLocalFileSelected(e) {
     };
     reader.readAsText(file, 'UTF-8');
     e.target.value = '';
+}
+
+// ========== 选项 / 设置弹窗 ==========
+var _settingsData = { theme: 'dark' };
+
+/** 打开设置弹窗 */
+function openSettings() {
+    // 先从后端获取当前设置
+    if (typeof eel !== 'undefined' && eel.settings_get) {
+        eel.settings_get()(function(data) {
+            if (data) _settingsData = data;
+            _renderSettings();
+            $('settings_overlay').classList.add('show');
+        });
+    } else {
+        _renderSettings();
+        $('settings_overlay').classList.add('show');
+    }
+}
+
+/** 关闭设置弹窗 */
+function closeSettings() {
+    $('settings_overlay').classList.remove('show');
+}
+
+/** 切换左侧设置菜单 */
+function switchSettingsTab(tab, el) {
+    document.querySelectorAll('.settings-nav-item').forEach(function(item) {
+        item.classList.remove('active');
+    });
+    if (el) el.classList.add('active');
+    _renderSettingsContent(tab);
+}
+
+/** 渲染设置弹窗 */
+function _renderSettings() {
+    _renderSettingsContent('general');
+    // 高亮常规
+    document.querySelectorAll('.settings-nav-item').forEach(function(item) {
+        item.classList.remove('active');
+    });
+    var first = document.querySelector('.settings-nav-item');
+    if (first) first.classList.add('active');
+}
+
+/** 渲染右侧设置内容 */
+function _renderSettingsContent(tab) {
+    var html = '';
+    if (tab === 'general') {
+        html = _renderGeneralTab();
+    } else if (tab === 'files') {
+        html = _renderFilesTab();
+    }
+    $('settings_content').innerHTML = html;
+
+    if (tab === 'files') _loadFilePaths();
+}
+
+/** 常规设置页 */
+function _renderGeneralTab() {
+    var isDark = _settingsData.theme === 'dark';
+    var html = '<div class="settings-section">';
+    html += '<h4>📋 常规</h4>';
+
+    // 主题选择
+    html += '<label class="settings-label">发布主题</label>';
+    html += '<div class="theme-options">';
+    html += '<div class="theme-option' + (isDark ? ' selected' : '') + '" onclick="_selectTheme(\'dark\')">';
+    html += '<div class="theme-preview theme-preview-dark"></div>';
+    html += '<div class="theme-name">🌙 深色</div>';
+    html += '</div>';
+    html += '<div class="theme-option' + (!isDark ? ' selected' : '') + '" onclick="_selectTheme(\'light\')">';
+    html += '<div class="theme-preview theme-preview-light"></div>';
+    html += '<div class="theme-name">☀️ 浅色</div>';
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+
+    // 底部按钮
+    html += '<div class="settings-btn-row">';
+    html += '<button class="btn btn-gray btn-sm" onclick="closeSettings()">取消</button>';
+    html += '<button class="btn btn-green btn-sm" onclick="_saveSettings()">确定</button>';
+    html += '</div>';
+
+    return html;
+}
+
+/** 选择主题（即时生效 + 同步 localStorage） */
+function _selectTheme(theme) {
+    _settingsData.theme = theme;
+    _applyTheme();
+    $('settings_content').innerHTML = _renderGeneralTab();
+}
+
+/** 保存设置 */
+function _saveSettings() {
+    if (typeof eel !== 'undefined' && eel.settings_save) {
+        eel.settings_save(_settingsData)(function(result) {
+            if (result && result.ok) {
+                closeSettings();
+                showOkDialog('设置已保存', '设置已保存。');
+            } else {
+                showErrorDialog('保存失败', result ? result.msg : '未知错误');
+            }
+        });
+    } else {
+        closeSettings();
+        showOkDialog('设置已应用', '设置已应用。');
+    }
+}
+
+/** 应用当前主题（即时切换 + 同步 localStorage 防闪烁） */
+function _applyTheme() {
+    var htmlEl = document.documentElement;
+    if (_settingsData.theme === 'light') {
+        htmlEl.classList.add('light-theme');
+        localStorage.setItem('mqdb_theme', 'light');
+    } else {
+        htmlEl.classList.remove('light-theme');
+        localStorage.setItem('mqdb_theme', 'dark');
+    }
+}
+
+/** 文件位置设置页 */
+function _renderFilesTab() {
+    var html = '<div class="settings-section">';
+    html += '<h4>📁 文件位置</h4>';
+    html += '<label class="settings-label">以下为 MQDB 配置文件的存储路径：</label>';
+
+    // 文件列表（初始占位）
+    var files = [
+        { id: 'tree_file', name: 'navicat_tree.json', desc: '连接树数据（文件夹、连接、保存的查询）', loading: true },
+        { id: 'profiles_file', name: 'db_profiles.json', desc: '数据库同步的配置方案', loading: true },
+        { id: 'log_file', name: 'db_operation.log', desc: '数据库操作日志', loading: true },
+        { id: 'settings_file', name: 'settings.json', desc: 'MQDB 用户设置（主题等）', loading: true }
+    ];
+
+    files.forEach(function(f) {
+        html += '<div class="settings-file-item">';
+        html += '<div class="file-info">';
+        html += '<div class="file-name">📄 ' + f.name + '</div>';
+        html += '<div class="file-desc">' + f.desc + '</div>';
+        html += '</div>';
+        html += '<div class="file-path" id="fp_' + f.id + '" style="font-size:10px;color:#666;word-break:break-all;max-width:220px;text-align:right;">加载中...</div>';
+        html += '</div>';
+    });
+
+    html += '</div>';
+
+    // 底部说明
+    html += '<div class="settings-footer-note">💡 配置文件位置由 MQDB 安装路径决定，如需迁移请复制上述文件到新目录</div>';
+    html += '</div>';
+    html += '<div class="settings-btn-row">';
+    html += '<button class="btn btn-gray btn-sm" onclick="closeSettings()">关闭</button>';
+    html += '</div>';
+
+    return html;
+}
+
+/** 加载文件路径 */
+function _loadFilePaths() {
+    if (typeof eel !== 'undefined' && eel.settings_get_paths) {
+        eel.settings_get_paths()(function(paths) {
+            if (paths) {
+                Object.keys(paths).forEach(function(key) {
+                    var el = document.getElementById('fp_' + key);
+                    if (el) el.textContent = paths[key] || '(未设置)';
+                });
+            }
+        });
+    }
+}
+
+// ========== 数据库同步：从已有连接选择下拉框 ==========
+
+/** 刷新同步面板的源库/目标库连接下拉框 */
+function refreshSyncConnSelectors() {
+    var selSrc = $('sync_src_conn_sel');
+    var selDst = $('sync_dst_conn_sel');
+    if (!selSrc || !selDst) return;
+
+    // 收集所有连接
+    var conns = [];
+    if (treeData && treeData.connections) {
+        for (var k in treeData.connections) {
+            if (treeData.connections.hasOwnProperty(k)) {
+                conns.push(treeData.connections[k]);
+            }
+        }
+    }
+    conns.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
+
+    // 构建 option 列表
+    var defaultOpt = '<option value="">— 从已有连接中选择 —</option>';
+    var html = '';
+    var dbTypeIcons = { 'mysql': '🐬', 'ob-mysql': '🌊', 'postgresql': '🐘', 'oracle': '🔴', 'mssql': '💾', 'redis': '🏮' };
+    conns.forEach(function(c) {
+        var icon = dbTypeIcons[c.db_type] || '🗄';
+        var label = c.name + ' (' + c.host + ':' + (c.port || '3306') + ')';
+        html += '<option value="' + c.id + '">' + icon + ' ' + escapeHtml(label) + '</option>';
+    });
+
+    // 保存当前选中值
+    var curSrc = selSrc.value;
+    var curDst = selDst.value;
+
+    selSrc.innerHTML = defaultOpt + html;
+    selDst.innerHTML = defaultOpt + html;
+
+    // 恢复之前选中的值
+    if (curSrc) selSrc.value = curSrc;
+    if (curDst) selDst.value = curDst;
+}
+
+/** 下拉框选择变化 → 回填表单 */
+function onSyncConnSelect(side) {
+    var sel = $('sync_' + side + '_conn_sel');
+    if (!sel) return;
+    var cid = sel.value;
+    if (!cid) return;  // 选了"— 从已有连接中选择 —"
+    if (!treeData || !treeData.connections || !treeData.connections[cid]) return;
+    var c = treeData.connections[cid];
+
+    // 默认端口
+    var defaults = DB_DEFAULTS[c.db_type] || {port:'3306'};
+
+    $('sync_' + side + '_host').value = c.host || '';
+    $('sync_' + side + '_port').value = c.port || defaults.port || '3306';
+    $('sync_' + side + '_user').value = c.user || '';
+    $('sync_' + side + '_pwd').value  = c.pwd  || '';
+    $('sync_' + side + '_db').value   = c.db   || '';
+
+    appendLog('📌 ' + (side === 'src' ? '源库' : '目标库') + '已从连接"' + c.name + '"载入配置');
 }

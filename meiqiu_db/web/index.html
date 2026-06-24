@@ -4,8 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NCIgaGVpZ2h0PSI2NCIgdmlld0JveD0iMCAwIDY0IDY0Ij48Y2lyY2xlIGN4PSIzMiIgY3k9IjMyIiByPSIzMSIgZmlsbD0iIzVkYWRlMiIgc3Ryb2tlPSIjMmU4NmMxIiBzdHJva2Utd2lkdGg9IjIiLz48dGV4dCB4PSIzMiIgeT0iNDEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJBcmlhbCxzYW5zLXNlcmlmIiBmb250LXNpemU9IjIyIiBmb250LXdlaWdodD0iYm9sZCIgZmlsbD0iI2ZmZmZmZiI+TVE8L3RleHQ+PC9zdmc+">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="stylesheet" href="css/style.css">
+    <!-- ★ 同步读取 localStorage 主题，防止页面渲染闪烁 -->
+    <script>if(localStorage.getItem('mqdb_theme')==='light')document.documentElement.classList.add('light-theme')</script>
     <script type="text/javascript" src="/eel.js"></script>
     <script type="text/javascript">
         if (typeof eel === 'undefined') {
@@ -38,6 +40,8 @@
                         <div class="top-import-item import-disabled" title="即将支持">📄 Navicat 导入 <span style="color:#666;font-size:10px;">（即将上线）</span></div>
                     </div>
                 </div>
+                <span style="width:1px;height:18px;background:#444;display:inline-block;margin:0 8px;"></span>
+                <button class="top-toolbar-btn" onclick="openSettings()" title="工具/选项">🔧 工具</button>
             </div>
             <!-- 顶部 Tab 栏 -->
             <div class="top-tabs" id="top_tabs">
@@ -79,6 +83,9 @@
                 <div class="db-row">
                     <div class="db-card">
                         <h3>📤 源库配置</h3>
+                        <select class="sync-conn-sel" id="sync_src_conn_sel" onchange="onSyncConnSelect('src')">
+                            <option value="">— 从已有连接中选择 —</option>
+                        </select>
                         <input type="text" id="sync_src_host" placeholder="主机 IP 地址">
                         <input type="text" id="sync_src_port" placeholder="端口号" value="3306">
                         <input type="text" id="sync_src_user" placeholder="用户名">
@@ -92,6 +99,9 @@
                     </div>
                     <div class="db-card">
                         <h3>📥 目标库配置</h3>
+                        <select class="sync-conn-sel" id="sync_dst_conn_sel" onchange="onSyncConnSelect('dst')">
+                            <option value="">— 从已有连接中选择 —</option>
+                        </select>
                         <input type="text" id="sync_dst_host" placeholder="主机 IP 地址">
                         <input type="text" id="sync_dst_port" placeholder="端口号" value="3306">
                         <input type="text" id="sync_dst_user" placeholder="用户名">
@@ -277,6 +287,25 @@
             <div style="font-size:14px;font-weight:bold;margin-bottom:14px;">DataGrip 连接导入</div>
             <div id="dg_import_content" style="text-align:left;font-size:12px;"></div>
             <div id="dg_import_btns" style="display:flex;justify-content:center;gap:8px;margin-top:14px;"></div>
+        </div>
+    </div>
+
+    <!-- 选项 / 设置弹窗 -->
+    <div class="modal-overlay" id="settings_overlay" style="z-index:5100;">
+        <div class="settings-dialog" id="settings_dialog">
+            <div class="settings-header">
+                <span class="settings-title">⚙️ 选项</span>
+                <span class="settings-close" onclick="closeSettings()" title="关闭">✕</span>
+            </div>
+            <div class="settings-body">
+                <div class="settings-sidebar" id="settings_sidebar">
+                    <div class="settings-nav-item active" onclick="switchSettingsTab('general',this)">📋 常规</div>
+                    <div class="settings-nav-item" onclick="switchSettingsTab('files',this)">📁 文件位置</div>
+                </div>
+                <div class="settings-content" id="settings_content">
+                    <!-- 由 JS 动态填充 -->
+                </div>
+            </div>
         </div>
     </div>
 

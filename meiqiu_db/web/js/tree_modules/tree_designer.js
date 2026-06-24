@@ -303,45 +303,77 @@ function designViewDDL() {
 }
 
 function openQueryInTab(qid) {
+    console.log('[openQueryInTab] 尝试打开查询, qid=', qid);
     eel.tree_get_query(qid)(function(q){
-        if(!q)return;
-        var cid = q.conn_id || '';
-        var qdb = q.db || '';
-        // 确保 activeConnData 来自查询所属连接，不依赖外部状态
-        if (cid && treeData && treeData.connections && treeData.connections[cid]) {
-            activeConnId = cid;
-            activeConnData = treeData.connections[cid];
-        }
-        var content =
-            '<div class="query-layout" id="ql_'+qid+'">' +
-            '<div class="query-toolbar"><button id="btn_exe_'+qid+'" class="btn btn-green" style="font-size:11px;padding:4px 14px;" onclick="execQueryTab(\''+qid+'\')">▶ 执行</button>' +
-            '<span style="font-size:11px;color:#888;">Ctrl+Enter 执行 | Ctrl+S 保存</span></div>' +
-            '<div class="query-editor-wrap"><textarea id="sq_'+qid+'" class="query-editor">'+escapeHtml(q.sql||'')+'</textarea></div>' +
-            '<div class="query-splitter" id="qs_'+qid+'"></div>' +
-            '<div class="query-results-wrap" id="qr_'+qid+'"></div>' +
-            '</div>';
-        addOrUpdateTab('query_'+qid, q.name, 'query', content, q.db, cid);
-        setTimeout(function(){
-            var ta = document.getElementById('sq_'+qid);
-            var btnE = document.getElementById('btn_exe_'+qid);
-            function updateBtnLabel() {
-                if (!ta || !btnE || btnE.textContent === '⏹ 取消') return;
-                var s = ta.selectionStart, e = ta.selectionEnd;
-                btnE.textContent = (s !== e) ? '▶ 执行选中' : '▶ 执行';
-            }
-            if(ta) {
-                ta.addEventListener('input', function(){ _queryTextareaChanged(qid, ta); });
-                ta.addEventListener('keydown',function(e){
-                    if(e.ctrlKey&&e.key==='Enter') execQueryTab(qid);
-                    if(e.ctrlKey&&(e.key==='s'||e.key==='S')) { e.preventDefault(); saveQueryTab(qid, cid, qdb, q.name); }
+        if(!q) {
+            // 后端未找到 → 尝试从内存 treeData.saved_queries 查找
+            var memQ = (treeData && treeData.saved_queries)
+                ? treeData.saved_queries.find(function(x){return x.id === qid;})
+                : null;
+            if (memQ) {
+                console.warn('[openQueryInTab] 后端未找到查询('+qid+')，使用内存缓存数据');
+                q = memQ;
+            } else {
+                console.error('[openQueryInTab] 查询未找到, qid=', qid, '；尝试刷新树数据...');
+                // 尝试刷新树数据后重试
+                eel.tree_load()(function(data){
+                    if (data) { treeData = data; }
+                    var retryQ = (treeData && treeData.saved_queries)
+                        ? treeData.saved_queries.find(function(x){return x.id === qid;})
+                        : null;
+                    if (retryQ) {
+                        console.log('[openQueryInTab] 刷新后找到查询，重新打开');
+                        _openQueryInTabImpl(retryQ);
+                    } else {
+                        console.error('[openQueryInTab] 刷新后仍未找到查询, qid=', qid);
+                        showErrorDialog('打开失败', '查询未找到（ID: '+escapeHtml(String(qid))+'），可能已被删除或配置文件损坏。<br><br>请尝试：<br>1. 右键树节点 → 刷新全部<br>2. 检查 navicat_tree.json 文件是否正常');
+                    }
                 });
-                ta.addEventListener('mouseup', updateBtnLabel);
-                ta.addEventListener('keyup', updateBtnLabel);
+                return;
             }
-            // 初始化可拖动分割线
-            initQuerySplitter('ql_'+qid, 'qs_'+qid, 'sq_'+qid, 'qr_'+qid);
-        },100);
+        }
+        _openQueryInTabImpl(q);
     });
+}
+
+function _openQueryInTabImpl(q) {
+    var qid = q.id;
+    var cid = q.conn_id || '';
+    var qdb = q.db || '';
+    // 确保 activeConnData 来自查询所属连接，不依赖外部状态
+    if (cid && treeData && treeData.connections && treeData.connections[cid]) {
+        activeConnId = cid;
+        activeConnData = treeData.connections[cid];
+    }
+    var content =
+        '<div class="query-layout" id="ql_'+qid+'">' +
+        '<div class="query-toolbar"><button id="btn_exe_'+qid+'" class="btn btn-green" style="font-size:11px;padding:4px 14px;" onclick="execQueryTab(\''+qid+'\')">▶ 执行</button>' +
+        '<span style="font-size:11px;color:#888;">Ctrl+Enter 执行 | Ctrl+S 保存</span></div>' +
+        '<div class="query-editor-wrap"><textarea id="sq_'+qid+'" class="query-editor">'+escapeHtml(q.sql||'')+'</textarea></div>' +
+        '<div class="query-splitter" id="qs_'+qid+'"></div>' +
+        '<div class="query-results-wrap" id="qr_'+qid+'"></div>' +
+        '</div>';
+    addOrUpdateTab('query_'+qid, q.name, 'query', content, q.db, cid);
+    setTimeout(function(){
+        var ta = document.getElementById('sq_'+qid);
+        var btnE = document.getElementById('btn_exe_'+qid);
+        function updateBtnLabel() {
+            if (!ta || !btnE || btnE.textContent === '⏹ 取消') return;
+            var s = ta.selectionStart, e = ta.selectionEnd;
+            btnE.textContent = (s !== e) ? '▶ 执行选中' : '▶ 执行';
+        }
+        if(ta) {
+            ta.addEventListener('input', function(){ _queryTextareaChanged(qid, ta); });
+            ta.addEventListener('keydown',function(e){
+                if(e.ctrlKey&&e.key==='Enter') execQueryTab(qid);
+                if(e.ctrlKey&&(e.key==='s'||e.key==='S')) { e.preventDefault(); saveQueryTab(qid, cid, qdb, q.name); }
+            });
+            ta.addEventListener('mouseup', updateBtnLabel);
+            ta.addEventListener('keyup', updateBtnLabel);
+        }
+        // 初始化可拖动分割线
+        initQuerySplitter('ql_'+qid, 'qs_'+qid, 'sq_'+qid, 'qr_'+qid);
+    },100);
 }
 
 function saveQueryTab(qid, cid, db, qname) {
@@ -354,6 +386,21 @@ function saveQueryTab(qid, cid, db, qname) {
             ta.style.boxShadow = 'inset 0 0 0 2px #2ecc71';
             ta.style.transition = 'box-shadow 0.3s';
             setTimeout(function(){ ta.style.boxShadow = ''; }, 1200);
+        }
+        // ★ 同步更新内存中的 treeData.saved_queries，防止后端文件异常时丢失数据
+        if (r && r.ok) {
+            var queries = treeData.saved_queries || [];
+            var existing = queries.find(function(x){return x.id === qid;});
+            if (existing) {
+                existing.sql = sql;
+                if (qname) existing.name = qname;
+            } else {
+                queries.push({id: qid, name: qname || '', sql: sql, conn_id: cid, db: db});
+            }
+            // 刷新树中查询列表
+            if (cid && db && typeof refreshQueriesTree === 'function') {
+                refreshQueriesTree(cid, db, '');
+            }
         }
     });
 }
@@ -385,3 +432,4 @@ function detectTableFromSql(sql) {
 var _execCancelFlags = {};
 var _execStartTime = {};  // ★ 记录执行开始时间，防止按钮瞬间闪回
 var _execRunning = {};    // ★ 可靠的"正在执行"状态标记（按 qid），用于取消判定和 tab 切换后按钮复位
+var _execToken = {};      // ★ 执行令牌（按 qid），每次新执行递增，旧链检测令牌不匹配则放弃

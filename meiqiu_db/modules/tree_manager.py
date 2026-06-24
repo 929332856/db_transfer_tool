@@ -181,8 +181,7 @@ def _load_tree():
             recovered = _recover_from_backup()
             if recovered:
                 return recovered
-        # 正常加载，顺便做一次备份（如果距上次备份超过1小时）
-        _maybe_auto_backup()
+        # 正常加载
         return data
     except json.JSONDecodeError as e:
         print(f"[tree] _load_tree JSON解析失败: {e}")
@@ -207,7 +206,7 @@ def _save_tree(data):
         # 数据校验
         if not _validate_tree(data):
             print("[tree] _save_tree: 数据校验失败，拒绝保存")
-            return
+            return False
         # 【防覆盖】如果新数据是空壳，但当前文件有实际内容 → 拒绝（防止误覆盖）
         if _is_empty_shell(data) and os.path.exists(TREE_FILE):
             try:
@@ -216,7 +215,7 @@ def _save_tree(data):
                 if _tree_has_content(current):
                     print("[tree] _save_tree: 拒绝用空壳数据覆盖现有 %d 个连接" 
                           % len(current.get("connections", {})))
-                    return
+                    return False
             except Exception:
                 pass  # 当前文件读不了就算了，让写入继续
         # 保存前先备份
@@ -230,14 +229,19 @@ def _save_tree(data):
             os.replace(tmp_file, TREE_FILE)
         else:
             os.rename(tmp_file, TREE_FILE)
+        print(f"[tree] _save_tree: 保存成功，connections={len(data.get('connections',{}))}, queries={len(data.get('saved_queries',[]))}")
+        return True
     except Exception as e:
         print(f"[tree] _save_tree 异常: {e}")
+        import traceback
+        traceback.print_exc()
         # 清理临时文件
         try:
             if os.path.exists(TREE_FILE + ".tmp"):
                 os.remove(TREE_FILE + ".tmp")
         except Exception:
             pass
+        return False
 
 
 @eel.expose

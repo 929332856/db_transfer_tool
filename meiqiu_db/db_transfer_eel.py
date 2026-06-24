@@ -26,6 +26,7 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILES_FILE = os.path.join(BASE_DIR, "db_profiles.json")
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
 # ==================== 数据库操作日志 ====================
 import logging
@@ -575,7 +576,7 @@ def clear_cancel():
 
 @eel.expose
 def cancel_query():
-    """取消所有查询 — 设置全局取消标记"""
+    """取消所有查询 — 设置全局取消标记，并尝试杀掉正在运行的数据库查询"""
     _query_cancel.set()
     # ★ 同时设置 modules 包的取消标记（确保 modules/ 下的函数也能感知到）
     try:
@@ -583,7 +584,40 @@ def cancel_query():
         modules._query_cancel.set()
     except Exception:
         pass
+    # ★ 真正杀掉数据库中的查询（不只是 Python 标记）
+    _kill_db_query()
     return True
+
+
+def _kill_db_query():
+    """尝试杀掉当前正在运行的数据库查询（支持 MySQL/PostgreSQL/Oracle/MSSQL）"""
+    global _query_conn_id, _query_src_data
+    cid = _query_conn_id
+    src = _query_src_data
+    if not cid or not src:
+        return
+    try:
+        db_type = src.get('db_type', 'mysql')
+        kill_engine = create_engine(_conn_url(src), connect_args=_connect_args(db_type, timeout=5))
+        try:
+            with kill_engine.connect() as kc:
+                # ★ 设置极短超时（kill 不应等太久）
+                try:
+                    if db_type == 'mysql' or db_type == 'ob-mysql':
+                        kc.execute(text(f"KILL QUERY {cid}"))
+                    elif db_type == 'postgresql':
+                        kc.execute(text(f"SELECT pg_terminate_backend({cid})"))
+                    elif db_type == 'oracle':
+                        # Oracle: ALTER SYSTEM KILL SESSION 'sid,serial#'
+                        kc.execute(text(f"ALTER SYSTEM KILL SESSION '{cid}' IMMEDIATE"))
+                    elif db_type == 'mssql':
+                        kc.execute(text(f"KILL {cid}"))
+                except Exception:
+                    pass
+        finally:
+            kill_engine.dispose()
+    except Exception:
+        pass
 
 
 
@@ -628,9 +662,12 @@ def _build_table_ref(conn_data, database, table_name, schema=''):
     return f"`{database}`.`{table_name}`"
 
 @eel.expose
-def table_preview_data(conn_data, database, table_name, schema='', order_col='', order_dir=''):
-    # 每次调用都清除取消标记（前端已在 applyServerSort 中设置 sortCancelled=false）
+def table_preview_data(conn_data, database, table_name, schema='', order_col='', order_dir='', limit=None):
+    """加载表数据（全量或限量）。limit 为空时全量，否则只取前 N 行"""
+    global _query_conn_id, _query_src_data
     _query_cancel.clear()
+    _query_conn_id = None
+    _query_src_data = None
     try:
         cdata = dict(conn_data)
         if cdata.get('db_type') in ('postgresql', 'oracle'):
@@ -647,19 +684,60 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
             order_clause = f' ORDER BY {safe_col} {direction}'
         if _query_cancel.is_set():
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
-        limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=None)
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=30))
-        with engine.connect() as conn:
-            _log_db_select(limit_sql)
-            result = conn.execute(text(limit_sql))
-            columns = list(result.keys())
-            rows = [_row_to_json(row) for row in result.fetchall()]
-            # 查询列注释
-            comments = {}
-            comments = _load_column_comments(conn, db_type, database, table_name, schema)
-            col_types = _load_column_types(conn, db_type, database, table_name, schema)
-        engine.dispose()
-        return {"ok": True, "columns": columns, "rows": rows, "comments": comments, "col_types": col_types}
+        # ★ 如果传入了 limit 参数则限量，否则全量（兼容旧调用）
+        actual_limit = int(limit) if limit is not None else None
+        limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=actual_limit)
+        # ★ 保存连接数据，用于 cancel 时 kill query
+        _query_src_data = cdata
+        url = _conn_url(cdata)
+        if db_type in ('mysql', 'ob-mysql'):
+            url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=60") if "?" in url else url + "?charset=utf8mb4&read_timeout=60"
+        engine = create_engine(url, connect_args=_connect_args(db_type, timeout=30))
+        try:
+            with engine.connect() as conn:
+                # ★ 记录连接 ID（所有数据库类型），用于 cancel 时 kill query
+                try:
+                    if db_type in ('mysql', 'ob-mysql'):
+                        _query_conn_id = conn.execute(text("SELECT CONNECTION_ID()")).scalar()
+                        try:
+                            conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 120000"))
+                        except Exception:
+                            pass
+                    elif db_type == 'postgresql':
+                        _query_conn_id = conn.execute(text("SELECT pg_backend_pid()")).scalar()
+                        # 设置语句超时 2 分钟
+                        try:
+                            conn.execute(text("SET statement_timeout = '120000'"))
+                        except Exception:
+                            pass
+                    elif db_type == 'oracle':
+                        row = conn.execute(text("SELECT SID||','||SERIAL# FROM V$SESSION WHERE AUDSID = SYS_CONTEXT('USERENV','SESSIONID')")).fetchone()
+                        if row:
+                            _query_conn_id = row[0]
+                    elif db_type == 'mssql':
+                        _query_conn_id = conn.execute(text("SELECT @@SPID")).scalar()
+                except Exception:
+                    pass
+                if _query_cancel.is_set():
+                    engine.dispose()
+                    return {"ok": False, "msg": "查询已取消", "cancelled": True}
+                _log_db_select(limit_sql)
+                result = conn.execute(text(limit_sql))
+                columns = list(result.keys())
+                rows = [_row_to_json(row) for row in result.fetchall()]
+                # ★ 全量查询可能耗时很长，fetchall 后检查用户是否取消了
+                if _query_cancel.is_set():
+                    engine.dispose()
+                    return {"ok": False, "msg": "查询已取消", "cancelled": True}
+                # 查询列注释
+                comments = {}
+                comments = _load_column_comments(conn, db_type, database, table_name, schema)
+                col_types = _load_column_types(conn, db_type, database, table_name, schema)
+            engine.dispose()
+            return {"ok": True, "columns": columns, "rows": rows, "comments": comments, "col_types": col_types}
+        except Exception as e:
+            engine.dispose()
+            raise
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
 
@@ -667,7 +745,10 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
 @eel.expose
 def table_preview_data_fast(conn_data, database, table_name, schema='', order_col='', order_dir=''):
     """快速预览：取 51 行，不用 COUNT(*)（超大表 COUNT 太慢），用第51行判断是否有更多"""
+    global _query_conn_id, _query_src_data
     _query_cancel.clear()
+    _query_conn_id = None
+    _query_src_data = None
     try:
         cdata = dict(conn_data)
         if cdata.get('db_type') in ('postgresql', 'oracle'):
@@ -685,21 +766,59 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
         # ★ 取 51 行，多一行用于判断是否还有更多数据（省掉慢 COUNT）
         limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=51)
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
-        with engine.connect() as conn:
-            _log_db_select(limit_sql + "  -- [FAST] 前50行")
-            result = conn.execute(text(limit_sql))
-            columns = list(result.keys())
-            rows = [_row_to_json(row) for row in result.fetchall()]
-            has_more = len(rows) > 50
-            if has_more:
-                rows = rows[:50]  # 只暴露前50行给前端
-            comments = _load_column_comments(conn, db_type, database, table_name, schema)
-            col_types = _load_column_types(conn, db_type, database, table_name, schema)
-        engine.dispose()
-        return {"ok": True, "columns": columns, "rows": rows, "comments": comments,
-                "col_types": col_types, "fast": True, "total_count": len(rows),
-                "has_more": has_more}
+        # ★ 保存连接数据，用于 cancel 时 kill query
+        _query_src_data = cdata
+        url = _conn_url(cdata)
+        if db_type in ('mysql', 'ob-mysql'):
+            url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=30") if "?" in url else url + "?charset=utf8mb4&read_timeout=30"
+        engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
+        try:
+            with engine.connect() as conn:
+                # ★ 记录连接 ID（所有数据库类型），用于 cancel 时 kill query
+                try:
+                    if db_type in ('mysql', 'ob-mysql'):
+                        _query_conn_id = conn.execute(text("SELECT CONNECTION_ID()")).scalar()
+                        try:
+                            conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 30000"))
+                        except Exception:
+                            pass
+                    elif db_type == 'postgresql':
+                        _query_conn_id = conn.execute(text("SELECT pg_backend_pid()")).scalar()
+                        try:
+                            conn.execute(text("SET statement_timeout = '30000'"))
+                        except Exception:
+                            pass
+                    elif db_type == 'oracle':
+                        row = conn.execute(text("SELECT SID||','||SERIAL# FROM V$SESSION WHERE AUDSID = SYS_CONTEXT('USERENV','SESSIONID')")).fetchone()
+                        if row:
+                            _query_conn_id = row[0]
+                    elif db_type == 'mssql':
+                        _query_conn_id = conn.execute(text("SELECT @@SPID")).scalar()
+                except Exception:
+                    pass
+                if _query_cancel.is_set():
+                    engine.dispose()
+                    return {"ok": False, "msg": "查询已取消", "cancelled": True}
+                _log_db_select(limit_sql + "  -- [FAST] 前50行")
+                result = conn.execute(text(limit_sql))
+                columns = list(result.keys())
+                rows = [_row_to_json(row) for row in result.fetchall()]
+                # ★ 检查取消标记（虽然快速查询通常很快，但大表也可能耗时）
+                if _query_cancel.is_set():
+                    engine.dispose()
+                    return {"ok": False, "msg": "查询已取消", "cancelled": True}
+                has_more = len(rows) > 50
+                if has_more:
+                    rows = rows[:50]  # 只暴露前50行给前端
+                comments = _load_column_comments(conn, db_type, database, table_name, schema)
+                col_types = _load_column_types(conn, db_type, database, table_name, schema)
+            engine.dispose()
+            return {"ok": True, "columns": columns, "rows": rows, "comments": comments,
+                    "col_types": col_types, "fast": True, "total_count": len(rows),
+                    "has_more": has_more}
+        except Exception as e:
+            engine.dispose()
+            raise
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
 
@@ -707,9 +826,13 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
 @eel.expose
 def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=50, order_col='', order_dir=''):
     """服务端分页加载：取 limit+1 行代替 COUNT(*)，用多出的一行判断是否还有更多"""
+    global _query_conn_id, _query_src_data
     _query_cancel.clear()
+    _query_conn_id = None
+    _query_src_data = cdata_saved = None
     try:
         cdata = dict(conn_data)
+        cdata_saved = cdata  # for error handler
         if cdata.get('db_type') in ('postgresql', 'oracle'):
             pass
         else:
@@ -727,23 +850,49 @@ def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=
         limit = int(limit)
         # ★ 取 limit+1 行，多一行用于判断是否还有更多（省掉慢 COUNT）
         page_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=limit + 1, offset=offset)
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
-        with engine.connect() as conn:
-            _log_db_select(f"{page_sql}  -- [PAGE] offset={offset} limit={limit}")
-            result = conn.execute(text(page_sql))
-            columns = list(result.keys())
-            rows = [_row_to_json(row) for row in result.fetchall()]
-            has_more = len(rows) > limit
-            if has_more:
-                rows = rows[:limit]  # 只暴露 limit 行给前端
-            comments = _load_column_comments(conn, db_type, database, table_name, schema)
-            col_types = _load_column_types(conn, db_type, database, table_name, schema)
-        engine.dispose()
-        return {"ok": True, "columns": columns, "rows": rows,
-                "total_count": offset + len(rows), "has_more": has_more,
-                "offset": offset, "limit": limit, "comments": comments, "col_types": col_types}
+        # ★ 保存连接数据，用于 cancel 时 kill query
+        _query_src_data = cdata
+        url = _conn_url(cdata)
+        if db_type in ('mysql', 'ob-mysql'):
+            url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=30") if "?" in url else url + "?charset=utf8mb4&read_timeout=30"
+        engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
+        try:
+            with engine.connect() as conn:
+                # ★ 记录连接 ID，用于 cancel 时 kill query
+                if db_type in ('mysql', 'ob-mysql'):
+                    try:
+                        _query_conn_id = conn.execute(text("SELECT CONNECTION_ID()")).scalar()
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 30000"))
+                    except Exception:
+                        pass
+                if _query_cancel.is_set():
+                    engine.dispose()
+                    return {"ok": False, "msg": "查询已取消", "cancelled": True}
+                _log_db_select(f"{page_sql}  -- [PAGE] offset={offset} limit={limit}")
+                result = conn.execute(text(page_sql))
+                columns = list(result.keys())
+                rows = [_row_to_json(row) for row in result.fetchall()]
+                # ★ 检查取消标记
+                if _query_cancel.is_set():
+                    engine.dispose()
+                    return {"ok": False, "msg": "查询已取消", "cancelled": True}
+                has_more = len(rows) > limit
+                if has_more:
+                    rows = rows[:limit]  # 只暴露 limit 行给前端
+                comments = _load_column_comments(conn, db_type, database, table_name, schema)
+                col_types = _load_column_types(conn, db_type, database, table_name, schema)
+            engine.dispose()
+            return {"ok": True, "columns": columns, "rows": rows,
+                    "total_count": offset + len(rows), "has_more": has_more,
+                    "offset": offset, "limit": limit, "comments": comments, "col_types": col_types}
+        except Exception as e:
+            engine.dispose()
+            raise
     except Exception as e:
-        return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
+        return {"ok": False, "msg": _friendly_error(e, cdata_saved.get('db_type','mysql') if cdata_saved else 'mysql')}
 
 
 def _build_full_table_sql(tbl, db_type, order_clause, limit=None, offset=0):
@@ -1499,7 +1648,93 @@ def table_clear(conn_data, database, table_name, schema=''):
     except Exception as e: return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type','mysql'))}
 
 
+@eel.expose
+def table_rename(conn_data, database, old_name, new_name, schema=''):
+    """重命名表"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql', 'oracle'):
+            cdata["db"] = database
+        old_tbl = _build_table_ref(cdata, database, old_name, schema)
+        new_tbl = _build_table_ref(cdata, database, new_name, schema)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        if db_type == 'mssql':
+            sql = f"EXEC sp_rename '{old_tbl}', '{new_name}'"
+        elif db_type in ('mysql', 'ob-mysql'):
+            # MySQL: RENAME TABLE 不需要列级引用
+            sql = f"RENAME TABLE `{database}`.`{old_name}` TO `{database}`.`{new_name}`"
+        elif db_type == 'postgresql':
+            q = schema if schema else database
+            sql = f'ALTER TABLE "{q}"."{old_name}" RENAME TO "{new_name}"'
+        elif db_type == 'oracle':
+            sql = f'ALTER TABLE "{database}"."{old_name}" RENAME TO "{new_name}"'
+        else:
+            sql = f"RENAME TABLE `{database}`.`{old_name}` TO `{database}`.`{new_name}`"
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        engine.dispose()
+        _db_op_logger.info(f"[RENAME] {old_tbl} → {new_tbl}")
+        return {"ok": True, "msg": f"表 [{old_name}] 已重命名为 [{new_name}]"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
+@eel.expose
+def table_backup(conn_data, database, table_name, schema=''):
+    """备份表：创建结构+数据相同的副本，表名=当前日期(MMDD_HH)，重名追加_1"""
+    try:
+        from datetime import datetime as dt
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql', 'oracle'):
+            cdata["db"] = database
+        src_tbl = _build_table_ref(cdata, database, table_name, schema)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=30))
+
+        # 生成备份表名: MMDD_HH
+        base_name = dt.now().strftime("%m%d_%H")
+        backup_name = base_name
+        # 检测重名，追加 _1, _2 ...
+        existing = set()
+        try:
+            insp = inspect(engine)
+            schema_name = schema if db_type == 'postgresql' else (database if db_type == 'oracle' else None)
+            args = [schema_name] if schema_name else []
+            existing = set(insp.get_table_names(*args))
+        except Exception:
+            pass
+        suffix = 0
+        orig_backup = backup_name
+        while backup_name in existing:
+            suffix += 1
+            backup_name = f"{orig_backup}_{suffix}"
+        dst_tbl = _build_table_ref(cdata, database, backup_name, schema)
+
+        with engine.begin() as conn:
+            if db_type in ('mysql', 'ob-mysql'):
+                conn.execute(text(f"CREATE TABLE `{database}`.`{backup_name}` LIKE `{database}`.`{table_name}`"))
+                conn.execute(text(f"INSERT INTO `{database}`.`{backup_name}` SELECT * FROM `{database}`.`{table_name}`"))
+            elif db_type == 'postgresql':
+                q = schema if schema else database
+                conn.execute(text(f'CREATE TABLE "{q}"."{backup_name}" (LIKE "{q}"."{table_name}" INCLUDING ALL)'))
+                conn.execute(text(f'INSERT INTO "{q}"."{backup_name}" SELECT * FROM "{q}"."{table_name}"'))
+            elif db_type == 'oracle':
+                conn.execute(text(f'CREATE TABLE "{database}"."{backup_name}" AS SELECT * FROM "{database}"."{table_name}"'))
+            elif db_type == 'mssql':
+                conn.execute(text(f"SELECT * INTO [{database}].[{backup_name}] FROM [{database}].[{table_name}]"))
+            else:
+                conn.execute(text(f"CREATE TABLE `{database}`.`{backup_name}` LIKE `{database}`.`{table_name}`"))
+                conn.execute(text(f"INSERT INTO `{database}`.`{backup_name}` SELECT * FROM `{database}`.`{table_name}`"))
+        engine.dispose()
+        _db_op_logger.info(f"[BACKUP] {src_tbl} → {dst_tbl}")
+        return {"ok": True, "msg": f"表 [{table_name}] 已备份为 [{backup_name}]"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
 # ==================== 树形栏目持久化（含自动备份恢复） ====================
+_tree_lock = threading.RLock()  # 可重入锁，防止并发写竞争导致数据丢失（tree_delete_folder 有递归调用）
 if getattr(sys, 'frozen', False):
     # 打包exe环境：exe在dist/目录，直接读取同目录下的文件
     TREE_FILE = os.path.join(BASE_DIR, "navicat_tree.json")
@@ -1671,8 +1906,7 @@ def _load_tree():
             recovered = _recover_from_backup()
             if recovered:
                 return recovered
-        # 正常加载，顺便做一次备份（如果距上次备份超过1小时）
-        _maybe_auto_backup()
+        # 正常加载
         return data
     except json.JSONDecodeError as e:
         print(f"[tree] _load_tree JSON解析失败: {e}")
@@ -1697,7 +1931,7 @@ def _save_tree(data):
         # 数据校验
         if not _validate_tree(data):
             print("[tree] _save_tree: 数据校验失败，拒绝保存")
-            return
+            return False
         # 【防覆盖】如果新数据是空壳，但当前文件有实际内容 → 拒绝（防止误覆盖）
         if _is_empty_shell(data) and os.path.exists(TREE_FILE):
             try:
@@ -1706,7 +1940,7 @@ def _save_tree(data):
                 if _tree_has_content(current):
                     print("[tree] _save_tree: 拒绝用空壳数据覆盖现有 %d 个连接" 
                           % len(current.get("connections", {})))
-                    return
+                    return False
             except Exception:
                 pass  # 当前文件读不了就算了，让写入继续
         # 保存前先备份
@@ -1720,14 +1954,19 @@ def _save_tree(data):
             os.replace(tmp_file, TREE_FILE)
         else:
             os.rename(tmp_file, TREE_FILE)
+        print(f"[tree] _save_tree: 保存成功，connections={len(data.get('connections',{}))}, queries={len(data.get('saved_queries',[]))}")
+        return True
     except Exception as e:
         print(f"[tree] _save_tree 异常: {e}")
+        import traceback
+        traceback.print_exc()
         # 清理临时文件
         try:
             if os.path.exists(TREE_FILE + ".tmp"):
                 os.remove(TREE_FILE + ".tmp")
         except Exception:
             pass
+        return False
 
 
 @eel.expose
@@ -1771,7 +2010,61 @@ def tree_load():
     data = _load_tree()
     return data
 @eel.expose
-def tree_save(data): _save_tree(data); return {"ok": True, "msg": "保存成功"}
+def tree_save(data):
+    with _tree_lock:
+        _save_tree(data)
+    return {"ok": True, "msg": "保存成功"}
+
+# ==================== 用户设置 ====================
+def _load_settings():
+    """加载用户设置，不存在则返回默认值"""
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {"theme": "dark"}
+
+def _save_settings_disk(data):
+    """保存用户设置到磁盘"""
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[settings] 保存失败: {e}")
+        return False
+
+@eel.expose
+def settings_get():
+    """获取当前用户设置"""
+    return _load_settings()
+
+@eel.expose
+def settings_save(data):
+    """保存用户设置"""
+    try:
+        if not isinstance(data, dict):
+            return {"ok": False, "msg": "数据格式错误"}
+        if _save_settings_disk(data):
+            return {"ok": True, "msg": "保存成功"}
+        return {"ok": False, "msg": "写入文件失败"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+@eel.expose
+def settings_get_paths():
+    """返回各配置文件的路径"""
+    return {
+        "tree_file": TREE_FILE,
+        "profiles_file": PROFILES_FILE,
+        "log_file": _LOG_FILE,
+        "settings_file": SETTINGS_FILE
+    }
+
 @eel.expose
 def tree_backup_now():
     """手动触发备份"""
@@ -1845,66 +2138,73 @@ def tree_check_integrity():
 
 @eel.expose
 def tree_add_folder(parent_id, name):
-    tree = _load_tree()
-    fid = f"f_{int(time.time() * 1000)}"
-    tree.setdefault("folders", []).append({"id": fid, "name": name, "parent": parent_id or ""})
-    _save_tree(tree)
-    return {"ok": True, "id": fid}
+    with _tree_lock:
+        tree = _load_tree()
+        fid = f"f_{int(time.time() * 1000)}"
+        tree.setdefault("folders", []).append({"id": fid, "name": name, "parent": parent_id or ""})
+        _save_tree(tree)
+        return {"ok": True, "id": fid}
 
 @eel.expose
 def tree_delete_folder(fid):
-    tree = _load_tree()
-    kids = [f["id"] for f in tree.get("folders", []) if f.get("parent") == fid]
-    for k in kids: tree_delete_folder(k)
-    tree["folders"] = [f for f in tree.get("folders", []) if f["id"] != fid]
-    to_del = [k for k, v in tree.get("connections", {}).items() if v.get("parent") == fid]
-    for k in to_del: del tree["connections"][k]
-    _save_tree(tree)
-    return True
+    with _tree_lock:
+        tree = _load_tree()
+        kids = [f["id"] for f in tree.get("folders", []) if f.get("parent") == fid]
+        for k in kids: tree_delete_folder(k)
+        tree["folders"] = [f for f in tree.get("folders", []) if f["id"] != fid]
+        to_del = [k for k, v in tree.get("connections", {}).items() if v.get("parent") == fid]
+        for k in to_del: del tree["connections"][k]
+        _save_tree(tree)
+        return True
 
 @eel.expose
 def tree_rename_folder(fid, name):
-    tree = _load_tree()
-    for f in tree.get("folders", []):
-        if f["id"] == fid: f["name"] = name
-    _save_tree(tree)
-    return True
+    with _tree_lock:
+        tree = _load_tree()
+        for f in tree.get("folders", []):
+            if f["id"] == fid: f["name"] = name
+        _save_tree(tree)
+        return True
 
 @eel.expose
 def tree_add_connection(parent_id, conn_data):
-    tree = _load_tree()
-    cid = f"c_{int(time.time() * 1000)}"
-    conn_data["id"] = cid; conn_data["parent"] = parent_id or ""
-    tree.setdefault("connections", {})[cid] = conn_data
-    _save_tree(tree)
-    return {"ok": True, "id": cid}
+    with _tree_lock:
+        tree = _load_tree()
+        cid = f"c_{int(time.time() * 1000)}"
+        conn_data["id"] = cid; conn_data["parent"] = parent_id or ""
+        tree.setdefault("connections", {})[cid] = conn_data
+        _save_tree(tree)
+        return {"ok": True, "id": cid}
 
 @eel.expose
 def tree_update_connection(cid, conn_data):
-    tree = _load_tree()
-    if cid in tree.get("connections", {}):
-        conn_data["id"] = cid
-        conn_data["parent"] = tree["connections"][cid].get("parent", "")
-        tree["connections"][cid] = conn_data
-        _save_tree(tree)
-    return True
+    with _tree_lock:
+        tree = _load_tree()
+        if cid in tree.get("connections", {}):
+            conn_data["id"] = cid
+            conn_data["parent"] = tree["connections"][cid].get("parent", "")
+            tree["connections"][cid] = conn_data
+            _save_tree(tree)
+        return True
 
 @eel.expose
 def tree_delete_connection(cid):
-    tree = _load_tree()
-    tree.get("connections", {}).pop(cid, None)
-    _save_tree(tree)
-    return True
+    with _tree_lock:
+        tree = _load_tree()
+        tree.get("connections", {}).pop(cid, None)
+        _save_tree(tree)
+        return True
 
 @eel.expose
 def tree_move_connection(cid, new_parent_id):
     """将连接移动到指定文件夹下（new_parent_id 为空则移到根）"""
-    tree = _load_tree()
-    if cid not in tree.get("connections", {}):
-        return {"ok": False, "msg": "连接不存在"}
-    tree["connections"][cid]["parent"] = new_parent_id or ""
-    _save_tree(tree)
-    return {"ok": True}
+    with _tree_lock:
+        tree = _load_tree()
+        if cid not in tree.get("connections", {}):
+            return {"ok": False, "msg": "连接不存在"}
+        tree["connections"][cid]["parent"] = new_parent_id or ""
+        _save_tree(tree)
+        return {"ok": True}
 
 _DRIVER_HINTS = {
     'mysql':      'pymysql',
@@ -2003,7 +2303,7 @@ def db_explore_get_databases(conn_data):
     try:
         db_type = conn_data.get("db_type", "mysql")
         print(f"[get_databases] db_type={db_type}, user={conn_data.get('user','')}, host={conn_data.get('host','')}, db={conn_data.get('db','')}")
-        engine = create_engine(_conn_url(conn_data), connect_args=_connect_args(conn_data.get("db_type","mysql"), timeout=10))
+        engine = create_engine(_conn_url(conn_data), connect_args=_connect_args(conn_data.get("db_type","mysql"), timeout=20))
         with engine.connect() as c:
             if db_type in ('mysql', 'ob-mysql'):
                 rows = c.execute(text("SHOW DATABASES")).fetchall()
@@ -2939,27 +3239,48 @@ def db_create(conn_data, db_name, charset='utf8mb4', collation='utf8mb4_unicode_
         return {"ok": False, "msg": str(e)}
 
 
+
 @eel.expose
 def tree_save_query(qid, name, sql, conn_id, db=''):
-    tree = _load_tree()
-    if not qid: qid = f"q_{int(time.time() * 1000)}"
-    tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
-    tree.setdefault("saved_queries", []).append({"id": qid, "name": name, "sql": sql, "conn_id": conn_id or "", "db": db or ""})
-    _save_tree(tree)
-    return {"ok": True, "id": qid}
+    with _tree_lock:
+        try:
+            tree = _load_tree()
+            if not qid: qid = f"q_{int(time.time() * 1000)}"
+            tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
+            tree.setdefault("saved_queries", []).append({"id": qid, "name": name, "sql": sql, "conn_id": conn_id or "", "db": db or ""})
+            ok = _save_tree(tree)
+            if not ok:
+                print(f"[tree] tree_save_query: 保存树文件失败, qid={qid}, name={name}")
+                return {"ok": False, "msg": "保存配置文件失败，请检查磁盘空间和权限"}
+            return {"ok": True, "id": qid}
+        except Exception as e:
+            print(f"[tree] tree_save_query 异常: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"ok": False, "msg": f"保存查询失败: {str(e)}"}
 
 @eel.expose
 def tree_delete_query(qid):
-    tree = _load_tree()
-    tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
-    _save_tree(tree)
-    return True
+    with _tree_lock:
+        try:
+            tree = _load_tree()
+            tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
+            ok = _save_tree(tree)
+            if not ok:
+                return {"ok": False, "msg": "保存配置文件失败"}
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "msg": f"删除查询失败: {str(e)}"}
 
 @eel.expose
 def tree_get_query(qid):
     tree = _load_tree()
-    for q in tree.get("saved_queries", []):
-        if q.get("id") == qid: return q
+    queries = tree.get("saved_queries", [])
+    for q in queries:
+        if q.get("id") == qid:
+            print(f"[tree] tree_get_query: 找到查询 qid={qid}, name={q.get('name','')}, conn_id={q.get('conn_id','')}")
+            return q
+    print(f"[tree] tree_get_query: 未找到查询 qid={qid}, 当前共有 {len(queries)} 个查询, 所有ID: {[q.get('id') for q in queries]}")
     return None
 
 # ==================== 拖拽复制表 ====================
