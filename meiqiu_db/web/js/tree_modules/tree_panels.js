@@ -118,19 +118,22 @@ function expandConn(cid, pad) {
         children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#999;font-size:11px;">⏳ 加载数据库列表...</div>';
         var redisTimeoutId = setTimeout(function() {
             children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ 加载超时（15秒），请检查 Redis 连接是否正常</div>';
+            // ★ 超时时移除 open class，允许用户重试双击展开
+            children.classList.remove('open');
         }, 15000);
         console.log('调用redis_get_databases', conn.host);
         if (typeof eel === 'undefined') {
             console.error('eel 对象未定义！确保 main.js 已加载且 Eel 已初始化');
             children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ JS错误: eel未定义</div>';
+            children.classList.remove('open');
             return;
         }
         try {
             eel.redis_get_databases(conn)(function(r) {
                 console.log('Redis DB列表回调触发', r);
                 clearTimeout(redisTimeoutId);
-                if (!r) { console.error('Redis DB列表返回null'); children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ 返回null</div>'; return; }
-                if (!r.ok) { console.error('Redis DB列表返回ok=false:', r.msg); children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'')+'</div>'; return; }
+                if (!r) { console.error('Redis DB列表返回null'); children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ 返回null</div>'; children.classList.remove('open'); return; }
+                if (!r.ok) { console.error('Redis DB列表返回ok=false:', r.msg); children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'')+'</div>'; children.classList.remove('open'); return; }
                 console.log('Redis DB列表成功:', (r.databases||[]).length, '个DB');
                 var html = '';
                 // 顶部信息栏
@@ -152,12 +155,25 @@ function expandConn(cid, pad) {
         } catch (err) {
             console.error('调用 eel.redis_get_databases 时捕获异常:', err);
             children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ JS异常: ' + escapeHtml(err.message) + '</div>';
+            children.classList.remove('open');
         }
         return;
     }
+    // 非 Redis 连接：添加前端超时保护
+    var dbTimeoutId = setTimeout(function() {
+        children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ 加载超时（15秒），请检查服务器连接是否正常</div>';
+        // ★ 超时时移除 open class，允许用户重试双击展开
+        children.classList.remove('open');
+    }, 15000);
     eel.db_explore_get_databases(conn)(function (r) {
+        clearTimeout(dbTimeoutId);
         console.log('[expandConn] db_explore_get_databases callback:', JSON.stringify(r).substring(0, 200));
-        if (!r || !r.ok) { children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'无响应')+'</div>'; return; }
+        if (!r || !r.ok) {
+            children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'无响应')+'</div>';
+            // ★ 失败时移除 open class，允许用户重试双击展开
+            children.classList.remove('open');
+            return;
+        }
         var html = '';
         var dbs = r.databases || [];
         // Oracle：直接平铺分类，省去 DB/SCHEMA 文件夹层级
@@ -255,6 +271,9 @@ function catRow(cat, icon, cid, db, dbKey, pad, clickFn, ctxFn, schema) {
 // 通用行高亮：清除所有高亮，给指定元素加上高亮
 function highlightRow(el) {
     document.querySelectorAll('.tree-highlight').forEach(function(r){r.classList.remove('tree-highlight');});
+    // ★ 同时清除表项的高亮（点击分类行时不再保留表项高亮）
+    document.querySelectorAll('.tree-table-item.tree-table-selected').forEach(function(d){d.classList.remove('tree-table-selected');});
+    _treeLastSelect = null;
     if (el) {
         el.classList.add('tree-highlight');
         activeCatId = el.id || '';

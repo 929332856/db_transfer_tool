@@ -116,15 +116,16 @@ function showDragCopyDialog(tn, srcDb, schema, srcConn, targetCid, targetDb, dst
                             bar.style.width = d.percent + '%';
                             if (d.percent !== lastProgress) {
                                 lastProgress = d.percent;
-                                lastProgressTime = Date.now();
                             }
                         }
                         if (st && d.status) st.textContent = d.status;
+                        // ★ 只要收到任意消息就刷新心跳时间（不管 percent 是否变化）
+                        lastProgressTime = Date.now();
                     }
                 }
             });
-            // 卡住检测：进度超过 30 秒没变化则超时
-            if (!done && lastProgress >= 0 && (Date.now() - lastProgressTime) > 30000) {
+            // 卡住检测：进度超过 120 秒没变化则超时（大表复制可能很慢）
+            if (!done && lastProgress >= 0 && (Date.now() - lastProgressTime) > 120000) {
                 done = true;
                 clearInterval(pollTimer);
                 document.getElementById('modal_overlay').classList.remove('show');

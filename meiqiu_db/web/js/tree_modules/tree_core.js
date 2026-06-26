@@ -46,17 +46,19 @@ var activeDatabase = null;
 var objectTabs = [];
 var activeObjTab = null;
 var activeCatId = null;   // 当前高亮的分类行 ID  （如 'cat_tables_' + dbKey）
+var _activeObjCat = null;   // 当前对象面板显示的类别（tables/views/procedures/functions/queries 等）
+var _activeObjSchema = '';  // 当前对象面板显示的 schema
 var _redisKeysCache = {};  // Redis keys 缓存 {dbId: {keys, total, cid, dbIdx}}
 var _redisPanelCtx = null; // 当前右侧面板是否在展示 Redis keys {cid, dbIdx, dbId}
 
-// 数据库类型图标（SVG 徽章，纯色避免重复实例时渐变 ID 冲突）
+// 数据库类型图标（与查询窗口工具栏保持一致，使用 emoji）
 var DB_ICONS = {
-    'mysql':      '<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="11" fill="#F29111"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="8" font-weight="bold" font-family="Arial">MY</text></svg>',
-    'ob-mysql':   '<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="11" fill="#00B4D8"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="7.5" font-weight="bold" font-family="Arial">OB</text></svg>',
-    'oracle':     '<svg viewBox="0 0 24 24" width="18" height="18"><rect x="2" y="2" width="20" height="20" rx="3.5" fill="#C74634"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="7.5" font-weight="bold" font-family="Arial">OR</text></svg>',
-    'postgresql': '<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="11" fill="#336791"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="7.5" font-weight="bold" font-family="Arial">PG</text></svg>',
-    'mssql':      '<svg viewBox="0 0 24 24" width="18" height="18"><rect x="2" y="2" width="20" height="20" rx="3.5" fill="#CC2927"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="7.5" font-weight="bold" font-family="Arial">MS</text></svg>',
-    'redis':      '<svg viewBox="0 0 24 24" width="18" height="18"><rect x="1" y="1" width="22" height="22" rx="4" fill="#DC382D"/><path d="M18.5 6.5c0 1.5-3 3-6.5 3s-6.5-1.5-6.5-3 3-3 6.5-3 6.5 1.5 6.5 3z" fill="#fff" opacity="0.9"/><path d="M18.5 10.5c0 1.5-3 3-6.5 3s-6.5-1.5-6.5-3" fill="none" stroke="#fff" stroke-width="1.2" opacity="0.7"/><path d="M18.5 15c0 1.5-3 3-6.5 3s-6.5-1.5-6.5-3" fill="none" stroke="#fff" stroke-width="1.2" opacity="0.5"/><rect x="5.5" y="17" width="13" height="1" rx="0.5" fill="#fff" opacity="0.6"/></svg>'
+    'mysql':      '🐬',
+    'ob-mysql':   '🌊',
+    'oracle':     '🔴',
+    'postgresql': '🐘',
+    'mssql':      '🟢',
+    'redis':      '📦'
 };
 var DB_DEFAULTS = {
     'mysql':      {port:'3306'},
@@ -71,7 +73,7 @@ var DB_DEFAULTS = {
 var DB_ICON_SVG = '<svg viewBox="0 0 24 24" width="16" height="16"><ellipse cx="12" cy="4.5" rx="9" ry="3" fill="currentColor" opacity="0.9"/><path d="M3 4.5v15c0 1.66 4.03 3 9 3s9-1.34 9-3v-15" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.75"/><ellipse cx="12" cy="12" rx="9" ry="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.4"/><ellipse cx="12" cy="19.5" rx="9" ry="3" fill="currentColor" opacity="0.9"/></svg>';
 
 function getConnIcon(dbType) {
-    return DB_ICONS[dbType] || DB_ICONS['mysql'];
+    return DB_ICONS[dbType] || '🗄️';
 }
 
 // ★ 初始化代码已移至 tree_init.js，请勿在此处添加初始化逻辑

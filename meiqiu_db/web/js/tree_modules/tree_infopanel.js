@@ -12,12 +12,18 @@ var _DB_TYPE_LABELS = {
 
 // ★ 连接类型图标（SVG，前端直接绘制，避免依赖后端返回）
 var _DB_INFO_ICONS = {
-    'mysql': '<svg viewBox="0 0 24 24" width="28" height="28"><circle cx="12" cy="12" r="11" fill="#F29111"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="8" font-weight="bold" font-family="Arial">MY</text></svg>',
-    'ob-mysql': '<svg viewBox="0 0 24 24" width="28" height="28"><circle cx="12" cy="12" r="11" fill="#00B4D8"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="7.5" font-weight="bold" font-family="Arial">OB</text></svg>',
-    'oracle': '<svg viewBox="0 0 24 24" width="28" height="28"><rect x="2" y="2" width="20" height="20" rx="3.5" fill="#C74634"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="7.5" font-weight="bold" font-family="Arial">OR</text></svg>',
-    'postgresql': '<svg viewBox="0 0 24 24" width="28" height="28"><circle cx="12" cy="12" r="11" fill="#336791"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="7.5" font-weight="bold" font-family="Arial">PG</text></svg>',
-    'mssql': '<svg viewBox="0 0 24 24" width="28" height="28"><rect x="2" y="2" width="20" height="20" rx="3.5" fill="#CC2927"/><text x="12" y="15.5" text-anchor="middle" fill="#fff" font-size="7.5" font-weight="bold" font-family="Arial">MS</text></svg>',
-    'redis': '<svg viewBox="0 0 24 24" width="28" height="28"><rect x="1" y="1" width="22" height="22" rx="4" fill="#DC382D"/><path d="M18.5 6.5c0 1.5-3 3-6.5 3s-6.5-1.5-6.5-3 3-3 6.5-3 6.5 1.5 6.5 3z" fill="#fff" opacity="0.9"/><path d="M18.5 10.5c0 1.5-3 3-6.5 3s-6.5-1.5-6.5-3" fill="none" stroke="#fff" stroke-width="1.2" opacity="0.7"/><path d="M18.5 15c0 1.5-3 3-6.5 3s-6.5-1.5-6.5-3" fill="none" stroke="#fff" stroke-width="1.2" opacity="0.5"/><rect x="5.5" y="17" width="13" height="1" rx="0.5" fill="#fff" opacity="0.6"/></svg>'
+    // 🐬 MySQL: 橙色圆形 + 海豚跃起剪影
+    'mysql': '<svg viewBox="0 0 24 24" width="28" height="28"><circle cx="12" cy="12" r="11" fill="#F29111"/><path d="M8 14Q8 7 12 7Q17 5 18 9Q16 11 14 9.5Q12 9 11 11Q9 13 8 16Q7 17 9 16Z" fill="#fff" opacity=".9"/></svg>',
+    // 🌊 OB-MySQL: 青色圆形 + 海浪波纹
+    'ob-mysql': '<svg viewBox="0 0 24 24" width="28" height="28"><circle cx="12" cy="12" r="11" fill="#00B4D8"/><path d="M6 8Q9 6 12 8Q15 10 18 8" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/><path d="M6 12Q9 10 12 12Q15 14 18 12" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/><path d="M6 16Q9 14 12 16Q15 18 18 16" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    // 🔴 Oracle: 红色圆角矩形 + 白色字母O
+    'oracle': '<svg viewBox="0 0 24 24" width="28" height="28"><rect x="2" y="2" width="20" height="20" rx="5" fill="#C74634"/><ellipse cx="12" cy="12" rx="6" ry="7" fill="none" stroke="#fff" stroke-width="2.2"/></svg>',
+    // 🐘 PostgreSQL: 蓝色圆形 + 大象头+长鼻
+    'postgresql': '<svg viewBox="0 0 24 24" width="28" height="28"><circle cx="12" cy="12" r="11" fill="#336791"/><circle cx="10" cy="9" r="4.5" fill="#fff" opacity=".9"/><path d="M8.5 13.5Q8 16.5 7.5 17.5Q7 18 7.5 18Q8 17.5 8.3 16Q9 14.5 9.5 14" fill="#fff" opacity=".9"/><ellipse cx="14.5" cy="10" rx="3.5" ry="4" fill="#fff" opacity=".7"/></svg>',
+    // 🟢 SQL Server: 红色钻石标志
+    'mssql': '<svg viewBox="0 0 24 24" width="28" height="28"><path d="M12 2L22 8v8l-10 6L2 16V8z" fill="#CC2927"/><path d="M12 5l6 3.5v5L12 17l-6-3.5v-5z" fill="#fff" opacity=".25"/><path d="M12 8l3 2v3l-3 2-3-2v-3z" fill="#fff" opacity=".4"/></svg>',
+    // 📦 Redis: 三层红色立方体堆叠
+    'redis': '<svg viewBox="0 0 24 24" width="28" height="28"><rect x="2" y="2" width="20" height="20" rx="3" fill="#DC382D"/><path d="M6 7h12v3.5H6z" fill="#fff" opacity=".95"/><path d="M6 11h12v3.5H6z" fill="#fff" opacity=".85"/><path d="M6 15h12v3.5H6z" fill="#fff" opacity=".75"/><path d="M18 7v11.5" stroke="#a01e15" stroke-width=".8"/><path d="M6 7v11.5" stroke="#a01e15" stroke-width=".8"/></svg>'
 };
 
 // ★ 格式化运行时间（秒 → 天/小时）

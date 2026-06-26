@@ -85,6 +85,7 @@ function renderObjectPanel() {
             collapseOverflowTabs();
             highlightTableRow();
             setupObjectPanelDrop();
+            _setupObjPanelCtx();
         }, 50);
         return;
     }
@@ -312,6 +313,10 @@ function closeTab(tabId) {
             delete _redisEditState[objectTabs[i].tid];
             break;
         }
+    }
+    // ★ 清理新建表的 store
+    if (tabId && tabId.indexOf('newtbl_') === 0) {
+        delete _newTableStore[tabId];
     }
     objectTabs = objectTabs.filter(function(t){return t.id!==tabId;});
     activeObjTab = objectTabs.length ? objectTabs[objectTabs.length-1].id : 'obj_home';
@@ -587,4 +592,43 @@ function _cancelObjPanelRename() {
 function _clearObjPanelSelection() {
     _objPanelLastSelect = null;
     if (_objPanelRenameState) _cancelObjPanelRename();
+}
+
+// ==================== 对象面板空白区域右键刷新 ====================
+function _setupObjPanelCtx() {
+    var content = document.getElementById('obj_content');
+    if (!content || content._objCtxReady) return;
+    content._objCtxReady = true;
+    content.addEventListener('contextmenu', function(e) {
+        // 如果点击在表行/单元格上（已有自己的右键菜单），不处理
+        var target = e.target;
+        while (target && target !== content) {
+            if (target.tagName === 'TR' || target.tagName === 'TD' || target.tagName === 'TH') return;
+            target = target.parentElement;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        showCtxMenu(e.clientX, e.clientY, [
+            {label:'🔄 刷新', action: refreshObjPanel}
+        ]);
+    });
+}
+
+function refreshObjPanel() {
+    if (activeObjTab !== 'obj_home') return;
+    if (!_activeObjCat || !activeConnId || !activeDatabase) return;
+    var cid = activeConnId;
+    var db = activeDatabase;
+    var cat = _activeObjCat;
+    var sch = _activeObjSchema || '';
+    var conn = activeConnData;
+    if (!conn) return;
+
+    if (cat === 'tables') {
+        clickTableCat(cid, db, sch);
+    } else if (cat === 'queries') {
+        clickQueries(cid, db, sch);
+    } else {
+        clickCat(cid, db, cat, sch);
+    }
 }

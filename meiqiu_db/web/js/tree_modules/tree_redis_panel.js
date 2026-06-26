@@ -1,3 +1,5 @@
+console.log('[tree_redis_panel] 文件开始加载...');
+
 // ==================== Redis 键分组 → 右侧面板 ====================
 function clickRedisKeysGroup(cid, dbIdx, dbId) {
     var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
@@ -174,19 +176,18 @@ function clickRedisQueries(cid, dbIdx) {
     activeConnId = cid; activeConnData = conn; activeDatabase = dbName;
     activeCatId = null;
     _redisPanelCtx = null;
-    var queries = (treeData.saved_queries || []).filter(function(q) {
-        return q.conn_id === cid && q.db === dbName;
+    eel.tree_list_queries(cid, dbName)(function(queries) {
+        var content = '<table class="exp-table"><thead><tr><th>名称</th></tr></thead><tbody>';
+        (queries || []).forEach(function(q) {
+            content += '<tr ondblclick="openQueryInTab(\'' + q.id + '\')" oncontextmenu="queryCtx2(event,\'' + q.id + '\',\'' + cid + '\',\'\')">' +
+                '<td>' + escapeHtml(q.name) + '</td></tr>';
+        });
+        content += '</tbody></table>';
+        if (!(queries || []).length) content += '<div style="padding:20px;color:#999;text-align:center;">（无查询）<br><button class="btn btn-sm" style="margin-top:8px;" onclick="addRedisQuery(\'' + cid + '\',' + dbIdx + ',\'' + dbName + '_queries\',16)">＋ 新建查询</button></div>';
+        var home = objectTabs.find(function(t) { return t.id === 'obj_home'; });
+        if (home) home.content = content;
+        else objectTabs.unshift({id:'obj_home',label:'对象',type:'home',content:content});
     });
-    var content = '<table class="exp-table"><thead><tr><th>名称</th></tr></thead><tbody>';
-    queries.forEach(function(q) {
-        content += '<tr ondblclick="openQueryInTab(\'' + q.id + '\')" oncontextmenu="queryCtx2(event,\'' + q.id + '\',\'' + cid + '\',\'\')">' +
-            '<td>' + escapeHtml(q.name) + '</td></tr>';
-    });
-    content += '</tbody></table>';
-    if (!queries.length) content += '<div style="padding:20px;color:#999;text-align:center;">（无查询）<br><button class="btn btn-sm" style="margin-top:8px;" onclick="addRedisQuery(\'' + cid + '\',' + dbIdx + ',\'' + dbName + '_queries\',16)">＋ 新建查询</button></div>';
-    var home = objectTabs.find(function(t) { return t.id === 'obj_home'; });
-    if (home) home.content = content;
-    else objectTabs.unshift({id:'obj_home',label:'对象',type:'home',content:content});
     activeObjTab = 'obj_home';
     renderObjectPanel();
 }
@@ -227,8 +228,6 @@ function addRedisQuery(cid, dbIdx, qId, pad) {
         var dbName = 'DB' + dbIdx;
         eel.tree_save_query('', n.trim(), '', cid, dbName)(function(r) {
             if (r && r.ok) {
-                var qc = treeData.saved_queries || [];
-                qc.push({id: r.id, name: n.trim(), sql: '', conn_id: cid, db: dbName});
                 // 如果查询文件夹已展开，刷新内容
                 var el = document.getElementById(qId);
                 if (el && el.classList.contains('open')) {
@@ -244,19 +243,18 @@ function addRedisQuery(cid, dbIdx, qId, pad) {
 
 function _renderRedisQueriesContent(el, cid, dbIdx, pad) {
     var dbName = 'DB' + dbIdx;
-    var queries = (treeData.saved_queries || []).filter(function(q) {
-        return q.conn_id === cid && q.db === dbName;
-    });
     var itemPad = pad + 20;
     var qId = el.id;
-    el.innerHTML = queries.map(function(q) {
-        return '<div class="my-conn-row" style="padding-left:' + itemPad + 'px;font-size:11px;" ' +
-            'ondblclick="openQueryInTab(\'' + q.id + '\')" ' +
-            'oncontextmenu="queryCtx2(event,\'' + q.id + '\',\'' + cid + '\',\'\')">' +
-            '<span class="my-conn-icon">📄</span><span class="my-conn-name">' + escapeHtml(q.name) + '</span></div>';
-    }).join('') + '<div class="my-conn-row" style="padding-left:' + itemPad + 'px;font-size:11px;color:#4fc3f7;" ' +
-        'onclick="addRedisQuery(\'' + cid + '\',' + dbIdx + ',\'' + qId + '\',' + pad + ')">' +
-        '<span class="my-conn-icon">➕</span><span class="my-conn-name">新建查询</span></div>';
+    eel.tree_list_queries(cid, dbName)(function(queries) {
+        el.innerHTML = (queries || []).map(function(q) {
+            return '<div class="my-conn-row" style="padding-left:' + itemPad + 'px;font-size:11px;" ' +
+                'ondblclick="openQueryInTab(\'' + q.id + '\')" ' +
+                'oncontextmenu="queryCtx2(event,\'' + q.id + '\',\'' + cid + '\',\'\')">' +
+                '<span class="my-conn-icon">📄</span><span class="my-conn-name">' + escapeHtml(q.name) + '</span></div>';
+        }).join('') + '<div class="my-conn-row" style="padding-left:' + itemPad + 'px;font-size:11px;color:#4fc3f7;" ' +
+            'onclick="addRedisQuery(\'' + cid + '\',' + dbIdx + ',\'' + qId + '\',' + pad + ')">' +
+            '<span class="my-conn-icon">➕</span><span class="my-conn-name">新建查询</span></div>';
+    });
 }
 
 // Redis DB 双击/展开 → 加载该 DB 下的 keys（按前缀分组 → 键 → 值）
@@ -327,11 +325,14 @@ function expandRedisDb(cid, dbIdx, dbId, pad) {
 
 // 点击数据库名：设置连接上下文 + 清空对象面板 + 展开/折叠分类
 function selectDatabase(cid, db, dbId, arrowId) {
+    try {
+    console.log('[selectDatabase] 入口: cid='+cid+', db='+db+', dbId='+dbId+', arrowId='+arrowId);
     _redisPanelCtx = null;
     if (treeData && treeData.connections && treeData.connections[cid]) {
         activeConnId = cid;
         activeConnData = treeData.connections[cid];
     }
+    console.log('[selectDatabase] activeConnData.db_type='+(activeConnData?activeConnData.db_type:'null'));
     activeDatabase = db;
     activeCatId = null;
     // ★ 切换到 home tab，不清空已有 tab
@@ -340,32 +341,55 @@ function selectDatabase(cid, db, dbId, arrowId) {
     if (!homeTab) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent,db:''}); }
     else { homeTab.content = homeContent; }
     activeObjTab = 'obj_home';
+    console.log('[selectDatabase] 调用 renderObjectPanel...');
     renderObjectPanel();
 
     var el = document.getElementById(dbId);
     var ar = document.getElementById(arrowId);
-    if (!el) return;
+    console.log('[selectDatabase] el='+(el?el.tagName+'.'+el.className:'NULL')+', ar='+(ar?'found':'NULL'));
+    if (!el) {
+        console.error('[selectDatabase] ❌ el 未找到！dbId='+dbId);
+        return;
+    }
 
     // 高亮数据库行
     highlightRow(el.previousElementSibling);
 
     // 切换图标颜色：展开变绿，折叠变灰（双击只展开不折叠，折叠由箭头处理）
     var iconEl = el.previousElementSibling ? el.previousElementSibling.querySelector('.db-icon') : null;
-    if (el.classList.contains('open')) {
-        // 已展开：双击不高亮也不折叠
-        return;
+    var alreadyOpen = el.classList.contains('open');
+    console.log('[selectDatabase] alreadyOpen='+alreadyOpen+', iconEl='+(iconEl?'found':'NULL')+', el.innerHTML长度='+el.innerHTML.length);
+    if (!alreadyOpen) {
+        console.log('[selectDatabase] 添加 open class...');
+        el.classList.add('open');
+        if (ar) { ar.textContent = '▾'; ar.style.visibility = 'visible'; }
+        if (iconEl) { iconEl.classList.remove('closed'); iconEl.classList.add('active'); }
+        console.log('[selectDatabase] open class 已添加, el.classList='+el.className);
     }
-    el.classList.add('open');
-    if (ar) { ar.textContent = '▾'; ar.style.visibility = 'visible'; }
-    if (iconEl) { iconEl.classList.remove('closed'); iconEl.classList.add('active'); }
 
     // PostgreSQL：展开数据库时加载架构列表
     var isPg = activeConnData && activeConnData.db_type === 'postgresql';
-    if (isPg && !el.innerHTML.trim()) {
+    // ★ 当 innerHTML 为空 或 显示的是错误信息/加载中时，触发加载
+    var isSchemaEmpty = !el.innerHTML.trim() || el.innerHTML.indexOf('❌') >= 0 || el.innerHTML.indexOf('⏳') >= 0;
+    console.log('[selectDatabase] isPg='+isPg+', isSchemaEmpty='+isSchemaEmpty+', _schemaLoading='+!!el._schemaLoading);
+    if (isPg && isSchemaEmpty && !el._schemaLoading) {
+        el._schemaLoading = true;
         var dbPad = parseInt(el.previousElementSibling ? (el.previousElementSibling.style.paddingLeft || '0') : '0') || 40;
         el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#999;font-size:11px;">⏳ 加载架构...</div>';
+        // ★ 添加超时保护（15秒）
+        var schTimeoutId = setTimeout(function() {
+            el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#e74c3c;font-size:11px;">❌ 加载超时（15秒），双击重试</div>';
+            el.classList.remove('open');
+            el._schemaLoading = false;
+        }, 15000);
         eel.db_explore_get_schemas(activeConnData, db)(function (r) {
-            if (!r || !r.ok) { el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#e74c3c;font-size:11px;">❌</div>'; return; }
+            clearTimeout(schTimeoutId);
+            if (!r || !r.ok) {
+                el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'加载失败')+'，双击重试</div>';
+                el.classList.remove('open');
+                el._schemaLoading = false;
+                return;
+            }
             var pad = dbPad;
             var html = '';
             r.schemas.forEach(function (sch) {
@@ -376,6 +400,67 @@ function selectDatabase(cid, db, dbId, arrowId) {
                     '<div class="tree-children" id="'+schId+'">' + renderDbCats(cid, db, pad+40, sch) + '</div></div>';
             });
             el.innerHTML = html || '<div style="padding-left:'+(pad+20)+'px;color:#999;font-size:11px;">（无架构）</div>';
+            el._schemaLoading = false;
         });
     }
+    console.log('[selectDatabase] ✅ 函数正常结束');
+    } catch(e) {
+        console.error('[selectDatabase] ❌ 异常:', e.message, e.stack);
+    }
 }
+// 显式挂载到 window 确保内联 onclick/ondblclick 可以访问
+window.selectDatabase = selectDatabase;
+console.log('[tree_redis_panel] selectDatabase 已定义, window.selectDatabase='+(typeof window.selectDatabase));
+
+// ★ 事件委托：为数据库行的 dblclick 提供备用触发机制
+// 放在 selectDatabase 定义之后，确保函数已可用
+(function _setupDbDblClickDelegate() {
+    var treeEl = document.getElementById('my_conn_list');
+    console.log('[tree_redis_panel] #my_conn_list 存在?', !!treeEl);
+    if (treeEl && !treeEl._dbDblClickDelegated) {
+        treeEl._dbDblClickDelegated = true;
+        treeEl.addEventListener('dblclick', function(e) {
+            var row = e.target.closest('.my-conn-row');
+            if (!row) return;
+            var dbNode = row.closest('.db-node');
+            if (!dbNode) return;
+            var cid = dbNode.getAttribute('data-cid');
+            var db = dbNode.getAttribute('data-db');
+            if (!cid || !db) return;
+            var dbId = row.nextElementSibling ? row.nextElementSibling.id : null;
+            var arrowEl = row.querySelector('.arrow');
+            var arrowId = arrowEl ? arrowEl.id : null;
+            if (!dbId) return;
+            console.log('[delegate] dblclick on db: cid='+cid+' db='+db+' dbId='+dbId+' arrowId='+arrowId);
+            selectDatabase(cid, db, dbId, arrowId || ('ar_'+dbId));
+        });
+        console.log('[tree_redis_panel] 数据库双击事件委托已注册 (on #my_conn_list)');
+    } else {
+        console.warn('[tree_redis_panel] ⚠️ #my_conn_list 不存在，无法注册事件委托！将在 DOMContentLoaded 后重试...');
+        document.addEventListener('DOMContentLoaded', function() {
+            var treeEl2 = document.getElementById('my_conn_list');
+            console.log('[tree_redis_panel] DOMContentLoaded 后 #my_conn_list 存在?', !!treeEl2);
+            if (treeEl2 && !treeEl2._dbDblClickDelegated) {
+                treeEl2._dbDblClickDelegated = true;
+                treeEl2.addEventListener('dblclick', function(e) {
+                    var row = e.target.closest('.my-conn-row');
+                    if (!row) return;
+                    var dbNode = row.closest('.db-node');
+                    if (!dbNode) return;
+                    var cid = dbNode.getAttribute('data-cid');
+                    var db = dbNode.getAttribute('data-db');
+                    if (!cid || !db) return;
+                    var dbId = row.nextElementSibling ? row.nextElementSibling.id : null;
+                    var arrowEl = row.querySelector('.arrow');
+                    var arrowId = arrowEl ? arrowEl.id : null;
+                    if (!dbId) return;
+                    console.log('[delegate] dblclick on db: cid='+cid+' db='+db+' dbId='+dbId+' arrowId='+arrowId);
+                    selectDatabase(cid, db, dbId, arrowId || ('ar_'+dbId));
+                });
+                console.log('[tree_redis_panel] 数据库双击事件委托已注册 (DOMContentLoaded)');
+            }
+        });
+    }
+})();
+
+console.log('[tree_redis_panel] 文件加载完毕');

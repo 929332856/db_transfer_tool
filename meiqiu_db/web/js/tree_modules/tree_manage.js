@@ -110,29 +110,53 @@ function closeConnection(cid) {
         }
     }
     // 移除该连接下所有相关 tab（data_/ddl_/query_/redis_/redis_cmd 等），保留 obj_home 和其他连接的 tab
-    objectTabs = objectTabs.filter(function(t) { return t.id === 'obj_home' || t.cid !== cid; });
+    // ★ 同时清理 cid 为空字符串或 undefined 的孤立 tab（这些 tab 所属连接已不可用，点击无反应）
+    objectTabs = objectTabs.filter(function(t) {
+        if (t.id === 'obj_home') return true;
+        // 如果 tab 的 cid 匹配正在关闭的连接，移除
+        if (t.cid === cid) return false;
+        // ★ 如果 tab 没有 cid 或 cid 为空，且当前关闭的连接就是上次激活的，也移除
+        //    因为这类 tab 通常是 activeConnId 被清空后残留的
+        if (!t.cid && wasActive) return false;
+        return true;
+    });
     if (wasActive) {
         activeConnId = '';
         activeConnData = null;
         activeDatabase = '';
     }
-    // ★ 只有当前激活的 tab 属于被关闭的连接时才刷新面板
-    var stillHasCurrentTab = objectTabs.some(function(t) { return t.id === activeObjTab; });
-    if (!stillHasCurrentTab) {
-        var homeContent3 = '<div style="padding:40px;text-align:center;color:#666;"><div>请选择一个连接</div></div>';
-        var homeTab3 = objectTabs.find(function(t){return t.id==='obj_home';});
-        if (!homeTab3) { objectTabs.unshift({id:'obj_home',label:'对象',type:'home',content:homeContent3,db:''}); }
-        else { homeTab3.content = homeContent3; }
+    // ★ 关闭当前激活的连接时，强制清空对象面板（即使 obj_home tab 还在，内容也是旧的）
+    if (wasActive) {
+        var emptyContent = '<div style="padding:40px;text-align:center;color:#666;"><div>请选择一个连接</div></div>';
+        var homeTabX = objectTabs.find(function(t){return t.id==='obj_home';});
+        if (!homeTabX) { objectTabs.unshift({id:'obj_home',label:'对象',type:'home',content:emptyContent,db:''}); }
+        else { homeTabX.content = emptyContent; }
         activeObjTab = 'obj_home';
         activeCatId = null;
+        _activeObjCat = null;
+        _activeObjSchema = '';
         renderObjectPanel();
+    } else {
+        // 非激活连接关闭：仅当当前 tab 被移除时才刷新面板
+        var stillHasCurrentTab = objectTabs.some(function(t) { return t.id === activeObjTab; });
+        if (!stillHasCurrentTab) {
+            var homeContent3 = '<div style="padding:40px;text-align:center;color:#666;"><div>请选择一个连接</div></div>';
+            var homeTab3 = objectTabs.find(function(t){return t.id==='obj_home';});
+            if (!homeTab3) { objectTabs.unshift({id:'obj_home',label:'对象',type:'home',content:homeContent3,db:''}); }
+            else { homeTab3.content = homeContent3; }
+            activeObjTab = 'obj_home';
+            activeCatId = null;
+            _activeObjCat = null;
+            _activeObjSchema = '';
+            renderObjectPanel();
+        }
     }
 }
 
 function addFolder(pid) { showInputDialog('新建文件夹','名称：',function(n){if(!n||!n.trim())return;eel.tree_add_folder(pid||'',n.trim())(function(r){if(r&&r.ok){treeData.folders=treeData.folders||[];var f={id:r.id,name:n.trim(),parent:pid||''};treeData.folders.push(f);addFolderToTree(f);}});}); }
 function renameFolder(fid) { var f=(treeData.folders||[]).find(function(x){return x.id===fid;}); showInputDialog('重命名','新名称：',function(n){if(!n||!n.trim())return;eel.tree_rename_folder(fid,n.trim())(function(){if(f)f.name=n.trim();updateFolderNode(fid,n.trim());});},f?f.name:''); }
 function deleteFolder(fid) { showConfirmDialog('确认','删除文件夹及其中连接？',function(){eel.tree_delete_folder(fid)(function(){function collectKids(pid){var r=[pid];(treeData.folders||[]).forEach(function(f){if(f.parent===pid)r=r.concat(collectKids(f.id));});return r;}var kids=collectKids(fid);var conns=[];for(var k in treeData.connections){if(kids.indexOf(treeData.connections[k].parent)!==-1)conns.push(k);}treeData.folders=(treeData.folders||[]).filter(function(f){return kids.indexOf(f.id)===-1;});conns.forEach(function(k){delete treeData.connections[k];});removeFolderNode(fid);});}); }
-function deleteConnection(cid) { showConfirmDialog('确认','删除此连接？',function(){eel.tree_delete_connection(cid)(function(){delete treeData.connections[cid];removeConnNode(cid);});}); }
+function deleteConnection(cid) { showConfirmDialog('确认','删除此连接？',function(){eel.tree_delete_connection(cid)(function(){delete treeData.connections[cid];closeConnection(cid);removeConnNode(cid);});}); }
 
 function addQuery(cid, db, schema) {
     var sch = schema || '';
@@ -143,14 +167,7 @@ function addQuery(cid, db, schema) {
         eel.tree_save_query('', n.trim(), '', useCid, useDb)(
             function(r) {
                 if (r && r.ok) {
-                    var qc = treeData.saved_queries || [];
-                    qc.push({
-                        id: r.id,
-                        name: n.trim(),
-                        sql: '',
-                        conn_id: useCid,
-                        db: useDb
-                    });
+                    // ★ 直接从文件系统刷新查询列表
                     refreshQueriesTree(useCid, useDb, sch);
                 } else {
                     var errMsg = (r && r.msg) ? r.msg : '未知错误，请查看控制台日志';
@@ -266,11 +283,27 @@ function showConnDialog(pid, editCid) {
     document.getElementById('conn_modal_overlay').classList.add('show');
 }
 function hideConnDlg() { document.getElementById('conn_modal_overlay').classList.remove('show'); }
+var _connTestTimer = null;
+var _connTesting = false;
 function connTest() {
     var c = readConnForm(); var st = document.getElementById('cf_test');
     if (!c.host||!c.user) { st.textContent='⚠️ 填主机和用户名'; st.style.color='#f39c12'; return; }
+    if (_connTesting) { st.textContent='⏳ 正在测试...'; st.style.color='#f39c12'; return; }
+    _connTesting = true;
     st.textContent='⏳'; st.style.color='#f39c12';
-    eel.tree_test_conn(c)(function(r){if(r&&r.ok){st.textContent='✅ '+r.msg;st.style.color='#2ecc71';}else{st.textContent='❌ '+(r?r.msg:'失败');st.style.color='#e74c3c';}});
+    if (_connTestTimer) clearTimeout(_connTestTimer);
+    _connTestTimer = setTimeout(function() {
+        if (_connTesting) {
+            st.textContent='⏱ 连接超时（20秒）'; st.style.color='#e74c3c';
+            _connTesting = false;
+        }
+    }, 20000);
+    eel.tree_test_conn(c)(function(r){
+        if (_connTestTimer) clearTimeout(_connTestTimer);
+        _connTesting = false;
+        if(r&&r.ok){st.textContent='✅ '+r.msg;st.style.color='#2ecc71';}
+        else{st.textContent='❌ '+(r?r.msg:'失败');st.style.color='#e74c3c';}
+    });
 }
 function connSave(pid, editCid) {
     var c = readConnForm();
@@ -668,13 +701,13 @@ function loadTree() {
         console.log('[tree.js] 开始加载树数据...');
         eel.tree_load()(function (data) {
             try {
-                treeData = data || { folders: [], connections: {}, saved_queries: [] };
+                treeData = data || { folders: [], connections: {} };
                 var connCount = treeData && treeData.connections ? Object.keys(treeData.connections).length : 0;
                 console.log('[tree.js] 树加载完成，连接数:', connCount);
                 renderMyConnectionsList();
             } catch (err) {
                 console.error('[tree.js] tree_load 回调异常:', err.message || err);
-                treeData = { folders: [], connections: {}, saved_queries: [] };
+                treeData = { folders: [], connections: {} };
                 renderMyConnectionsList();
             }
         });
@@ -684,7 +717,7 @@ function loadTree() {
 }
 function refreshAll() {
     eel.tree_load()(function (data) {
-        treeData = data || { folders: [], connections: {}, saved_queries: [] };
+        treeData = data || { folders: [], connections: {} };
         var el = document.getElementById('my_conn_list');
         if (el && treeData) renderMyConnectionsList();
     });

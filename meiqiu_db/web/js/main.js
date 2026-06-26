@@ -51,7 +51,8 @@ function collectForm(prefix) {
         dst_user: $(prefix+'dst_user').value.trim(),
         dst_pwd:  $(prefix+'dst_pwd').value.trim(),
         dst_db:   $(prefix+'dst_db').value.trim(),
-        table_name: $('table_name').value.trim()
+        table_name: $('table_name').value.trim(),
+        batch_size: parseInt($('sync_batch_size').value) || 0
     };
 }
 
@@ -319,6 +320,7 @@ function pollProgress() {
                     break;
                 case 'table_progress':
                     progressText.textContent = '[' + data.table + '] ' + (data.count || 0).toLocaleString() + ' 行';
+                    appendLog('📊 [' + data.table + '] 已传输 ' + (data.count || 0).toLocaleString() + ' 行');
                     break;
                 case 'total':
                     progressFill.style.width = '100%';
@@ -766,9 +768,9 @@ function refreshSqConnSelector() {
         }
         conns.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
         conns.forEach(function(c) {
-            var icon = typeof DB_ICONS !== 'undefined' ? (DB_ICONS[c.db_type] || '🐬') : '🐬';
+            var icon = (typeof DB_ICONS !== 'undefined' && DB_ICONS[c.db_type]) ? DB_ICONS[c.db_type] : ({mysql:'🐬','ob-mysql':'🌊','postgresql':'🐘','oracle':'🔴','mssql':'🟢','redis':'📦'}[c.db_type] || '🗄');
             var label = escapeHtml(c.name) + ' (' + escapeHtml(c.host) + ':' + escapeHtml(c.port) + ')';
-            html += '<option value="' + c.id + '" data-icon="' + icon + '">' + icon + ' ' + label + '</option>';
+            html += '<option value="' + c.id + '">' + icon + ' ' + label + '</option>';
         });
     }
     sel.innerHTML = html;
@@ -1814,12 +1816,14 @@ function refreshSyncConnSelectors() {
             }
         }
     }
+    // 过滤掉 Redis（不支持数据同步）
+    conns = conns.filter(function(c) { return c.db_type !== 'redis'; });
     conns.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
 
     // 构建 option 列表
     var defaultOpt = '<option value="">— 从已有连接中选择 —</option>';
     var html = '';
-    var dbTypeIcons = { 'mysql': '🐬', 'ob-mysql': '🌊', 'postgresql': '🐘', 'oracle': '🔴', 'mssql': '💾', 'redis': '🏮' };
+    var dbTypeIcons = { 'mysql': '🐬', 'ob-mysql': '🌊', 'postgresql': '🐘', 'oracle': '🔴', 'mssql': '🟢', 'redis': '📦' };
     conns.forEach(function(c) {
         var icon = dbTypeIcons[c.db_type] || '🗄';
         var label = c.name + ' (' + c.host + ':' + (c.port || '3306') + ')';

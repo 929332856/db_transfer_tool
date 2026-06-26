@@ -2,10 +2,6 @@
 数据库高速传输工具 — Eel 版
 前后端分离：Python 纯业务逻辑，HTML/CSS/JS 负责界面
 """
-# ===== 必须在所有 import 之前：gevent 猴子补丁 =====
-from gevent import monkey
-monkey.patch_all(thread=False)
-# ===============================================
 import eel
 import re
 import threading
@@ -17,6 +13,8 @@ import sys
 from urllib.parse import quote_plus
 from typing import Optional, List
 from datetime import datetime
+import gc
+import concurrent.futures
 import sqlalchemy as sa
 from sqlalchemy import text, inspect, create_engine
 
@@ -168,16 +166,23 @@ _query_src_data = None       # 当前查询的源库连接信息
 
 # ==================== JSON 序列化辅助 ====================
 def _json_safe(val):
-    """将 datetime / Decimal 等非 JSON 类型转为字符串"""
+    """将 datetime / Decimal 等非 JSON 类型转为字符串。
+    特别注意：超出 JS 安全整数范围 (2^53) 的 int 转为字符串，避免 JSON 精度丢失。"""
     import datetime, decimal
     if val is None:
         return None
     if isinstance(val, (datetime.datetime, datetime.date, datetime.time)):
         return str(val)
     if isinstance(val, decimal.Decimal):
-        return float(val)
+        # ★ Decimal → 字符串（而非 float），避免精度丢失
+        return str(val)
     if isinstance(val, bytes):
         return val.decode('utf-8', errors='replace')
+    if isinstance(val, int) and not isinstance(val, bool):
+        # ★ BIGINT UNSIGNED 可能超过 JS Number.MAX_SAFE_INTEGER (9007199254740991)
+        # 超过安全范围则转为字符串，前端收到后作为字符串处理即可保持精度
+        if val > 9007199254740991 or val < -9007199254740991:
+            return str(val)
     return val
 
 
@@ -211,7 +216,7 @@ class TransferEngine:
         self.dst_pwd = config["dst_pwd"]
         self.dst_db = config["dst_db"]
         self.table_name = config.get("table_name", "")
-        self.batch_size = config.get("batch_size", 50000)
+        self.batch_size = config.get("batch_size", 10000)
         self._stop_event = threading.Event()
 
     def stop(self):
@@ -517,11 +522,8 @@ def execute_sql_query(sql: str, data: dict):
         with engine.connect() as conn:
             if _query_cancel.is_set():
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
-            # 记录连接 ID，用于 cancel 时 kill query
-            try:
-                _query_conn_id = conn.execute(text("SELECT CONNECTION_ID()")).scalar()
-            except Exception:
-                pass
+            # 记录连接 ID，用于 cancel 时 kill query（支持 MySQL/PG/Oracle/MSSQL）
+            _query_conn_id = _get_backend_pid(conn, db_type)
             try:
                 conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 30000"))
             except Exception:
@@ -620,18 +622,56 @@ def _kill_db_query():
         pass
 
 
+def _get_backend_pid(conn, db_type: str):
+    """获取当前数据库连接的后端 PID（用于 cancel 时 KILL SESSION）。
+    支持 MySQL/OB-MySQL/PostgreSQL/Oracle/MSSQL。"""
+    try:
+        if db_type in ('mysql', 'ob-mysql'):
+            return conn.execute(text("SELECT CONNECTION_ID()")).scalar()
+        elif db_type == 'postgresql':
+            return conn.execute(text("SELECT pg_backend_pid()")).scalar()
+        elif db_type == 'oracle':
+            row = conn.execute(text(
+                "SELECT SID||','||SERIAL# FROM V$SESSION WHERE AUDSID = SYS_CONTEXT('USERENV','SESSIONID')"
+            )).fetchone()
+            return row[0] if row else None
+        elif db_type == 'mssql':
+            return conn.execute(text("SELECT @@SPID")).scalar()
+    except Exception:
+        pass
+    return None
+
 
 def _connect_args(db_type='mysql', timeout=10):
-    """返回 create_engine 的 connect_args，MySQL 禁用 SSL
-    注意：oracledb 不支持 connect_timeout 参数，Oracle 不使用此参数
-    """
+    """返回 create_engine 的 connect_args，MySQL 禁用 SSL"""
     if db_type == 'oracle':
-        # oracledb 驱动不支持 connect_timeout，返回空字典
-        return {}
+        # oracledb tcp_connect_timeout 单位是秒（float），不是毫秒
+        return {"tcp_connect_timeout": float(timeout)}
     args = {"connect_timeout": timeout}
     if db_type in ('mysql', 'ob-mysql'):
         args["ssl_disabled"] = True
     return args
+
+# 数据库连接线程池：所有数据库操作都在独立 OS 线程中执行，
+# 带硬超时。彻底避免 C 扩展（oracledb/psycopg2/pymysql）阻塞主线程。
+_db_thread_pool = None
+
+def _get_db_thread_pool():
+    global _db_thread_pool
+    if _db_thread_pool is None:
+        _db_thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=6, thread_name_prefix="db_worker_")
+    return _db_thread_pool
+
+def _with_db_timeout(func, *args, timeout=15, **kwargs):
+    """在独立 OS 线程中执行数据库操作，带硬超时。
+    超时后返回错误字典，被阻塞的线程由 ThreadPoolExecutor 管理。"""
+    try:
+        future = _get_db_thread_pool().submit(func, *args, **kwargs)
+        return future.result(timeout=timeout + 3)
+    except concurrent.futures.TimeoutError:
+        return {"ok": False, "msg": f"连接超时（{timeout}秒），请检查服务器地址和端口是否正确"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
 
 # ==================== 表操作 ====================
 def _safe_ident(ident, db_type='mysql'):
@@ -743,8 +783,8 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
 
 
 @eel.expose
-def table_preview_data_fast(conn_data, database, table_name, schema='', order_col='', order_dir=''):
-    """快速预览：取 51 行，不用 COUNT(*)（超大表 COUNT 太慢），用第51行判断是否有更多"""
+def table_preview_data_fast(conn_data, database, table_name, schema='', order_col='', order_dir='', where_clause=''):
+    """快速预览：取 51 行，不用 COUNT(*)（超大表 COUNT 太慢），用第51行判断是否有更多。支持可选 WHERE 筛选"""
     global _query_conn_id, _query_src_data
     _query_cancel.clear()
     _query_conn_id = None
@@ -765,7 +805,7 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
         if _query_cancel.is_set():
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
         # ★ 取 51 行，多一行用于判断是否还有更多数据（省掉慢 COUNT）
-        limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=51)
+        limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=51, where_clause=where_clause)
         # ★ 保存连接数据，用于 cancel 时 kill query
         _query_src_data = cdata
         url = _conn_url(cdata)
@@ -824,8 +864,8 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
 
 
 @eel.expose
-def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=50, order_col='', order_dir=''):
-    """服务端分页加载：取 limit+1 行代替 COUNT(*)，用多出的一行判断是否还有更多"""
+def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=50, order_col='', order_dir='', where_clause=''):
+    """服务端分页加载：取 limit+1 行代替 COUNT(*)，用多出的一行判断是否还有更多。支持可选 WHERE 筛选"""
     global _query_conn_id, _query_src_data
     _query_cancel.clear()
     _query_conn_id = None
@@ -849,7 +889,7 @@ def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=
         offset = int(offset)
         limit = int(limit)
         # ★ 取 limit+1 行，多一行用于判断是否还有更多（省掉慢 COUNT）
-        page_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=limit + 1, offset=offset)
+        page_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=limit + 1, offset=offset, where_clause=where_clause)
         # ★ 保存连接数据，用于 cancel 时 kill query
         _query_src_data = cdata
         url = _conn_url(cdata)
@@ -858,12 +898,9 @@ def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
         try:
             with engine.connect() as conn:
-                # ★ 记录连接 ID，用于 cancel 时 kill query
+                # ★ 记录连接 ID，用于 cancel 时 kill query（支持 MySQL/PG/Oracle/MSSQL）
+                _query_conn_id = _get_backend_pid(conn, db_type)
                 if db_type in ('mysql', 'ob-mysql'):
-                    try:
-                        _query_conn_id = conn.execute(text("SELECT CONNECTION_ID()")).scalar()
-                    except Exception:
-                        pass
                     try:
                         conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 30000"))
                     except Exception:
@@ -895,9 +932,10 @@ def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=
         return {"ok": False, "msg": _friendly_error(e, cdata_saved.get('db_type','mysql') if cdata_saved else 'mysql')}
 
 
-def _build_full_table_sql(tbl, db_type, order_clause, limit=None, offset=0):
-    """构建 SELECT * FROM tbl 的 SQL，支持各数据库方言、可选 LIMIT 和 OFFSET"""
-    base_sql = f"SELECT * FROM {tbl}{order_clause}"
+def _build_full_table_sql(tbl, db_type, order_clause, limit=None, offset=0, where_clause=''):
+    """构建 SELECT * FROM tbl 的 SQL，支持各数据库方言、可选 LIMIT/OFFSET/WHERE"""
+    where_str = f" WHERE {where_clause}" if where_clause else ''
+    base_sql = f"SELECT * FROM {tbl}{where_str}{order_clause}"
     if limit is None:
         # 无限制 — 全量查询
         if db_type == 'oracle':
@@ -1078,7 +1116,11 @@ def _get_where_columns(c, db_type, database, table_name):
 
 
 def _build_where_clause(tbl, db_type, where_cols, columns, orig_row):
-    """构建 UPDATE/DELETE 的 WHERE 子句，优先使用主键/唯一索引"""
+    """构建 UPDATE/DELETE 的 WHERE 子句，优先使用主键/唯一索引。
+    WHERE 值始终以字符串引用（不用 _sql_value），避免：
+    1. VARCHAR PK 含纯数字时被误判为数字导致隐式类型转换不匹配
+    2. BIGINT/Decimal 经 JS 往返后精度丢失（_json_safe 已转字符串）
+    """
     if where_cols:
         target_cols = where_cols
     else:
@@ -1088,13 +1130,18 @@ def _build_where_clause(tbl, db_type, where_cols, columns, orig_row):
         try:
             idx = columns.index(cname)
             val = orig_row[idx] if idx < len(orig_row) else 'NULL'
-            where_parts.append(
-                f"{_safe_ident(cname, db_type)} IS NULL" if val == 'NULL'
-                else f"{_safe_ident(cname, db_type)} = {_sql_value(val, db_type)}"
-            )
+            if val == 'NULL' or val is None or str(val).upper() == 'NULL':
+                where_parts.append(f"{_safe_ident(cname, db_type)} IS NULL")
+            else:
+                where_parts.append(f"{_safe_ident(cname, db_type)} = {_escape_str_val(str(val))}")
         except ValueError:
             pass
     return " AND ".join(where_parts) if where_parts else "1=1"
+
+
+def _escape_str_val(val_str):
+    """将字符串值安全地转为 SQL 字符串字面量（始终加引号）"""
+    return "'" + val_str.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 @eel.expose
@@ -1127,18 +1174,26 @@ def table_save_changes(conn_data, database, table_name, schema, changes):
 
 @eel.expose
 def table_exec_save(conn_data, database, table_name, schema, changes):
-    """执行 UPDATE 修改"""
+    """执行 UPDATE 修改（支持取消：循环中检测 _query_cancel，并记录连接 PID 供 Kill）"""
+    global _query_conn_id, _query_src_data, _query_cancel
+    _query_cancel.clear()
+    cdata = dict(conn_data)
+    db_type = cdata.get('db_type', 'mysql')
+    if db_type not in ('postgresql', 'oracle'):
+        cdata["db"] = database
+    tbl = _build_table_ref(cdata, database, table_name, schema)
+    engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
     try:
-        cdata = dict(conn_data)
-        db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
-            cdata["db"] = database
-        tbl = _build_table_ref(cdata, database, table_name, schema)
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as c:
             where_cols = _get_where_columns(c, db_type, database, table_name)
         with engine.begin() as c:
+            # ★ 记录连接 PID，供 cancel 时 Kill
+            _query_conn_id = _get_backend_pid(c, db_type)
+            _query_src_data = cdata
             for ch in changes:
+                if _query_cancel.is_set():
+                    _kill_db_query()
+                    return {"ok": False, "msg": "操作已取消", "cancelled": True}
                 col = ch["col"]
                 new_val = ch["newVal"]
                 orig_row = ch.get("origRow", [])
@@ -1146,16 +1201,27 @@ def table_exec_save(conn_data, database, table_name, schema, changes):
                 set_clause = f"{_safe_ident(col, db_type)} = {_sql_value(new_val, db_type)}"
                 where_clause = _build_where_clause(tbl, db_type, where_cols, columns, orig_row)
                 update_sql = f"UPDATE {tbl} SET {set_clause} WHERE {where_clause}"
-                c.execute(text(update_sql))
-                # 生成回退 SQL：恢复到原值
-                old_val = orig_row[columns.index(col)] if col in columns else None
-                rollback_set = f"{_safe_ident(col, db_type)} = {_sql_value(old_val, db_type)}"
-                rollback_sql = f"UPDATE {tbl} SET {rollback_set} WHERE {where_clause};"
-                _log_db_update(update_sql, rollback_sql)
-        engine.dispose()
+                result = c.execute(text(update_sql))
+                # ★ 检查 rowcount：如果 WHERE 条件未匹配到行，说明 origRow 数据可能已过期
+                rc = result.rowcount
+                if rc == 0:
+                    # 回退日志中只保留一条警告
+                    _log_db_update(update_sql, f"-- WARNING: 0 rows affected, WHERE may not match")
+                else:
+                    # 生成回退 SQL：恢复到原值
+                    old_val = orig_row[columns.index(col)] if col in columns else None
+                    rollback_set = f"{_safe_ident(col, db_type)} = {_sql_value(old_val, db_type)}"
+                    rollback_sql = f"UPDATE {tbl} SET {rollback_set} WHERE {where_clause};"
+                    _log_db_update(update_sql, rollback_sql)
         return {"ok": True, "msg": f"成功修改 {len(changes)} 处"}
     except Exception as e:
+        if _query_cancel.is_set():
+            return {"ok": False, "msg": "操作已取消", "cancelled": True}
         return {"ok": False, "msg": str(e)}
+    finally:
+        _query_conn_id = None
+        _query_src_data = None
+        engine.dispose()
 
 
 def _sql_value(val, db_type):
@@ -1213,10 +1279,14 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data):
                 columns = rd.get("columns", [])
                 where_clause = _build_where_clause(tbl, db_type, where_cols, columns, orig_row)
                 delete_sql = f"DELETE FROM {tbl} WHERE {where_clause}"
-                c.execute(text(delete_sql))
-                # 生成回退 SQL：INSERT 恢复被删除的行
-                rollback_sql = _gen_rollback_insert(tbl, db_type, columns, orig_row)
-                _log_db_delete(delete_sql, rollback_sql)
+                result = c.execute(text(delete_sql))
+                # ★ 检查 rowcount：如果未删除任何行，可能数据已变化
+                if result.rowcount == 0:
+                    _log_db_delete(delete_sql, "-- WARNING: 0 rows affected, WHERE may not match")
+                else:
+                    # 生成回退 SQL：INSERT 恢复被删除的行
+                    rollback_sql = _gen_rollback_insert(tbl, db_type, columns, orig_row)
+                    _log_db_delete(delete_sql, rollback_sql)
         engine.dispose()
         return {"ok": True, "msg": f"成功删除 {len(rows_data)} 行"}
     except Exception as e:
@@ -1692,8 +1762,8 @@ def table_backup(conn_data, database, table_name, schema=''):
         src_tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=30))
 
-        # 生成备份表名: MMDD_HH
-        base_name = dt.now().strftime("%m%d_%H")
+        # 生成备份表名: 原表名_MMDD_HH
+        base_name = f"{table_name}_{dt.now().strftime('%m%d_%H')}"
         backup_name = base_name
         # 检测重名，追加 _1, _2 ...
         existing = set()
@@ -1733,6 +1803,90 @@ def table_backup(conn_data, database, table_name, schema=''):
         return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
 
 
+# ==================== 新建表 / 执行建表 SQL ====================
+@eel.expose
+def table_execute_sql(conn_data, database, sql, schema=''):
+    """执行一个 SQL 语句（用于新建表等操作）"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql', 'oracle'):
+            cdata["db"] = database
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        engine.dispose()
+        _db_op_logger.info(f"[EXEC_SQL] 执行成功: {sql[:200]}...")
+        return {"ok": True, "msg": "操作成功"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
+# ==================== 删除字段 / 索引 / 外键 ====================
+@eel.expose
+def table_drop_column(conn_data, database, table_name, column_name, schema=''):
+    """删除表中某个字段"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql', 'oracle'):
+            cdata["db"] = database
+        tbl = _build_table_ref(cdata, database, table_name, schema)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        # SQLDbx compatible quoting
+        q = '"' if db_type in ('postgresql', 'oracle') else '`'
+        sql = f"ALTER TABLE {tbl} DROP COLUMN {q}{column_name}{q}"
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        engine.dispose()
+        _db_op_logger.info(f"[DROP_COL] {tbl}.{column_name}")
+        return {"ok": True, "msg": f"字段 [{column_name}] 已删除"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
+@eel.expose
+def table_drop_index(conn_data, database, table_name, index_name, schema=''):
+    """删除表中某个索引"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql', 'oracle'):
+            cdata["db"] = database
+        tbl = _build_table_ref(cdata, database, table_name, schema)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        q = '"' if db_type in ('postgresql', 'oracle') else '`'
+        sql = f"ALTER TABLE {tbl} DROP INDEX {q}{index_name}{q}"
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        engine.dispose()
+        _db_op_logger.info(f"[DROP_IDX] {tbl}.{index_name}")
+        return {"ok": True, "msg": f"索引 [{index_name}] 已删除"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
+@eel.expose
+def table_drop_foreign_key(conn_data, database, table_name, fk_name, schema=''):
+    """删除表中某个外键"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type not in ('postgresql', 'oracle'):
+            cdata["db"] = database
+        tbl = _build_table_ref(cdata, database, table_name, schema)
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        q = '"' if db_type in ('postgresql', 'oracle') else '`'
+        sql = f"ALTER TABLE {tbl} DROP FOREIGN KEY {q}{fk_name}{q}"
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        engine.dispose()
+        _db_op_logger.info(f"[DROP_FK] {tbl}.{fk_name}")
+        return {"ok": True, "msg": f"外键 [{fk_name}] 已删除"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
 # ==================== 树形栏目持久化（含自动备份恢复） ====================
 _tree_lock = threading.RLock()  # 可重入锁，防止并发写竞争导致数据丢失（tree_delete_folder 有递归调用）
 if getattr(sys, 'frozen', False):
@@ -1755,15 +1909,13 @@ def _validate_tree(data):
     """校验树数据结构完整性（仅检查结构，不检查内容）"""
     if not isinstance(data, dict):
         return False
-    # 必须包含三个关键字段
-    for key in ("folders", "connections", "saved_queries"):
+    # 必须包含两个关键字段（saved_queries 已迁移到文件系统，不再强制要求）
+    for key in ("folders", "connections"):
         if key not in data:
             data[key] = [] if key != "connections" else {}
     if not isinstance(data.get("folders"), list):
         return False
     if not isinstance(data.get("connections"), dict):
-        return False
-    if not isinstance(data.get("saved_queries"), list):
         return False
     return True
 
@@ -1773,8 +1925,7 @@ def _tree_has_content(data):
         return False
     has_conns = bool(data.get("connections") and len(data.get("connections", {})) > 0)
     has_folders = bool(data.get("folders") and len(data.get("folders", [])) > 0)
-    has_queries = bool(data.get("saved_queries") and len(data.get("saved_queries", [])) > 0)
-    return has_conns or has_folders or has_queries
+    return has_conns or has_folders
 
 def _is_empty_shell(data):
     """检查是否是结构合法但内容为空的'空壳'数据"""
@@ -1907,6 +2058,11 @@ def _load_tree():
             if recovered:
                 return recovered
         # 正常加载
+        # ★ 迁移旧 saved_queries 到文件系统（仅首次加载时执行）
+        if data.get("saved_queries"):
+            _migrate_old_queries(tree=data)
+            # 重新加载（迁移后 saved_queries 已被清除）
+            return _load_tree()
         return data
     except json.JSONDecodeError as e:
         print(f"[tree] _load_tree JSON解析失败: {e}")
@@ -1991,7 +2147,13 @@ def tree_diag():
                 data = json.load(f)
             info["connections_count"] = len(data.get("connections", {}))
             info["folders_count"] = len(data.get("folders", []))
-            info["queries_count"] = len(data.get("saved_queries", []))
+            # 查询已迁移到文件系统，统计 queries/ 目录下的文件数
+            q_count = 0
+            qdir = QUERIES_DIR
+            if os.path.isdir(qdir):
+                for root, dirs, files in os.walk(qdir):
+                    q_count += sum(1 for f in files if f.endswith('.sql'))
+            info["queries_count"] = q_count
             info["valid"] = _validate_tree(data)
             info["has_content"] = _tree_has_content(data)
         except Exception as e:
@@ -2116,7 +2278,11 @@ def tree_check_integrity():
             data = _load_tree()
             result["connections"] = len(data.get("connections", {}))
             result["folders"] = len(data.get("folders", []))
-            result["queries"] = len(data.get("saved_queries", []))
+            q_count = 0
+            if os.path.isdir(QUERIES_DIR):
+                for root, dirs, files in os.walk(QUERIES_DIR):
+                    q_count += sum(1 for f in files if f.endswith('.sql'))
+            result["queries"] = q_count
             if _is_empty_shell(data) and result["file_size"] > 0:
                 result["issues"].append("空壳数据：文件存在但无连接/文件夹/查询")
             if not _validate_tree(data):
@@ -2243,30 +2409,34 @@ def debug_python_info():
 
 @eel.expose
 def tree_test_conn(conn_data):
+    db_type = conn_data.get("db_type", "mysql")
     try:
-        db_type = conn_data.get("db_type", "mysql")
         if db_type == 'redis':
-            r = _get_redis(conn_data)
-            r.ping()
-            return {"ok": True, "msg": "连接成功"}
+            def _redis_test():
+                try:
+                    r = _get_redis(conn_data)
+                    r.ping()
+                    return {"ok": True, "msg": "连接成功"}
+                except Exception as e:
+                    return {"ok": False, "msg": _friendly_error(e, db_type)}
+            return _with_db_timeout(_redis_test, timeout=10)
+
         url = _conn_url(conn_data)
-        if db_type in ('mysql', 'ob-mysql'):
-            engine = create_engine(url, connect_args=_connect_args(db_type, timeout=5))
-            with engine.connect() as c: c.execute(text("SELECT 1"))
-        elif db_type == 'postgresql':
-            engine = create_engine(url, connect_args=_connect_args(db_type, timeout=5))
-            with engine.connect() as c: c.execute(text("SELECT 1"))
-        elif db_type == 'oracle':
-            engine = create_engine(url, connect_args=_connect_args(db_type, timeout=5))
-            with engine.connect() as c: c.execute(text("SELECT 1 FROM DUAL"))
-        elif db_type == 'mssql':
-            engine = create_engine(url, connect_args=_connect_args(db_type, timeout=5))
-            with engine.connect() as c: c.execute(text("SELECT 1"))
-        else:
-            engine = create_engine(url, connect_args=_connect_args(db_type, timeout=5))
-            with engine.connect() as c: c.execute(text("SELECT 1"))
-        engine.dispose()
-        return {"ok": True, "msg": "连接成功"}
+        def _db_test():
+            engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
+            try:
+                with engine.connect() as c:
+                    if db_type == 'oracle':
+                        c.execute(text("SELECT 1 FROM DUAL"))
+                    else:
+                        c.execute(text("SELECT 1"))
+                return {"ok": True, "msg": "连接成功"}
+            except Exception as e:
+                return {"ok": False, "msg": _friendly_error(e, db_type)}
+            finally:
+                engine.dispose()
+        return _with_db_timeout(_db_test, timeout=15)
+
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, db_type)}
 
@@ -2300,36 +2470,44 @@ def _conn_url(conn_data):
 
 @eel.expose
 def db_explore_get_databases(conn_data):
+    db_type = conn_data.get("db_type", "mysql")
     try:
-        db_type = conn_data.get("db_type", "mysql")
         print(f"[get_databases] db_type={db_type}, user={conn_data.get('user','')}, host={conn_data.get('host','')}, db={conn_data.get('db','')}")
-        engine = create_engine(_conn_url(conn_data), connect_args=_connect_args(conn_data.get("db_type","mysql"), timeout=20))
-        with engine.connect() as c:
-            if db_type in ('mysql', 'ob-mysql'):
-                rows = c.execute(text("SHOW DATABASES")).fetchall()
-                databases = [r[0] for r in rows if r[0] not in ("information_schema","mysql","performance_schema","sys","oceanbase")]
-            elif db_type == 'postgresql':
-                rows = c.execute(text("SELECT datname FROM pg_database WHERE datistemplate=false ORDER BY datname")).fetchall()
-                databases = [r[0] for r in rows]
-            elif db_type == 'oracle':
-                rows = c.execute(text("SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER")).fetchall()
-                databases = [r[0] for r in rows]
-                # ★ 确保当前用户的 schema 始终出现在列表中（即使暂时没有表），并排在首位
-                current_user = conn_data.get("user", "").upper()
-                if current_user:
-                    if current_user in databases:
-                        databases.remove(current_user)
-                    databases.insert(0, current_user)
-                print(f"[Oracle get_databases] user={conn_data.get('user','')!r}, current_user={current_user!r}, databases={databases[:5]}...")
-            elif db_type == 'mssql':
-                rows = c.execute(text("SELECT name FROM sys.databases WHERE database_id>4 ORDER BY name")).fetchall()
-                databases = [r[0] for r in rows]
-            else:
-                rows = c.execute(text("SHOW DATABASES")).fetchall()
-                databases = [r[0] for r in rows if r[0] not in ("information_schema","mysql","performance_schema","sys","oceanbase")]
-        engine.dispose()
-        return {"ok": True, "databases": databases}
-    except Exception as e: return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type','mysql'))}
+
+        def _get_dbs():
+            engine = create_engine(_conn_url(conn_data), connect_args=_connect_args(db_type, timeout=10))
+            try:
+                with engine.connect() as c:
+                    if db_type == 'oracle':
+                        rows = c.execute(text("SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER")).fetchall()
+                        databases = [r[0] for r in rows]
+                        current_user = conn_data.get("user", "").upper()
+                        if current_user:
+                            if current_user in databases:
+                                databases.remove(current_user)
+                            databases.insert(0, current_user)
+                        print(f"[Oracle get_databases] user={conn_data.get('user','')!r}, current_user={current_user!r}, databases={databases[:5]}...")
+                    elif db_type in ('mysql', 'ob-mysql'):
+                        rows = c.execute(text("SHOW DATABASES")).fetchall()
+                        databases = [r[0] for r in rows if r[0] not in ("information_schema","mysql","performance_schema","sys","oceanbase")]
+                    elif db_type == 'postgresql':
+                        rows = c.execute(text("SELECT datname FROM pg_database WHERE datistemplate=false ORDER BY datname")).fetchall()
+                        databases = [r[0] for r in rows]
+                    elif db_type == 'mssql':
+                        rows = c.execute(text("SELECT name FROM sys.databases WHERE database_id>4 ORDER BY name")).fetchall()
+                        databases = [r[0] for r in rows]
+                    else:
+                        rows = c.execute(text("SHOW DATABASES")).fetchall()
+                        databases = [r[0] for r in rows if r[0] not in ("information_schema","mysql","performance_schema","sys","oceanbase")]
+                return {"ok": True, "databases": databases}
+            except Exception as e:
+                return {"ok": False, "msg": _friendly_error(e, db_type)}
+            finally:
+                engine.dispose()
+        return _with_db_timeout(_get_dbs, timeout=15)
+
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, db_type)}
 
 @eel.expose
 def db_explore_get_schemas(conn_data, database):
@@ -2338,12 +2516,21 @@ def db_explore_get_schemas(conn_data, database):
         cdata = dict(conn_data)
         if cdata.get("db_type") != 'oracle':
             cdata["db"] = database
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
-        with engine.connect() as c:
-            rows = c.execute(text("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name")).fetchall()
-        engine.dispose()
-        return {"ok": True, "schemas": [r[0] for r in rows]}
-    except Exception as e: return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
+
+        def _get_schemas():
+            engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
+            try:
+                with engine.connect() as c:
+                    rows = c.execute(text("SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name")).fetchall()
+                return {"ok": True, "schemas": [r[0] for r in rows]}
+            except Exception as e:
+                return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
+            finally:
+                engine.dispose()
+        return _with_db_timeout(_get_schemas, timeout=15)
+
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
 
 def _format_size(size_bytes):
     if size_bytes is None: return ""
@@ -2356,54 +2543,61 @@ def _format_size(size_bytes):
 
 @eel.expose
 def db_explore_get_tables(conn_data, database, schema=''):
+    cdata = dict(conn_data)
+    if cdata.get("db_type") != 'oracle':
+        cdata["db"] = database
+    db_type = cdata.get("db_type", "mysql")
     try:
-        cdata = dict(conn_data)
-        if cdata.get("db_type") != 'oracle':
-            cdata["db"] = database
-        db_type = cdata.get("db_type", "mysql")
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
-        with engine.connect() as c:
-            if db_type in ('mysql', 'ob-mysql'):
-                rows = c.execute(text("SELECT TABLE_NAME,TABLE_ROWS,DATA_LENGTH,UPDATE_TIME,TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
-                tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":str(r[3]) if r[3] else "","comment":r[4] or ""} for r in rows]
-            elif db_type == 'postgresql':
-                sch = schema if schema else 'public'
-                rows = c.execute(text(
-                    "SELECT c.relname, c.reltuples::bigint, pg_total_relation_size(c.oid), "
-                    "COALESCE(pg_catalog.obj_description(c.oid,'pg_class'),'') "
-                    "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
-                    "WHERE c.relkind='r' AND n.nspname=:sch ORDER BY c.relname"
-                ), {"sch":sch}).fetchall()
-                tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":"","comment":r[3] or ""} for r in rows]
-            elif db_type == 'oracle':
-                # ★ 调试：记录 Oracle 查表时使用的 database(schema) 参数
-                print(f"[Oracle get_tables] database={database!r}, user={cdata.get('user','')!r}")
-                rows = c.execute(text(
-                    "SELECT t.TABLE_NAME, t.NUM_ROWS, "
-                    "COALESCE((SELECT SUM(s.BYTES) FROM ALL_SEGMENTS s WHERE s.OWNER=t.OWNER AND s.SEGMENT_NAME=t.TABLE_NAME),0), "
-                    "COALESCE((SELECT c.COMMENTS FROM ALL_TAB_COMMENTS c WHERE c.OWNER=t.OWNER AND c.TABLE_NAME=t.TABLE_NAME AND c.TABLE_TYPE='TABLE'),'') "
-                    "FROM ALL_TABLES t WHERE t.OWNER=:db ORDER BY t.TABLE_NAME"
-                ), {"db":database}).fetchall()
-                print(f"[Oracle get_tables] found {len(rows)} tables for OWNER={database!r}")
-                tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
-            elif db_type == 'mssql':
-                rows = c.execute(text(
-                    "SELECT t.NAME, p.rows, SUM(ISNULL(a.used_pages,0))*8192, "
-                    "CAST(ISNULL(ep.value,'') AS NVARCHAR(4000)) "
-                    "FROM sys.tables t "
-                    "LEFT JOIN sys.partitions p ON t.object_id=p.object_id AND p.index_id IN (0,1) "
-                    "LEFT JOIN sys.allocation_units a ON p.partition_id=a.container_id "
-                    "LEFT JOIN sys.extended_properties ep ON ep.major_id=t.object_id AND ep.minor_id=0 AND ep.name='MS_Description' "
-                    "GROUP BY t.NAME, t.object_id, p.rows, CAST(ep.value AS NVARCHAR(4000)) "
-                    "ORDER BY t.NAME"
-                )).fetchall()
-                tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
-            else:
-                rows = c.execute(text("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
-                tables = [{"name":r[0],"rows":"","data_size":"","update_time":"","comment":""} for r in rows]
-        engine.dispose()
-        return {"ok": True, "tables": tables}
-    except Exception as e: return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
+        def _get_tables():
+            engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+            try:
+                with engine.connect() as c:
+                    if db_type == 'oracle':
+                        print(f"[Oracle get_tables] database={database!r}, user={cdata.get('user','')!r}")
+                        rows = c.execute(text(
+                            "SELECT t.TABLE_NAME, t.NUM_ROWS, "
+                            "COALESCE((SELECT SUM(s.BYTES) FROM ALL_SEGMENTS s WHERE s.OWNER=t.OWNER AND s.SEGMENT_NAME=t.TABLE_NAME),0), "
+                            "COALESCE((SELECT c.COMMENTS FROM ALL_TAB_COMMENTS c WHERE c.OWNER=t.OWNER AND c.TABLE_NAME=t.TABLE_NAME AND c.TABLE_TYPE='TABLE'),'') "
+                            "FROM ALL_TABLES t WHERE t.OWNER=:db ORDER BY t.TABLE_NAME"
+                        ), {"db":database}).fetchall()
+                        print(f"[Oracle get_tables] found {len(rows)} tables for OWNER={database!r}")
+                        tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
+                    elif db_type in ('mysql', 'ob-mysql'):
+                        rows = c.execute(text("SELECT TABLE_NAME,TABLE_ROWS,DATA_LENGTH,UPDATE_TIME,TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
+                        tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":str(r[3]) if r[3] else "","comment":r[4] or ""} for r in rows]
+                    elif db_type == 'postgresql':
+                        sch = schema if schema else 'public'
+                        rows = c.execute(text(
+                            "SELECT c.relname, c.reltuples::bigint, pg_total_relation_size(c.oid), "
+                            "COALESCE(pg_catalog.obj_description(c.oid,'pg_class'),'') "
+                            "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                            "WHERE c.relkind='r' AND n.nspname=:sch ORDER BY c.relname"
+                        ), {"sch":sch}).fetchall()
+                        tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":"","comment":r[3] or ""} for r in rows]
+                    elif db_type == 'mssql':
+                        rows = c.execute(text(
+                            "SELECT t.NAME, p.rows, SUM(ISNULL(a.used_pages,0))*8192, "
+                            "CAST(ISNULL(ep.value,'') AS NVARCHAR(4000)) "
+                            "FROM sys.tables t "
+                            "LEFT JOIN sys.partitions p ON t.object_id=p.object_id AND p.index_id IN (0,1) "
+                            "LEFT JOIN sys.allocation_units a ON p.partition_id=a.container_id "
+                            "LEFT JOIN sys.extended_properties ep ON ep.major_id=t.object_id AND ep.minor_id=0 AND ep.name='MS_Description' "
+                            "GROUP BY t.NAME, t.object_id, p.rows, CAST(ep.value AS NVARCHAR(4000)) "
+                            "ORDER BY t.NAME"
+                        )).fetchall()
+                        tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
+                    else:
+                        rows = c.execute(text("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
+                        tables = [{"name":r[0],"rows":"","data_size":"","update_time":"","comment":""} for r in rows]
+                return {"ok": True, "tables": tables}
+            except Exception as e:
+                return {"ok": False, "msg": _friendly_error(e, db_type)}
+            finally:
+                engine.dispose()
+        return _with_db_timeout(_get_tables, timeout=15)
+
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, db_type)}
 
 
 # ==================== Redis 操作 ====================
@@ -3240,21 +3434,97 @@ def db_create(conn_data, db_name, charset='utf8mb4', collation='utf8mb4_unicode_
 
 
 
+# ==================== 查询文件存储 ====================
+QUERIES_DIR = os.path.join(BASE_DIR, "queries")
+
+def _get_query_dir(conn_id, db, tree=None):
+    """获取连接+数据库对应的查询文件夹路径"""
+    # 用连接名+数据库名作为文件夹名，清理非法字符
+    if tree is None:
+        tree = _load_tree()
+    conn = tree.get("connections", {}).get(conn_id, {})
+    conn_name = conn.get("name", conn_id) if conn else conn_id
+    # 清理文件名非法字符
+    safe_conn = re.sub(r'[\\/:*?"<>|]', '_', str(conn_name))
+    safe_db = re.sub(r'[\\/:*?"<>|]', '_', str(db or 'default'))
+    return os.path.join(QUERIES_DIR, safe_conn, safe_db)
+
+def _migrate_old_queries(tree=None):
+    """将 navicat_tree.json 中的旧 saved_queries 迁移到 queries/ 文件夹
+    Args:
+        tree: 可选，已加载的树数据。不传则内部调用 _load_tree()
+    """
+    if tree is None:
+        tree = _load_tree()
+    old_queries = tree.get("saved_queries", [])
+    if not old_queries:
+        return
+    print(f"[queries] 检测到 {len(old_queries)} 个旧格式查询，开始迁移...")
+    migrated = 0
+    for q in old_queries:
+        try:
+            qid = q.get("id", "")
+            name = q.get("name", "未命名")
+            sql = q.get("sql", "")
+            conn_id = q.get("conn_id", "")
+            db = q.get("db", "")
+            # 生成文件路径（传入 tree 避免重复调用 _load_tree）
+            qdir = _get_query_dir(conn_id, db, tree=tree)
+            os.makedirs(qdir, exist_ok=True)
+            # 用查询名作为文件名（清理后）
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', str(name))
+            fpath = os.path.join(qdir, f"{safe_name}.sql")
+            # 避免重名：如果已存在则追加 ID
+            if os.path.exists(fpath):
+                fpath = os.path.join(qdir, f"{safe_name}_{qid}.sql")
+            # 写入文件头部注释 + SQL
+            content = f"-- name: {name}\n-- id: {qid}\n-- conn_id: {conn_id}\n-- db: {db}\n\n{sql}"
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(content)
+            migrated += 1
+        except Exception as e:
+            print(f"[queries] 迁移查询失败 ({q.get('name','?')}): {e}")
+    # 迁移完成后清除旧字段
+    if migrated:
+        tree.pop("saved_queries", None)
+        _save_tree(tree)
+        print(f"[queries] 迁移完成: {migrated}/{len(old_queries)} 个查询已保存到 {QUERIES_DIR}")
+
 @eel.expose
 def tree_save_query(qid, name, sql, conn_id, db=''):
     with _tree_lock:
         try:
-            tree = _load_tree()
             if not qid: qid = f"q_{int(time.time() * 1000)}"
-            tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
-            tree.setdefault("saved_queries", []).append({"id": qid, "name": name, "sql": sql, "conn_id": conn_id or "", "db": db or ""})
-            ok = _save_tree(tree)
-            if not ok:
-                print(f"[tree] tree_save_query: 保存树文件失败, qid={qid}, name={name}")
-                return {"ok": False, "msg": "保存配置文件失败，请检查磁盘空间和权限"}
+            qdir = _get_query_dir(conn_id, db)
+            os.makedirs(qdir, exist_ok=True)
+            # 先删除旧文件（按 ID 匹配）
+            tree_list_queries(conn_id, db)  # 只是触发扫描
+            for fname in os.listdir(qdir):
+                if not fname.endswith('.sql'):
+                    continue
+                fpath = os.path.join(qdir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    # 从文件头部注释中提取 id
+                    match = re.search(r'^--\s*id:\s*(.+)$', content, re.MULTILINE)
+                    if match and match.group(1).strip() == qid:
+                        os.remove(fpath)
+                        break
+                except Exception:
+                    pass
+            # 写入新文件
+            safe_name = re.sub(r'[\\/:*?"<>|]', '_', str(name or '未命名'))
+            fpath = os.path.join(qdir, f"{safe_name}.sql")
+            if os.path.exists(fpath):
+                fpath = os.path.join(qdir, f"{safe_name}_{qid}.sql")
+            content = f"-- name: {name or '未命名'}\n-- id: {qid}\n-- conn_id: {conn_id or ''}\n-- db: {db or ''}\n\n{sql or ''}"
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(content)
+            print(f"[queries] 保存查询: {fpath}")
             return {"ok": True, "id": qid}
         except Exception as e:
-            print(f"[tree] tree_save_query 异常: {type(e).__name__}: {e}")
+            print(f"[queries] tree_save_query 异常: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
             return {"ok": False, "msg": f"保存查询失败: {str(e)}"}
@@ -3263,25 +3533,99 @@ def tree_save_query(qid, name, sql, conn_id, db=''):
 def tree_delete_query(qid):
     with _tree_lock:
         try:
-            tree = _load_tree()
-            tree["saved_queries"] = [q for q in tree.get("saved_queries", []) if q.get("id") != qid]
-            ok = _save_tree(tree)
-            if not ok:
-                return {"ok": False, "msg": "保存配置文件失败"}
-            return {"ok": True}
+            # 扫描所有 queries 子目录
+            if not os.path.isdir(QUERIES_DIR):
+                return {"ok": True}
+            for root, dirs, files in os.walk(QUERIES_DIR):
+                for fname in files:
+                    if not fname.endswith('.sql'):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        match = re.search(r'^--\s*id:\s*(.+)$', content, re.MULTILINE)
+                        if match and match.group(1).strip() == qid:
+                            os.remove(fpath)
+                            print(f"[queries] 删除查询: {fpath}")
+                            return {"ok": True}
+                    except Exception:
+                        pass
+            return {"ok": True}  # 文件不存在也算成功
         except Exception as e:
             return {"ok": False, "msg": f"删除查询失败: {str(e)}"}
 
 @eel.expose
 def tree_get_query(qid):
-    tree = _load_tree()
-    queries = tree.get("saved_queries", [])
-    for q in queries:
-        if q.get("id") == qid:
-            print(f"[tree] tree_get_query: 找到查询 qid={qid}, name={q.get('name','')}, conn_id={q.get('conn_id','')}")
-            return q
-    print(f"[tree] tree_get_query: 未找到查询 qid={qid}, 当前共有 {len(queries)} 个查询, 所有ID: {[q.get('id') for q in queries]}")
-    return None
+    """获取单个查询（用于打开查询编辑器）"""
+    try:
+        if not os.path.isdir(QUERIES_DIR):
+            return None
+        for root, dirs, files in os.walk(QUERIES_DIR):
+            for fname in files:
+                if not fname.endswith('.sql'):
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    match = re.search(r'^--\s*id:\s*(.+)$', content, re.MULTILINE)
+                    if match and match.group(1).strip() == qid:
+                        # 解析元数据
+                        name_match = re.search(r'^--\s*name:\s*(.+)$', content, re.MULTILINE)
+                        conn_match = re.search(r'^--\s*conn_id:\s*(.+)$', content, re.MULTILINE)
+                        db_match = re.search(r'^--\s*db:\s*(.+)$', content, re.MULTILINE)
+                        # SQL 内容从第一个空行后开始
+                        sql = ''
+                        lines = content.split('\n')
+                        for i, line in enumerate(lines):
+                            if line.strip() == '' and i > 3:
+                                sql = '\n'.join(lines[i+1:]).strip()
+                                break
+                        if not sql and lines:
+                            # 如果找不到空行，从第5行开始取
+                            sql = '\n'.join(lines[4:]).strip() if len(lines) > 4 else ''
+                        return {
+                            "id": qid,
+                            "name": name_match.group(1).strip() if name_match else fname.replace('.sql',''),
+                            "sql": sql,
+                            "conn_id": conn_match.group(1).strip() if conn_match else '',
+                            "db": db_match.group(1).strip() if db_match else ''
+                        }
+                except Exception:
+                    pass
+        return None
+    except Exception as e:
+        print(f"[queries] tree_get_query 异常: {e}")
+        return None
+
+@eel.expose
+def tree_list_queries(conn_id, db=''):
+    """列出指定连接+数据库下的所有查询（用于树节点展开和右侧面板）"""
+    try:
+        qdir = _get_query_dir(conn_id, db)
+        if not os.path.isdir(qdir):
+            return []
+        results = []
+        for fname in sorted(os.listdir(qdir)):
+            if not fname.endswith('.sql'):
+                continue
+            fpath = os.path.join(qdir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                # 解析元数据
+                name_match = re.search(r'^--\s*name:\s*(.+)$', content, re.MULTILINE)
+                id_match = re.search(r'^--\s*id:\s*(.+)$', content, re.MULTILINE)
+                qid = id_match.group(1).strip() if id_match else ''
+                qname = name_match.group(1).strip() if name_match else fname.replace('.sql','')
+                results.append({"id": qid, "name": qname, "conn_id": conn_id, "db": db or ''})
+            except Exception as e:
+                print(f"[queries] 读取查询文件失败 {fpath}: {e}")
+        return results
+    except Exception as e:
+        print(f"[queries] tree_list_queries 异常: {e}")
+        return []
 
 # ==================== 拖拽复制表 ====================
 def _get_column_info(conn, db_type, db_name, table_name):
@@ -3338,10 +3682,158 @@ def _get_column_info(conn, db_type, db_name, table_name):
         return cols
     return []
 
-def _generate_create_table(db_type, tbl, cols):
-    """根据目标数据库类型生成 CREATE TABLE 语句"""
+
+def _get_index_info(conn, db_type, db_name, table_name):
+    """从源表获取索引信息（PRIMARY KEY / UNIQUE / 普通索引），支持 MySQL/PG/Oracle/MSSQL。
+    返回格式: {
+        "primary_key": ["col1", "col2"],  # 主键列名列表，可能为空
+        "unique": [{"name":"idx_name","columns":["col1","col2"]}, ...],
+        "indexes": [{"name":"idx_name","columns":["col1","col2"]}, ...]
+    }
+    """
+    result = {"primary_key": [], "unique": [], "indexes": []}
+    try:
+        if db_type in ('mysql', 'ob-mysql'):
+            rows = conn.execute(text(
+                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SEQ_IN_INDEX "
+                "FROM INFORMATION_SCHEMA.STATISTICS "
+                "WHERE TABLE_SCHEMA=:db AND TABLE_NAME=:tbl ORDER BY INDEX_NAME, SEQ_IN_INDEX"
+            ), {"db": db_name, "tbl": table_name}).fetchall()
+            # 按索引名分组
+            idx_map = {}
+            for r in rows:
+                idx_name = r[0]
+                col_name = r[1]
+                non_unique = r[2]
+                if idx_name not in idx_map:
+                    idx_map[idx_name] = {"name": idx_name, "columns": [], "non_unique": non_unique}
+                idx_map[idx_name]["columns"].append(col_name)
+            for idx in idx_map.values():
+                if idx["name"] == "PRIMARY":
+                    result["primary_key"] = idx["columns"]
+                elif idx["non_unique"] == 0:
+                    result["unique"].append({"name": idx["name"], "columns": idx["columns"]})
+                else:
+                    result["indexes"].append({"name": idx["name"], "columns": idx["columns"]})
+
+        elif db_type == 'postgresql':
+            rows = conn.execute(text(
+                "SELECT i.relname AS index_name, a.attname AS column_name, "
+                "ix.indisprimary, ix.indisunique "
+                "FROM pg_class t "
+                "JOIN pg_index ix ON t.oid = ix.indrelid "
+                "JOIN pg_class i ON i.oid = ix.indexrelid "
+                "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey) "
+                "WHERE t.relname=:tbl AND t.relnamespace=(SELECT oid FROM pg_namespace WHERE nspname=:sch) "
+                "ORDER BY ix.indisprimary DESC, i.relname, a.attnum"
+            ), {"tbl": table_name, "sch": db_name}).fetchall()
+            idx_map = {}
+            for r in rows:
+                idx_name = r[0]
+                col_name = r[1]
+                is_pk = r[2]
+                is_unique = r[3]
+                if idx_name not in idx_map:
+                    idx_map[idx_name] = {"name": idx_name, "columns": [], "is_pk": is_pk, "is_unique": is_unique}
+                idx_map[idx_name]["columns"].append(col_name)
+            # PK 索引名通常自动生成（如 table_pkey），统一标识
+            pk_name = f"{table_name}_pkey"
+            for idx in idx_map.values():
+                if idx["is_pk"]:
+                    result["primary_key"] = idx["columns"]
+                elif idx["is_unique"]:
+                    result["unique"].append({"name": idx["name"], "columns": idx["columns"]})
+                else:
+                    result["indexes"].append({"name": idx["name"], "columns": idx["columns"]})
+
+        elif db_type == 'oracle':
+            # 查询约束（主键/唯一）
+            pk_rows = conn.execute(text(
+                "SELECT cc.column_name FROM all_cons_columns cc "
+                "JOIN all_constraints c ON cc.constraint_name=c.constraint_name AND cc.owner=c.owner "
+                "WHERE c.owner=:owner AND c.table_name=:tbl AND c.constraint_type='P' ORDER BY cc.position"
+            ), {"owner": db_name.upper(), "tbl": table_name.upper()}).fetchall()
+            result["primary_key"] = [r[0] for r in pk_rows]
+
+            uq_rows = conn.execute(text(
+                "SELECT c.constraint_name, cc.column_name, cc.position "
+                "FROM all_cons_columns cc "
+                "JOIN all_constraints c ON cc.constraint_name=c.constraint_name AND cc.owner=c.owner "
+                "WHERE c.owner=:owner AND c.table_name=:tbl AND c.constraint_type='U' ORDER BY c.constraint_name, cc.position"
+            ), {"owner": db_name.upper(), "tbl": table_name.upper()}).fetchall()
+            uq_map = {}
+            for r in uq_rows:
+                cn = r[0]; col = r[1]
+                if cn not in uq_map:
+                    uq_map[cn] = {"name": cn, "columns": []}
+                uq_map[cn]["columns"].append(col)
+            result["unique"] = list(uq_map.values())
+
+            # 普通索引
+            idx_rows = conn.execute(text(
+                "SELECT i.index_name, ic.column_name, ic.column_position "
+                "FROM all_indexes i JOIN all_ind_columns ic ON i.index_name=ic.index_name AND i.owner=ic.index_owner "
+                "WHERE i.owner=:owner AND i.table_name=:tbl AND i.uniqueness='NONUNIQUE' ORDER BY i.index_name, ic.column_position"
+            ), {"owner": db_name.upper(), "tbl": table_name.upper()}).fetchall()
+            idx_map = {}
+            for r in idx_rows:
+                iname = r[0]; col = r[1]
+                if iname not in idx_map:
+                    idx_map[iname] = {"name": iname, "columns": []}
+                idx_map[iname]["columns"].append(col)
+            result["indexes"] = list(idx_map.values())
+
+        elif db_type == 'mssql':
+            # 主键
+            pk_rows = conn.execute(text(
+                "SELECT c.name AS column_name FROM sys.indexes i "
+                "JOIN sys.index_columns ic ON i.object_id=ic.object_id AND i.index_id=ic.index_id "
+                "JOIN sys.columns c ON ic.object_id=c.object_id AND ic.column_id=c.column_id "
+                "WHERE i.object_id=OBJECT_ID(:tbl) AND i.is_primary_key=1 ORDER BY ic.key_ordinal"
+            ), {"tbl": table_name}).fetchall()
+            result["primary_key"] = [r[0] for r in pk_rows]
+
+            # 唯一索引（非主键）
+            uq_rows = conn.execute(text(
+                "SELECT i.name AS index_name, c.name AS column_name "
+                "FROM sys.indexes i "
+                "JOIN sys.index_columns ic ON i.object_id=ic.object_id AND i.index_id=ic.index_id "
+                "JOIN sys.columns c ON ic.object_id=c.object_id AND ic.column_id=c.column_id "
+                "WHERE i.object_id=OBJECT_ID(:tbl) AND i.is_unique=1 AND i.is_primary_key=0 ORDER BY i.name, ic.key_ordinal"
+            ), {"tbl": table_name}).fetchall()
+            uq_map = {}
+            for r in uq_rows:
+                iname = r[0]; col = r[1]
+                if iname not in uq_map:
+                    uq_map[iname] = {"name": iname, "columns": []}
+                uq_map[iname]["columns"].append(col)
+            result["unique"] = list(uq_map.values())
+
+            # 普通索引
+            idx_rows = conn.execute(text(
+                "SELECT i.name AS index_name, c.name AS column_name "
+                "FROM sys.indexes i "
+                "JOIN sys.index_columns ic ON i.object_id=ic.object_id AND i.index_id=ic.index_id "
+                "JOIN sys.columns c ON ic.object_id=c.object_id AND ic.column_id=c.column_id "
+                "WHERE i.object_id=OBJECT_ID(:tbl) AND i.is_unique=0 AND i.is_primary_key=0 ORDER BY i.name, ic.key_ordinal"
+            ), {"tbl": table_name}).fetchall()
+            idx_map = {}
+            for r in idx_rows:
+                iname = r[0]; col = r[1]
+                if iname not in idx_map:
+                    idx_map[iname] = {"name": iname, "columns": []}
+                idx_map[iname]["columns"].append(col)
+            result["indexes"] = list(idx_map.values())
+    except Exception:
+        pass
+    return result
+
+def _generate_create_table(db_type, tbl, cols, indexes=None):
+    """根据目标数据库类型生成 CREATE TABLE 语句（含主键/唯一/索引约束）"""
     if not cols:
         raise ValueError("无列信息")
+    if indexes is None:
+        indexes = {}
 
     # 每列 SQL
     col_lines = []
@@ -3351,17 +3843,53 @@ def _generate_create_table(db_type, tbl, cols):
         dflt = f' DEFAULT {c["default"]}' if c.get("default") else ''
         col_lines.append(f"  {col_name} {c['type']}{null}{dflt}")
 
+    # 主键约束
+    pk_cols = indexes.get("primary_key", [])
+    if pk_cols:
+        pk_sql = ", ".join(_safe_ident(pk, db_type) for pk in pk_cols)
+        col_lines.append(f"  PRIMARY KEY ({pk_sql})")
+
+    # 唯一约束（在 CREATE TABLE 内部）
+    for uq in indexes.get("unique", []):
+        uq_cols = ", ".join(_safe_ident(u, db_type) for u in uq["columns"])
+        # Oracle 和 MSSQL 约束名用引号保护，MySQL/PG 用反引号
+        if db_type == 'oracle':
+            col_lines.append(f"  CONSTRAINT \"{uq['name']}\" UNIQUE ({uq_cols})")
+        elif db_type == 'mssql':
+            col_lines.append(f"  CONSTRAINT [{uq['name']}] UNIQUE ({uq_cols})")
+        else:
+            col_lines.append(f"  UNIQUE ({uq_cols})")
+
+    # 普通索引不在 CREATE TABLE 内生成（有些 DB 不支持），而是返回额外 ALTER 语句
+    index_ddls = []
+    for idx in indexes.get("indexes", []):
+        idx_cols = ", ".join(_safe_ident(i, db_type) for i in idx["columns"])
+        if db_type in ('mysql', 'ob-mysql'):
+            index_ddls.append(f"ALTER TABLE {tbl} ADD INDEX `{idx['name']}` ({idx_cols});")
+        elif db_type == 'postgresql':
+            index_ddls.append(f"CREATE INDEX \"{idx['name']}\" ON {tbl} ({idx_cols});")
+        elif db_type == 'oracle':
+            index_ddls.append(f"CREATE INDEX \"{idx['name']}\" ON {tbl} ({idx_cols})")
+        elif db_type == 'mssql':
+            index_ddls.append(f"CREATE INDEX [{idx['name']}] ON {tbl} ({idx_cols});")
+
     inner = ',\n'.join(col_lines)
 
     if db_type in ('mysql', 'ob-mysql'):
-        return f"CREATE TABLE {tbl} (\n{inner}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+        ddl = f"CREATE TABLE {tbl} (\n{inner}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
     elif db_type == 'postgresql':
-        return f"CREATE TABLE {tbl} (\n{inner}\n);"
+        ddl = f"CREATE TABLE {tbl} (\n{inner}\n);"
     elif db_type == 'oracle':
-        return f"CREATE TABLE {tbl} (\n{inner}\n)"
+        ddl = f"CREATE TABLE {tbl} (\n{inner}\n)"
     elif db_type == 'mssql':
-        return f"CREATE TABLE {tbl} (\n{inner}\n);"
-    return f"CREATE TABLE {tbl} (\n{inner}\n);"
+        ddl = f"CREATE TABLE {tbl} (\n{inner}\n);"
+    else:
+        ddl = f"CREATE TABLE {tbl} (\n{inner}\n);"
+
+    # 追加索引 DDL
+    if index_ddls:
+        ddl += "\n" + "\n".join(index_ddls)
+    return ddl
 
 @eel.expose
 def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, copy_data=True):
@@ -3427,8 +3955,10 @@ def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, co
             try:
                 with src_engine.connect() as sconn:
                     cols = _get_column_info(sconn, src_db_type, src_db, table_name)
+                    # ★ 同时获取索引信息（主键/唯一/普通索引），跨类型迁移不丢失索引
+                    idx_info = _get_index_info(sconn, src_db_type, src_db, table_name)
 
-                ddl = _generate_create_table(dst_db_type, dst_tbl, cols)
+                ddl = _generate_create_table(dst_db_type, dst_tbl, cols, idx_info)
 
                 with dst_engine.begin() as dconn:
                     for stmt in ddl.split(';'):
@@ -3452,35 +3982,106 @@ def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, co
         if copy_data:
             try:
                 _progress_q.put(("drag_progress", {"percent": 15, "status": "正在统计行数..."}))
-                with src_engine.connect() as sconn:
-                    total_rows = sconn.execute(text(f"SELECT COUNT(*) FROM {src_tbl}")).scalar()
+                # ★ 大表 COUNT(*) 可能很慢，心跳线程检测取消并 kill 数据库会话
+                _count_done = threading.Event()
+                def _hb_count():
+                    while not _count_done.is_set():
+                        if _query_cancel.is_set():
+                            _kill_db_query()
+                        _progress_q.put(("drag_progress", {"percent": 15, "status": "正在统计行数...（大表请耐心等待）"}))
+                        threading.Event().wait(5)
+                _hb_thread = threading.Thread(target=_hb_count, daemon=True)
+                _hb_thread.start()
+                try:
+                    with src_engine.connect() as sconn:
+                        # ★ 记录源库连接 ID，用于 cancel 时 KILL COUNT(*) 查询
+                        _query_conn_id = _get_backend_pid(sconn, src_db_type)
+                        _query_src_data = src_data
+                        total_rows = sconn.execute(text(f"SELECT COUNT(*) FROM {src_tbl}")).scalar()
+                except Exception:
+                    if _query_cancel.is_set():
+                        _progress_q.put(("drag_progress", {"percent": 100, "status": "已取消"}))
+                        return {"ok": False, "msg": "操作已取消", "cancelled": True}
+                    raise
+                finally:
+                    _query_conn_id = None
+                    _query_src_data = None
+                    _count_done.set()
+                    _hb_thread.join(timeout=1)
                 _progress_q.put(("drag_progress", {"percent": 20, "status": f"共 {total_rows:,} 行，开始复制..."}))
 
-                with src_engine.connect() as sconn:
-                    result = sconn.execute(text(f"SELECT * FROM {src_tbl}"))
-                    columns = list(result.keys())
-                    batch = []
-                    batch_size = 5000
-                    total = 0
-                    with dst_engine.begin() as dconn:
-                        for row in result:
-                            batch.append(dict(zip(columns, row)))
-                            if len(batch) >= batch_size:
+                # ★ 每 10000 行更新一次进度，心跳线程也带实际行数（不裸显示"复制中"）
+                # ★ 使用 stream_results + yield_per 避免 SQLAlchemy 一次缓冲全部行（大表可达数 GB）
+                _copy_done = threading.Event()
+                _last_pct = [20]
+                _last_total = [0]
+                _last_sent = [time.time()]
+                _total_rows = total_rows
+                def _hb_copy():
+                    while not _copy_done.is_set():
+                        threading.Event().wait(3)
+                        if not _copy_done.is_set() and time.time() - _last_sent[0] > 2.5:
+                            _progress_q.put(("drag_progress", {"percent": _last_pct[0], "status": f"已复制 {_last_total[0]:,} / {_total_rows:,} 行..."}))
+                _hb_copy_thread = threading.Thread(target=_hb_copy, daemon=True)
+                _hb_copy_thread.start()
+                try:
+                    with src_engine.connect() as sconn:
+                        # ★ 记录新连接 PID（与 COUNT(*) 是不同的连接），用于 cancel 时 KILL SELECT * 查询
+                        _query_conn_id = _get_backend_pid(sconn, src_db_type)
+                        _query_src_data = src_data
+                        # stream_results + yield_per：只从服务器逐批取 2000 行，不全量缓冲
+                        result = sconn.execution_options(
+                            stream_results=True, yield_per=2000
+                        ).execute(text(f"SELECT * FROM {src_tbl}"))
+                        columns = list(result.keys())
+                        cols_str = tuple(columns)
+                        batch = []
+                        batch_size = 5000
+                        total = 0
+                        with dst_engine.begin() as dconn:
+                            for row in result:
+                                row_dict = dict(zip(cols_str, row))
+                                batch.append(row_dict)
+                                if len(batch) >= batch_size:
+                                    _batch_insert(dconn, dst_tbl, columns, batch)
+                                    total += len(batch)
+                                    pct = 20 + int((total / max(total_rows, 1)) * 75)
+                                    _last_pct[0] = min(pct, 95)
+                                    _last_total[0] = total
+                                    _last_sent[0] = time.time()
+                                    _progress_q.put(("drag_progress", {"percent": _last_pct[0], "status": f"已复制 {total:,} / {total_rows:,} 行"}))
+                                    # ★ 主动释放旧 batch 内存，避免 GC 惰性导致积压
+                                    del batch
+                                    gc.collect()
+                                    batch = []
+                                if _query_cancel.is_set():
+                                    _kill_db_query()  # ★ 杀掉数据库中的 SELECT * 查询
+                                    data_ok = False
+                                    break
+                            if batch and not _query_cancel.is_set():
                                 _batch_insert(dconn, dst_tbl, columns, batch)
                                 total += len(batch)
-                                pct = 20 + int((total / max(total_rows, 1)) * 75)
-                                _progress_q.put(("drag_progress", {"percent": min(pct, 95), "status": f"已复制 {total:,} / {total_rows:,} 行"}))
-                                batch = []
-                            if _query_cancel.is_set():
-                                data_ok = False
-                                break
-                        if batch and not _query_cancel.is_set():
-                            _batch_insert(dconn, dst_tbl, columns, batch)
-                            total += len(batch)
-                            _progress_q.put(("drag_progress", {"percent": 98, "status": f"已复制 {total:,} / {total_rows:,} 行"}))
+                                _last_total[0] = total
+                                _last_sent[0] = time.time()
+                                _progress_q.put(("drag_progress", {"percent": 98, "status": f"已复制 {total:,} / {total_rows:,} 行"}))
+                                del batch
+                                gc.collect()
+                except Exception:
+                    if _query_cancel.is_set():
+                        data_ok = False  # 已取消，数据库会话已被 kill
+                    else:
+                        raise
+                finally:
+                    _query_conn_id = None
+                    _query_src_data = None
+                    _copy_done.set()
+                    _hb_copy_thread.join(timeout=1)
                 _progress_q.put(("drag_progress", {"percent": 100, "status": "复制完成！"}))
             except Exception as e:
                 data_ok = False
+                if _query_cancel.is_set():
+                    _progress_q.put(("drag_progress", {"percent": 100, "status": "已取消"}))
+                    return {"ok": False, "msg": "操作已取消", "cancelled": True}
                 _progress_q.put(("drag_progress", {"percent": 100, "status": f"错误: {e}"}))
                 # 表结构已创建，数据复制失败
                 return {"ok": True, "msg": f"表结构已创建，但数据复制失败: {e}", "partial": True}
@@ -4933,49 +5534,112 @@ def get_database_info(conn_data, database):
 
 
 # ==================== 清理函数 ====================
-def _get_descendant_pids(pid, _depth=0):
-    """递归获取 pid 的所有后代进程 ID 列表（从浅到深）"""
+
+# 启动时记录已存在的浏览器进程 PIDs，退出时只杀新增的（防止误杀用户其他浏览器窗口）
+_known_browser_pids_at_startup = set()
+
+def _record_existing_browser_pids():
+    """程序启动时记录当前所有浏览器进程 PID"""
     import subprocess
-    result = []
-    if _depth > 10:  # 防止无限递归
-        return result
+    browser_names = {'chrome.exe', 'msedge.exe', 'chromium.exe', 'firefox.exe',
+                     'brave.exe', 'opera.exe', 'iexplore.exe'}
     try:
         r = subprocess.run(
-            ['wmic', 'process', 'where', f'ParentProcessId={pid}', 'get', 'ProcessId'],
+            ['tasklist', '/FO', 'CSV', '/NH'],
             capture_output=True, text=True, timeout=5,
             creationflags=0x08000000
         )
         for line in r.stdout.splitlines():
             line = line.strip()
-            if line.isdigit():
-                cp = int(line)
-                result.append(cp)
-                result.extend(_get_descendant_pids(cp, _depth + 1))
+            if not line:
+                continue
+            try:
+                fields = line.replace('"', '').split(',')
+                if len(fields) >= 2:
+                    pname = fields[0].strip().lower()
+                    pid_str = fields[1].strip()
+                    if pname in browser_names:
+                        _known_browser_pids_at_startup.add(int(pid_str))
+            except (ValueError, IndexError):
+                continue
+    except Exception:
+        pass
+
+
+def _get_descendant_pids(pid):
+    """使用 PowerShell 获取 pid 的所有后代进程 ID 列表（递归）
+    因为 tasklist 默认不输出 ParentPID，必须用 PowerShell/WMI 才能正确获取父子关系
+    """
+    import subprocess
+    result = []
+    try:
+        # PowerShell 递归查询所有后代进程
+        ps_cmd = (
+            f'Get-CimInstance -ClassName Win32_Process '
+            f'| Where-Object {{$_.ParentProcessId -eq {pid}}} '
+            f'| Select-Object -ExpandProperty ProcessId'
+        )
+        r = subprocess.run(
+            ['powershell', '-NoProfile', '-Command', ps_cmd],
+            capture_output=True, text=True, timeout=8,
+            creationflags=0x08000000
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.strip().splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    child_pid = int(line)
+                    result.append(child_pid)
+                    # 递归获取孙子进程
+                    result.extend(_get_descendant_pids(child_pid))
     except Exception:
         pass
     return result
 
 
-def _force_cleanup_and_exit():
-    """关闭窗口后彻底清理所有子进程，防止 Chrome/Edge/gevent 后台残留"""
-    pid = os.getpid()
-
-    # ① 停止 gevent hub（终止可能还在运行的 greenlet/协程）
+def _kill_new_browser_processes():
+    """杀当前系统中新增的浏览器进程（相比启动时快照）"""
+    import subprocess
+    browser_names = {'chrome.exe', 'msedge.exe', 'chromium.exe', 'firefox.exe',
+                     'brave.exe', 'opera.exe', 'iexplore.exe'}
     try:
-        import gevent.hub
-        hub = gevent.hub.get_hub()
-        if hub is not None:
-            hub.destroy()
+        r = subprocess.run(
+            ['tasklist', '/FO', 'CSV', '/NH'],
+            capture_output=True, text=True, timeout=5,
+            creationflags=0x08000000
+        )
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                fields = line.replace('"', '').split(',')
+                if len(fields) >= 2:
+                    pname = fields[0].strip().lower()
+                    pid_str = fields[1].strip()
+                    cpid = int(pid_str)
+                    if pname in browser_names and cpid not in _known_browser_pids_at_startup:
+                        subprocess.run(
+                            ['taskkill', '/F', '/T', '/PID', str(cpid)],
+                            capture_output=True, timeout=3,
+                            creationflags=0x08000000
+                        )
+            except (ValueError, IndexError):
+                continue
     except Exception:
         pass
 
-    # ② 杀掉 Eel 启动的浏览器进程树（Chrome/Edge 多进程模式下会残留 GPU/网络等子进程）
+
+def _force_cleanup_and_exit():
+    """关闭窗口后彻底清理所有子进程，防止 Chrome/Edge 后台残留"""
+    pid = os.getpid()
+    import subprocess
+
+    # ① Windows 清理
     if sys.platform == 'win32':
-        import subprocess
+        # 1a: 按 PID 树递归杀子进程（PowerShell 获取正确父子关系）
         try:
-            # 递归查找所有后代进程（解决 Chrome/Edge 多层进程树问题）
             all_children = _get_descendant_pids(pid)
-            # 从最深层往浅层杀，防止父进程被杀后子进程变为孤儿
             for cp in reversed(all_children):
                 try:
                     subprocess.run(
@@ -4987,8 +5651,24 @@ def _force_cleanup_and_exit():
                     pass
         except Exception:
             pass
+
+        # 1b: 按名称杀启动后新增的浏览器进程（兜底：PID 树可能因 PyInstaller 而断裂）
+        _kill_new_browser_processes()
+
+        # 1c: taskkill /F /T 杀当前进程整棵树
+        try:
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(pid)],
+                capture_output=True, timeout=3,
+                creationflags=0x08000000
+            )
+        except Exception:
+            pass
+
+        # 1d: ★ 延迟自杀脚本 —— 即使上面的 taskkill 没生效，
+        #     这个脚本也会在退出后 3 秒再次强制杀进程树
+        _launch_delayed_killer(pid)
     else:
-        # Unix: kill 进程组
         try:
             os.killpg(os.getpgid(pid), 9)
         except Exception:
@@ -4997,13 +5677,47 @@ def _force_cleanup_and_exit():
             except Exception:
                 pass
 
-    # ③ 最终兜底：强制退出（不执行 atexit / finally，直接终止 Python 进程 + bootloader）
+    # ② Win32 API 强制终止当前进程
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            ctypes.windll.kernel32.TerminateProcess(
+                ctypes.windll.kernel32.GetCurrentProcess(), 0
+            )
+        except Exception:
+            pass
+
+    # ③ 最后手段：os._exit
     os._exit(0)
+
+
+def _launch_delayed_killer(pid):
+    """启动一个独立的延迟杀进程脚本（异步，不等待）"""
+    if sys.platform != 'win32':
+        return
+    import tempfile
+    try:
+        bat_content = f'''@echo off
+ping 127.0.0.1 -n 3 >nul
+taskkill /F /T /PID {pid} >nul 2>&1
+del "%~f0" >nul 2>&1
+'''
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.bat', prefix='mqdb_kill_', delete=False)
+        tmp.write(bat_content)
+        tmp.close()
+        import subprocess
+        subprocess.Popen(
+            ['cmd.exe', '/C', tmp.name],
+            creationflags=0x08000000 | 0x00000008,  # CREATE_NO_WINDOW | DETACHED_PROCESS
+            close_fds=True
+        )
+    except Exception:
+        pass
 
 
 # ==================== 启动 ====================
 if __name__ == "__main__":
-    # ★ PyInstaller onefile + gevent 在 Windows 上必须调用
+    # ★ PyInstaller onefile 在 Windows 上必须调用
     if sys.platform == 'win32' and getattr(sys, 'frozen', False):
         import multiprocessing
         multiprocessing.freeze_support()
@@ -5025,6 +5739,9 @@ if __name__ == "__main__":
     # 导入 DataGrip 导入模块（注册 eel 暴露函数）
     import modules.datagrip_import
     eel.init(web_dir)
+    # ★ 启动时记录已存在的浏览器进程，退出时只杀新增的，防止误杀用户其他浏览器
+    if sys.platform == 'win32':
+        _record_existing_browser_pids()
     try:
         eel.start("index.html", size=(1280, 860), port=0, cmdline_args=[])
     finally:

@@ -7,8 +7,6 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 eel_subs = collect_submodules('eel')
 sa_subs = collect_submodules('sqlalchemy')
 py_subs = collect_submodules('pymysql')
-gv_subs = collect_submodules('gevent')
-gw_subs = collect_submodules('geventwebsocket')
 bt_subs = collect_submodules('bottle')
 pg_subs = collect_submodules('psycopg2')
 or_subs = collect_submodules('oracledb')
@@ -20,18 +18,16 @@ cr_subs = collect_submodules('cryptography')  # oracle thin 模式依赖
 eel_datas = collect_data_files('eel')
 sa_datas = collect_data_files('sqlalchemy')
 py_datas = collect_data_files('pymysql')
-gv_datas = collect_data_files('gevent')
-gw_datas = collect_data_files('geventwebsocket')
 bt_datas = collect_data_files('bottle')
 pg_datas = collect_data_files('psycopg2')
 or_datas = collect_data_files('oracledb')
 ms_datas = collect_data_files('pymssql')
 redis_datas = collect_data_files('redis')
 
-all_hidden = eel_subs + sa_subs + py_subs + gv_subs + gw_subs + bt_subs + pg_subs + or_subs + ms_subs + redis_subs + cr_subs
+all_hidden = eel_subs + sa_subs + py_subs + bt_subs + pg_subs + or_subs + ms_subs + redis_subs + cr_subs
 all_extra_datas = [
     ('web', 'web'),
-] + eel_datas + sa_datas + py_datas + gv_datas + gw_datas + bt_datas + pg_datas + or_datas + ms_datas + redis_datas
+] + eel_datas + sa_datas + py_datas + bt_datas + pg_datas + or_datas + ms_datas + redis_datas
 
 if Path('db_profiles.json').exists():
     all_extra_datas.append(('db_profiles.json', '.'))
@@ -71,7 +67,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='DB高速传输工具',
+    name='mqdb',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

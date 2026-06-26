@@ -306,31 +306,9 @@ function openQueryInTab(qid) {
     console.log('[openQueryInTab] 尝试打开查询, qid=', qid);
     eel.tree_get_query(qid)(function(q){
         if(!q) {
-            // 后端未找到 → 尝试从内存 treeData.saved_queries 查找
-            var memQ = (treeData && treeData.saved_queries)
-                ? treeData.saved_queries.find(function(x){return x.id === qid;})
-                : null;
-            if (memQ) {
-                console.warn('[openQueryInTab] 后端未找到查询('+qid+')，使用内存缓存数据');
-                q = memQ;
-            } else {
-                console.error('[openQueryInTab] 查询未找到, qid=', qid, '；尝试刷新树数据...');
-                // 尝试刷新树数据后重试
-                eel.tree_load()(function(data){
-                    if (data) { treeData = data; }
-                    var retryQ = (treeData && treeData.saved_queries)
-                        ? treeData.saved_queries.find(function(x){return x.id === qid;})
-                        : null;
-                    if (retryQ) {
-                        console.log('[openQueryInTab] 刷新后找到查询，重新打开');
-                        _openQueryInTabImpl(retryQ);
-                    } else {
-                        console.error('[openQueryInTab] 刷新后仍未找到查询, qid=', qid);
-                        showErrorDialog('打开失败', '查询未找到（ID: '+escapeHtml(String(qid))+'），可能已被删除或配置文件损坏。<br><br>请尝试：<br>1. 右键树节点 → 刷新全部<br>2. 检查 navicat_tree.json 文件是否正常');
-                    }
-                });
-                return;
-            }
+            console.error('[openQueryInTab] 查询未找到, qid=', qid);
+            showErrorDialog('打开失败', '查询未找到（ID: '+escapeHtml(String(qid))+'），可能已被删除或配置文件损坏。');
+            return;
         }
         _openQueryInTabImpl(q);
     });
@@ -345,10 +323,24 @@ function _openQueryInTabImpl(q) {
         activeConnId = cid;
         activeConnData = treeData.connections[cid];
     }
+    // ★ 构建连接+数据库标签（toolbar 右侧展示）
+    var connLabel = '';
+    var connData = (cid && treeData && treeData.connections) ? treeData.connections[cid] : null;
+    if (connData) {
+        var typeIcons = {'mysql':'🐬','ob-mysql':'🌊','postgresql':'🐘','oracle':'🔴','mssql':'🟢','redis':'📦'};
+        var typeIcon = typeIcons[connData.db_type] || '🗄️';
+        var connName = connData.name || connData.host || '未知连接';
+        var dbName = qdb || '未选择数据库';
+        connLabel = '<span style="margin-left:auto;font-size:11px;color:#aaa;white-space:nowrap;">' +
+            typeIcon + ' ' + escapeHtml(connName) +
+            ' <span style="color:#666;">/</span> ' +
+            '<span style="color:#4fc3f7;">' + escapeHtml(dbName) + '</span></span>';
+    }
     var content =
         '<div class="query-layout" id="ql_'+qid+'">' +
-        '<div class="query-toolbar"><button id="btn_exe_'+qid+'" class="btn btn-green" style="font-size:11px;padding:4px 14px;" onclick="execQueryTab(\''+qid+'\')">▶ 执行</button>' +
-        '<span style="font-size:11px;color:#888;">Ctrl+Enter 执行 | Ctrl+S 保存</span></div>' +
+        '<div class="query-toolbar" style="display:flex;align-items:center;"><button id="btn_exe_'+qid+'" class="btn btn-green" style="font-size:11px;padding:4px 14px;" onclick="execQueryTab(\''+qid+'\')">▶ 执行</button>' +
+        '<span style="font-size:11px;color:#888;">Ctrl+Enter 执行 | Ctrl+S 保存</span>' +
+        connLabel + '</div>' +
         '<div class="query-editor-wrap"><textarea id="sq_'+qid+'" class="query-editor">'+escapeHtml(q.sql||'')+'</textarea></div>' +
         '<div class="query-splitter" id="qs_'+qid+'"></div>' +
         '<div class="query-results-wrap" id="qr_'+qid+'"></div>' +
@@ -385,19 +377,13 @@ function saveQueryTab(qid, cid, db, qname) {
         if (ta) {
             ta.style.boxShadow = 'inset 0 0 0 2px #2ecc71';
             ta.style.transition = 'box-shadow 0.3s';
-            setTimeout(function(){ ta.style.boxShadow = ''; }, 1200);
+            var clearFlash = function(){ ta.style.boxShadow = ''; };
+            setTimeout(clearFlash, 1200);
+            // ★ 点击其他地方（blur）时立即清除高亮，不再等 1200ms
+            ta.addEventListener('blur', function _onceBlur(){ ta.removeEventListener('blur', _onceBlur); clearFlash(); });
         }
-        // ★ 同步更新内存中的 treeData.saved_queries，防止后端文件异常时丢失数据
+        // ★ 刷新树中查询列表
         if (r && r.ok) {
-            var queries = treeData.saved_queries || [];
-            var existing = queries.find(function(x){return x.id === qid;});
-            if (existing) {
-                existing.sql = sql;
-                if (qname) existing.name = qname;
-            } else {
-                queries.push({id: qid, name: qname || '', sql: sql, conn_id: cid, db: db});
-            }
-            // 刷新树中查询列表
             if (cid && db && typeof refreshQueriesTree === 'function') {
                 refreshQueriesTree(cid, db, '');
             }

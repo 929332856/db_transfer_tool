@@ -141,7 +141,10 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
 .cat-row:hover { background: #2a3a4a; }
 .cat-refresh { margin-left: auto; font-size: 10px; opacity: 0; padding-right: 8px; transition: opacity 0.15s; }
 .cat-row:hover .cat-refresh { opacity: 0.5; }
+.tree-subcat:hover .cat-refresh { opacity: 0.5; }
 .cat-refresh:hover { opacity: 1 !important; }
+/* 表结构子项悬停 */
+.tree-subcat .my-conn-row-subitem:hover { background: #2a3a4a; }
 .tree-highlight { background: #2a4a6a !important; }
 
 /* 拖拽 */
@@ -351,6 +354,7 @@ tbody td.truncated { color: #5dade2; }
 }
 
 /* 结果多 Tab */
+.result-tabs { display: flex; flex-direction: column; height: 100%; }
 .result-tab-bar { display: flex; gap: 2px; padding: 0 4px; border-bottom: 1px solid #444; overflow-x: auto; flex-shrink: 0; }
 .result-tab-btn {
     display: inline-flex; align-items: center; gap: 4px;
@@ -374,7 +378,7 @@ tbody td.truncated { color: #5dade2; }
 .result-tab-btn.active { color: #5dade2; border-bottom-color: #5dade2; background: #1e2a3a; }
 .result-tab-content { flex: 1; overflow: auto; min-height: 0; }
 .result-tab-pane { display: none; }
-.result-tab-pane.active { display: block; overflow: auto; }
+.result-tab-pane.active { display: flex; flex-direction: column; overflow: hidden; flex: 1; min-height: 0; }
 
 /* ========== DDL 面板 ========== */
 .ddl-toolbar { padding-bottom: 4px; flex-shrink: 0; }

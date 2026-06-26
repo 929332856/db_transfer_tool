@@ -127,6 +127,8 @@
                 <div class="tbl-row">
                     <label>表名:</label>
                     <input type="text" id="table_name" placeholder="留空则导入整个数据库（多表用逗号分隔，如: users,orders）">
+                    <label style="margin-left:20px;">每批行数:</label>
+                    <input type="number" id="sync_batch_size" placeholder="10000" value="10000" min="1000" max="100000" style="width:100px;margin-right:4px;" title="每批传输行数，越小越省内存">
                 </div>
                 <div class="btn-row">
                     <button class="btn btn-primary btn-lg" id="btn_start" onclick="startTransfer()">🚀 开始传输</button>

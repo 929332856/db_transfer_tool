@@ -5,17 +5,33 @@ function tableCtx(e, tn, db, schema, cid) {
     var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
     showCtxMenu(e.clientX, e.clientY, [
         {label:'📄 打开表',action:function(){addTableDataTab(tn,db,sch,cid);}},
+        {label:'📄 查看DDL',action:function(){showTableDDLDialog(tn,db,sch,cid,conn);}},
         {label:'🔧 设计表',action:function(){addTableDDLTab(tn,db,sch,cid);}},
         {label:'✏️ 重命名',action:function(){showInputDialog('重命名表','新表名：',function(newName){if(!newName||!newName.trim()||newName.trim()===tn)return;eel.table_rename(conn,db,tn,newName.trim(),sch)(function(r){if(r&&r.ok){showOkDialog('成功',r.msg);setTimeout(function(){refreshTableFolder(cid,db,sch);},500);}else showErrorDialog('失败',r?r.msg:'');});},tn);}},
         '---',
         {label:'📤 导出向导',action:function(){showExportWizard(cid,db,sch,tn);}},
-        {label:'💾 备份表',action:function(){showConfirmDialog('备份表','将以日期 ['+(new Date().toISOString().slice(5,7)+new Date().toISOString().slice(8,10)+'_'+new Date().getHours())+'] 为名创建 ['+tn+'] 的副本？',function(){eel.table_backup(conn,db,tn,sch)(function(r){if(r&&r.ok){showOkDialog('成功',r.msg);setTimeout(function(){refreshTableFolder(cid,db,sch);},500);}else showErrorDialog('失败',r?r.msg:'');});});}},
+        {label:'💾 备份表',action:function(){var backupName=tn+'_'+(new Date().toISOString().slice(5,7)+new Date().toISOString().slice(8,10)+'_'+new Date().getHours());showConfirmDialog('备份表','将创建备份表 <b>['+backupName+']</b>？',function(){showModal('💾','正在备份表 <b>'+escapeHtml(tn)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在执行 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">CREATE TABLE ... LIKE ...</code><br>和 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">INSERT INTO ... SELECT ...</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');eel.table_backup(conn,db,tn,sch)(function(r){if(r&&r.ok){document.getElementById('modal_title').innerHTML='✅ 备份完成';document.getElementById('modal_title').style.color='#27ae60';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">✅</div><div style="color:#ccc;font-size:14px;">'+escapeHtml(r.msg)+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';setTimeout(function(){refreshTableFolder(cid,db,sch);},500);}else{document.getElementById('modal_title').innerHTML='❌ 备份失败';document.getElementById('modal_title').style.color='#e74c3c';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">❌</div><div style="color:#e74c3c;">'+(r?escapeHtml(r.msg):'未知错误')+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';}});});}},
         '---',
         {label:'🗑 清空表',action:function(){showConfirmDialog('确认','清空表 ['+tn+']？',function(){eel.table_clear(conn,db,tn,sch)(function(r){showOkDialog(r&&r.ok?'成功':'失败',r?r.msg:'');});});}},
         {label:'✂️ 截断表',action:function(){showConfirmDialog('确认','截断表 ['+tn+']？',function(){eel.table_truncate(conn,db,tn,sch)(function(r){showOkDialog(r&&r.ok?'成功':'失败',r?r.msg:'');});});}},
         '---',
         {label:'❌ 删除表',action:function(){showConfirmDialog('危险','删除表 ['+tn+']？不可恢复！',function(){eel.table_delete(conn,db,tn,sch)(function(r){if(r&&r.ok){showOkDialog('成功',r.msg);setTimeout(function(){refreshTableFolder(cid,db,sch);},500);}else showErrorDialog('失败',r?r.msg:'');});});}}
     ]);
+}
+
+// ★ 表头右键菜单：复制字段名 / 类型 / 注释
+function colHeaderCtx(e, colName, colType, colComment) {
+    e.preventDefault(); e.stopPropagation();
+    var items = [
+        {label:'📋 复制字段名：' + colName, action:function(){ copyToClipboard(colName); }}
+    ];
+    if (colType) {
+        items.push({label:'📋 复制字段类型：' + colType, action:function(){ copyToClipboard(colType); }});
+    }
+    if (colComment) {
+        items.push({label:'📋 复制字段注释：' + colComment, action:function(){ copyToClipboard(colComment); }});
+    }
+    showCtxMenu(e.clientX, e.clientY, items);
 }
 
 // ==================== WHERE 条件评估器 ====================
@@ -86,7 +102,7 @@ function _unquote(s) { s = s.trim(); if ((s[0]==="'"&&s[s.length-1]==="'")||(s[0
 function buildWhereBar(tid) {
     return '<div class="where-bar">' +
         '<span class="where-label">WHERE</span>' +
-        '<input class="where-input" id="' + tid + '_where" placeholder="例: age > 18 AND name LIKE \'%张%\'" onkeydown="if(event.key===\'Enter\')applyWhere(\'' + tid + '\')">' +
+        '<input class="where-input" id="' + tid + '_where" placeholder="例: age > 18 AND name LIKE \'%张%\'（全表筛选）" onkeydown="if(event.key===\'Enter\')applyWhere(\'' + tid + '\')">' +
         '<button class="btn btn-sm" style="font-size:10px;padding:3px 10px;" onclick="applyWhere(\'' + tid + '\')">执行</button>' +
         '<button class="btn btn-sm" style="font-size:10px;padding:3px 8px;" onclick="clearWhere(\'' + tid + '\')">✕ 清除</button>' +
         '<span class="where-count" id="' + tid + '_count"></span>' +
@@ -106,14 +122,17 @@ function getWhereState(tid) { return _whereStates[tid]; }
 function applyWhere(tid) {
     var st = _whereStates[tid]; if (!st) return;
     var inp = document.getElementById(tid + '_where');
-    var whereExpr = inp ? inp.value : '';
+    var whereExpr = inp ? inp.value.trim() : '';
     st.whereExpr = whereExpr;
-    // 清除列筛选缓存，让 getPageRows 走 WHERE 路径
+    // ★ 写入 window 全局，供 _serverReload 读取
+    window['_activeWhereSql_'+tid] = whereExpr;
+    // 清除列筛选缓存
     var clearColFn = window['_clearColFilters_'+tid];
     if (clearColFn) clearColFn();
     // 重置分页
     var resetPageFn = window['_resetPage_'+tid];
     if (resetPageFn) resetPageFn();
+    // ★ 服务端筛选
     st.onRender();
 }
 
@@ -122,11 +141,14 @@ function clearWhere(tid) {
     if (inp) inp.value = '';
     var st = _whereStates[tid]; if (!st) return;
     st.whereExpr = '';
+    // ★ 清除 WHERE 条件
+    window['_activeWhereSql_'+tid] = '';
     // 清除列筛选缓存
     var clearColFn = window['_clearColFilters_'+tid];
     if (clearColFn) clearColFn();
     var resetPageFn = window['_resetPage_'+tid];
     if (resetPageFn) resetPageFn();
+    // ★ 服务端重新加载（无筛选）
     st.onRender();
 }
 
@@ -152,11 +174,12 @@ function updateWhereCount(tid, filteredCount, totalCount) {
     var el = document.getElementById(tid + '_count');
     if (!el) return;
     var st = _whereStates[tid];
-    if (st && st.whereExpr) {
-        el.textContent = '筛选后：' + filteredCount + ' / ' + totalCount + ' 行';
+    var hasFilter = (st && st.whereExpr) || (window['_activeWhereSql_'+tid] || '') !== '';
+    if (hasFilter) {
+        el.textContent = '筛选后：' + filteredCount + '+ 行';
         el.style.color = '#f39c12';
     } else {
-        el.textContent = '共 ' + totalCount + ' 行';
+        el.textContent = '共 ' + totalCount + '+ 行';
         el.style.color = '#888';
     }
 }
@@ -343,6 +366,45 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         var _allLoaded = !_hasMore;
         // ★ 是否正在刷新中
         var _refreshing = false;
+        // ★ 当前生效的 SQL WHERE 条件（服务端筛选，空字符串表示无筛选）
+        var _activeWhereSql = '';
+        // ★ 初始化 window 全局（供 applyWhere/clearWhere 等全局函数读写）
+        window['_activeWhereSql_'+tid] = '';
+
+        // ★ 服务端重新加载数据（带当前 WHERE 条件）
+        function _serverReload() {
+            _pageLoading = true;
+            _activeWhereSql = window['_activeWhereSql_'+tid] || '';
+            var whereSql = _activeWhereSql;
+            if (_pageOffset !== 0 || _pageSize !== 50) { _pageOffset = 0; _pageSize = 50; }
+            var sortCol = sortRef.col >= 0 ? cols[sortRef.col] : '';
+            var sortDir = sortRef.dir === 1 ? 'asc' : 'desc';
+            var infoEl = document.getElementById(tid+'_pager_info');
+            if (infoEl) infoEl.textContent = '⏳ 查询中...';
+            var wrap = document.getElementById(tid);
+            if (wrap) { wrap.style.opacity = '0.6'; wrap.style.pointerEvents = 'none'; }
+            eel.table_preview_data_fast(conn, _connDb, _connTn, _connSch, sortCol, sortDir, whereSql)(function(r2){
+                _pageLoading = false;
+                if (wrap) { wrap.style.opacity = '1'; wrap.style.pointerEvents = ''; }
+                if (!r2 || !r2.ok) {
+                    if (infoEl) infoEl.textContent = (r2 && r2.msg) || '查询失败';
+                    return;
+                }
+                rows = r2.rows || [];
+                comments = r2.comments || {};
+                colTypes = r2.col_types || {};
+                _totalCount = r2.total_count || rows.length;
+                _hasMore = r2.has_more === true;
+                _allLoaded = !_hasMore;
+                _colFilteredPairs = null;
+                var st = _whereStates[tid];
+                if (st) { st.rows = rows; st.filteredCache = null; st.fcCount = null; }
+                updateFilterIcons();
+                render();
+                updatePagerInfo();
+            });
+        }
+        window['_serverReload_'+tid] = function() { _serverReload(); };
 
         function buildTh() {
             var h = '<tr><th class="row-sel-header" id="'+tid+'_sel_all" onclick="window[\'_toggleSelAll_'+tid+'\']()" title="全选/取消全选">#</th>';
@@ -361,7 +423,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 var typeLen = cType ? cType.length : 0;
                 var colMinWidth = typeLen > 25 ? (typeLen > 35 ? 220 : 180) : (typeLen > 12 ? 140 : 90);
                 // ★ 三行布局：字段名 / 字段类型 / 字段注释，排序+筛选图标在右侧居中
-                h+='<th class="sortable-th" data-ci="'+ci+'" data-orig="'+escapeAttr(c)+'" style="user-select:none;min-width:'+colMinWidth+'px;">';
+                h+='<th class="sortable-th" data-ci="'+ci+'" data-orig="'+escapeAttr(c)+'" style="user-select:none;min-width:'+colMinWidth+'px;" oncontextmenu="colHeaderCtx(event,\''+escapeAttr(c)+'\',\''+escapeAttr(cType||'')+'\',\''+escapeAttr(cmt||'')+'\');">';
                 h+='<div class="th-content">';
                 h+='<div class="th-line th-line-name">'+escapeHtml(c)+'</div>';
                 if (cType) h+='<div class="th-line th-line-type">'+escapeHtml(cType)+'</div>';
@@ -501,7 +563,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         // 列筛选后的中间结果（供 getPageRows 使用）
         var _colFilteredPairs = null; // null 表示无列筛选，使用 getFilteredRows
 
-        // 列筛选：根据每列的输入值过滤行（与WHERE独立，纯客户端筛选）
+        // 列筛选：构建 SQL WHERE 发送到服务端（全表筛选）
         function applyColFilters() {
             var hasFilter = false;
             for (var ci in _colFilters) {
@@ -509,29 +571,34 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             }
             if (!hasFilter) {
                 _colFilteredPairs = null;
+                window['_activeWhereSql_'+tid] = '';
                 _pageOffset = 0;
-                render();
+                _pageSize = 50;
+                updateFilterIcons();
+                _serverReload();
                 return;
             }
-            // 列筛选：基于当前 rows（可能已被排序），不依赖 WHERE
-            var pairs = [];
-            rows.forEach(function(row, i) {
-                var match = true;
-                for (var ci in _colFilters) {
-                    var ft = _colFilters[ci];
-                    if (!ft || ft.trim() === '') continue;
-                    var ciNum = parseInt(ci);
-                    var cellVal = row[ciNum];
-                    cellVal = cellVal === null || cellVal === undefined ? '' : String(cellVal);
-                    // ★ 精确筛选（完全匹配，忽略大小写）
-                    if (cellVal.trim().toLowerCase() !== ft.trim().toLowerCase()) { match = false; break; }
-                }
-                if (match) pairs.push({row: row, idx: i});
-            });
-            _colFilteredPairs = pairs;
+            // ★ 构建 SQL WHERE 条件（LIKE 模糊匹配）
+            var conditions = [];
+            for (var ci in _colFilters) {
+                var ft = _colFilters[ci];
+                if (!ft || ft.trim() === '') continue;
+                var colName = cols[parseInt(ci)];
+                var escapedVal = ft.trim().replace(/'/g, "\\'").replace(/\\/g, "\\\\");
+                conditions.push('`' + colName + '` LIKE \'%' + escapedVal + '%\'');
+            }
+            var whereSql = conditions.join(' AND ');
+            window['_activeWhereSql_'+tid] = whereSql;
+            // 清空 WHERE 栏输入（列筛选与 WHERE 互斥）
+            var whereInp = document.getElementById(tid + '_where');
+            if (whereInp) whereInp.value = '';
+            var st = _whereStates[tid];
+            if (st) st.whereExpr = '';
             _pageOffset = 0;
+            _pageSize = 50;
+            _colFilteredPairs = null;
             updateFilterIcons();
-            render();
+            _serverReload();
         }
 
         function updateFilterIcons() {
@@ -581,7 +648,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
 
             popup.innerHTML =
                 '<div style="font-size:11px;color:#888;margin-bottom:2px;">筛选: <b style="color:#5dade2;">' + escapeHtml(cols[ci]) + '</b></div>' +
-                '<input id="'+tid+'_popup_inp" value="' + escapeAttr(curVal) + '" placeholder="输入筛选关键词..." onkeydown="if(event.key===\'Enter\')window[\'_popupApply_'+tid+'\']()">' +
+                '<input id="'+tid+'_popup_inp" value="' + escapeAttr(curVal) + '" placeholder="输入关键词（模糊匹配）" style="width:100%;min-width:180px;" onkeydown="if(event.key===\'Enter\')window[\'_popupApply_'+tid+'\']()">' +
                 '<div class="popup-btns">' +
                     '<button onclick="window[\'_popupClear_'+tid+'\']()">清除</button>' +
                     '<button class="btn-apply" onclick="window[\'_popupApply_'+tid+'\']()">应用</button>' +
@@ -683,7 +750,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                             _editing = false;
                             updateSaveBtn();
                             sortColName = sortRef.col >= 0 ? cols[sortRef.col] : '';
-                            eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, sortColName, sortRef.dir === 1 ? 'asc' : 'desc')(function(r3){
+                            var whereSql4 = window['_activeWhereSql_'+tid] || '';
+                            eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, sortColName, sortRef.dir === 1 ? 'asc' : 'desc', whereSql4)(function(r3){
                                 if (r3 && r3.ok) {
                                     rows = r3.rows || [];
                                     var st6 = _whereStates[tid];
@@ -739,7 +807,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                             _selectedRows = {};
                             updateDeleteBtn();
                             sortColName = sortRef.col >= 0 ? cols[sortRef.col] : '';
-                            eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, sortColName, sortRef.dir === 1 ? 'asc' : 'desc')(function(r3){
+                            var whereSql5 = window['_activeWhereSql_'+tid] || '';
+                            eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, sortColName, sortRef.dir === 1 ? 'asc' : 'desc', whereSql5)(function(r3){
                                 if (r3 && r3.ok) {
                                     rows = r3.rows || [];
                                     var st7 = _whereStates[tid];
@@ -825,7 +894,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         }
         window['_toggleColFilter_' + tid] = toggleColFilter;
 
-        registerWhereState(tid, cols, rows, sortRef, render, colTypes);
+        registerWhereState(tid, cols, rows, sortRef, function(){_serverReload();}, colTypes);
         _tabIdToTid['data_'+tn] = tid;
 
         // ★ 暴露清除列筛选的函数，供 applyWhere 调用
@@ -848,36 +917,22 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         var _pageOffset = 0;  // 当前偏移
 
         function getPageRows() {
-            // 如果有列筛选，使用列筛选结果；否则使用 WHERE 筛选结果
-            var allFiltered, allIndices;
-            if (_colFilteredPairs) {
-                allFiltered = _colFilteredPairs.map(function(p){return p.row;});
-                allIndices = _colFilteredPairs.map(function(p){return p.idx;});
-            } else {
-                var f = getFilteredRows(tid);
-                allFiltered = f.filtered;
-                allIndices = f.indices;
-            }
-            var loadedTotal = allFiltered.length;
-            // ★ 有 WHERE 筛选时用实际筛选结果；无筛选且未全加载时 +1 保证下一页按钮可用
-            var st = _whereStates[tid];
-            var hasWhere = st && st.whereFn;
-            var displayTotal;
-            if (_allLoaded || hasWhere) {
-                displayTotal = loadedTotal;
-            } else {
-                // ★ 未全加载时 displayTotal = loadedTotal + 1，这样下一页按钮不会被 disabled
-                displayTotal = loadedTotal + 1;
-            }
-            if (_pageSize <= 0) {
+            // ★ 服务端筛选后，rows 即为当前已加载的筛选结果
+            var loadedTotal = rows.length;
+            // ★ 未全加载时 +1 保证下一页按钮可用（用 N+1 法的 has_more 判断）
+            var displayTotal = _allLoaded ? loadedTotal : (loadedTotal + 1);
+            if (_pageSize <= 0 || _pageSize >= 99999) {
                 // 全部
-                return { rows: allFiltered, indices: allIndices, total: displayTotal, offset: 0, pageSize: displayTotal };
+                var allIndices = rows.map(function(_,i){return i;});
+                return { rows: rows, indices: allIndices, total: displayTotal, offset: 0, pageSize: displayTotal };
             }
             var start = _pageOffset;
-            var end = Math.min(start + _pageSize, displayTotal);
+            var end = Math.min(start + _pageSize, loadedTotal);
+            var sliced = rows.slice(start, end);
+            var slicedIndices = sliced.map(function(_,i){return start + i;});
             return {
-                rows: allFiltered.slice(start, Math.min(end, loadedTotal)),
-                indices: allIndices.slice(start, Math.min(end, loadedTotal)),
+                rows: sliced,
+                indices: slicedIndices,
                 total: displayTotal,
                 offset: start,
                 pageSize: _pageSize
@@ -929,8 +984,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
 
             // ★ 检查目标页数据是否已加载：如果没加载完且目标偏移超出已加载范围
             var neededEnd = newOffset + _pageSize;
-            var loadedCount = (_colFilteredPairs ? _colFilteredPairs.length : (getFilteredRows(tid).filtered || []).length);
-            if (neededEnd > loadedCount && !_allLoaded) {
+            if (neededEnd > rows.length && !_allLoaded) {
                 _pageOffset = newOffset;
                 _fetchPageFromServer(newOffset, _pageSize);
                 return;
@@ -948,7 +1002,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             if (infoEl) infoEl.textContent = '⏳ 加载第 ' + (Math.floor(offset/Math.max(limit,1))+1) + ' 页...';
             var orderCol = sortRef.col >= 0 ? cols[sortRef.col] : '';
             var orderDir = sortRef.dir === 1 ? 'asc' : 'desc';
-            eel.table_load_page(conn, _connDb, _connTn, _connSch, offset, limit, orderCol, orderDir)(function(rp){
+            var whereSql = window['_activeWhereSql_'+tid] || '';
+            eel.table_load_page(conn, _connDb, _connTn, _connSch, offset, limit, orderCol, orderDir, whereSql)(function(rp){
                 _pageLoading = false;
                 if (wrap) { wrap.style.opacity = '1'; wrap.style.pointerEvents = ''; }
                 if (!rp || !rp.ok) { if (infoEl) infoEl.textContent = '加载失败'; return; }
@@ -1033,7 +1088,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 if (ov) ov.remove();
             }
 
-            eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, sortCol, sortDir)(function(r3){
+            var whereSql3 = window['_activeWhereSql_'+tid] || '';
+            eel.table_preview_data_fast(conn, db||activeDatabase, tn, sch, sortCol, sortDir, whereSql3)(function(r3){
                 _hideRefreshOverlay();
                 // ★ 用户已取消刷新，忽略此回调结果
                 if (!_refreshing) {
@@ -1155,8 +1211,9 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 // 构建排序参数
                 var orderCol = sortRef.col >= 0 ? cols[sortRef.col] : '';
                 var orderDir = sortRef.dir === 1 ? 'asc' : 'desc';
-                // ★ 服务端排序：快速取前50条（与刷新/保存后重载一致），只排必要行数
-                eel.table_preview_data_fast(conn, _connDb, _connTn, _connSch, orderCol, orderDir)(function(r2){
+                // ★ 服务端排序：快速取前50条（与刷新/保存后重载一致），只排必要行数，携带当前 WHERE 筛选
+                var whereSql2 = window['_activeWhereSql_'+tid] || '';
+                eel.table_preview_data_fast(conn, _connDb, _connTn, _connSch, orderCol, orderDir, whereSql2)(function(r2){
                     if (!r2 || !r2.ok || !r2.rows) {
                         if (infoEl) infoEl.textContent = '排序失败';
                         return;
@@ -1477,4 +1534,35 @@ function buildFieldRow(i, c, dataTypes) {
             '<button class="btn btn-sm" style="background:#e67e22;color:#fff;font-size:10px;padding:2px 5px;" onclick="designInsertField(' + (i + 1) + ')" title="下方插入">⬇</button> ' +
             '<button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:2px 5px;" onclick="designRemoveField(' + i + ')">✕</button>' +
         '</td></tr>';
+}
+
+// ==================== 查看DDL弹窗 ====================
+function showTableDDLDialog(tn, db, schema, cid, conn) {
+    var sch = schema || '';
+    var theDb = db;
+    var theCid = cid || activeConnId || '';
+    var theConn = conn || activeConnData;
+    document.getElementById('modal_icon').innerHTML = '📄';
+    document.getElementById('modal_title').textContent = 'DDL：' + tn;
+    document.getElementById('modal_title').style.color = '#4fc3f7';
+    document.getElementById('modal_msg').innerHTML = '<div style="color:#888;padding:20px;text-align:center;">⏳ 加载中...</div>';
+    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
+    document.getElementById('modal_overlay').classList.add('show');
+    eel.table_get_ddl(theConn, theDb, tn, sch)(function(r) {
+        var ddlHtml;
+        if (r && r.ok && r.ddl) {
+            ddlHtml = '<pre id="ddl_viewer_pre" style="background:#0d1117;border:1px solid #333;border-radius:6px;padding:12px;font-family:Consolas,monospace;font-size:11px;color:#e0e0e0;white-space:pre-wrap;word-break:break-all;max-height:450px;overflow-y:auto;margin:0 0 12px 0;text-align:left;">' + escapeHtml(r.ddl) + '</pre>';
+            document.getElementById('modal_btns').innerHTML =
+                '<button class="btn btn-gray" onclick="hideModal()">关闭</button>' +
+                '<button class="btn btn-blue" onclick="copyDDLContent()">📋 复制DDL</button>';
+        } else {
+            ddlHtml = '<div style="color:#e74c3c;">❌ ' + escapeHtml(r ? r.msg : '加载失败') + '</div>';
+            document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
+        }
+        document.getElementById('modal_msg').innerHTML = ddlHtml;
+    });
+}
+function copyDDLContent() {
+    var pre = document.getElementById('ddl_viewer_pre');
+    if (pre) { copyToClipboard(pre.textContent); showOkDialog('成功', 'DDL 已复制到剪贴板'); }
 }

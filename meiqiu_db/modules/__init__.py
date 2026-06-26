@@ -7,10 +7,6 @@ import threading
 import os
 import sys
 
-# ===== 必须在所有 import 之前：gevent 猴子补丁 =====
-from gevent import monkey
-monkey.patch_all(thread=False)
-
 # ==================== 配置路径 ====================
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
