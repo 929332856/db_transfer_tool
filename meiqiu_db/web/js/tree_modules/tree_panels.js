@@ -159,14 +159,8 @@ function expandConn(cid, pad) {
         }
         return;
     }
-    // 非 Redis 连接：添加前端超时保护
-    var dbTimeoutId = setTimeout(function() {
-        children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ 加载超时（15秒），请检查服务器连接是否正常</div>';
-        // ★ 超时时移除 open class，允许用户重试双击展开
-        children.classList.remove('open');
-    }, 15000);
-    eel.db_explore_get_databases(conn)(function (r) {
-        clearTimeout(dbTimeoutId);
+    // 非 Redis 连接：异步非阻塞加载数据库列表
+    _eelAutoAsync(eel.db_explore_get_databases(conn), function (r) {
         console.log('[expandConn] db_explore_get_databases callback:', JSON.stringify(r).substring(0, 200));
         if (!r || !r.ok) {
             children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'无响应')+'</div>';
@@ -176,16 +170,20 @@ function expandConn(cid, pad) {
         }
         var html = '';
         var dbs = r.databases || [];
-        // Oracle：直接平铺分类，省去 DB/SCHEMA 文件夹层级
+        // Oracle: 每个 Schema 作为独立文件夹展示（类似 Navicat / PL/SQL Developer）
         if (isOra) {
             window._oraSchemas = dbs;
             if (dbs.length > 0) {
                 activeDatabase = dbs[0];
-                html += renderOraCats(cid, dbs[0], pad+20);
-                // ★ Oracle 展开连接时自动展示首个 Schema 的数据库信息
-                if (typeof showDbInfo === 'function') {
-                    showDbInfo(cid, dbs[0]);
-                }
+                dbs.forEach(function(schema) {
+                    var schemaId = cid + '_ora_' + safeBtoa(schema);
+                    html += '<div class="tree-node ora-schema-node" data-cid="'+cid+'" data-schema="'+escapeAttr(schema)+'">' +
+                        '<div class="my-conn-row" style="padding-left:'+(pad+20)+'px" onclick="showOraSchemaInfo(\''+cid+'\',\''+escapeAttr(schema)+'\');highlightRow(this)" ondblclick="expandOraSchema(\''+cid+'\',\''+escapeAttr(schema)+'\',\''+schemaId+'\','+(pad+20)+')">' +
+                        '<span class="arrow" id="ar_'+schemaId+'" onclick="event.stopPropagation();toggleOraSchema(\''+cid+'\',\''+escapeAttr(schema)+'\',\''+schemaId+'\','+(pad+20)+')">▸</span>' +
+                        '<span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span>' +
+                        '<span class="my-conn-name">'+escapeHtml(schema)+'</span></div>' +
+                        '<div class="tree-children" id="'+schemaId+'"></div></div>';
+                });
             }
         } else {
             dbs.forEach(function (db) {
@@ -232,15 +230,47 @@ function renderOraCats(cid, db, pad) {
            catRow('procedures','⚙',cid,db,dbKey,p,'clickCat','','') +
            catRow('packages',  '📦',cid,db,dbKey,p,'clickCat','','') +
            catRow('triggers',  '⚡',cid,db,dbKey,p,'clickCat','','') +
-           catRow('queries',   '📝',cid,db,dbKey,p,'clickQueries','qLabelCtx','') +
-           oraUsersRow(cid, db, dbKey, p);
+           catRow('queries',   '📝',cid,db,dbKey,p,'clickQueries','qLabelCtx','');
 }
-function oraUsersRow(cid, db, dbKey, pad) {
-    var rowId = 'cat_users_' + dbKey;
-    return '<div class="my-conn-row tree-subcat cat-row" id="'+rowId+'" style="padding-left:'+pad+'px" onclick="clickOraUsers(\''+cid+'\',\''+escapeAttr(db)+'\');highlightCat(\''+rowId+'\')">' +
-        '<span class="arrow" id="ar_'+rowId+'" onclick="event.stopPropagation();expandOraUsers(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbKey+'\','+(pad+16)+')">▸</span>' +
-        '👤 用户</div><div class="tree-children" id="'+rowId+'"></div>';
+// ★ Oracle Schema 文件夹交互（点击 / 展开 / 折叠）
+function showOraSchemaInfo(cid, schema) {
+    var conn = treeData.connections[cid];
+    if (!conn) return;
+    activeConnId = cid; activeConnData = conn; activeDatabase = schema;
+    activeCatId = null;
+    if (typeof showDbInfo === 'function') { showDbInfo(cid, schema); }
 }
+window.showOraSchemaInfo = showOraSchemaInfo;
+
+function toggleOraSchema(cid, schema, schemaId, pad) {
+    var el = document.getElementById(schemaId);
+    if (!el) return;
+    if (el.classList.contains('open')) {
+        el.classList.remove('open');
+        var ar = document.getElementById('ar_' + schemaId); if (ar) ar.textContent = '▸';
+    } else {
+        el.classList.add('open');
+        var ar = document.getElementById('ar_' + schemaId); if (ar) ar.textContent = '▾';
+        if (!el.innerHTML.trim()) { el.innerHTML = renderOraCats(cid, schema, pad); }
+    }
+    var conn = treeData.connections[cid];
+    if (conn) { activeConnId = cid; activeConnData = conn; activeDatabase = schema; }
+}
+window.toggleOraSchema = toggleOraSchema;
+
+function expandOraSchema(cid, schema, schemaId, pad) {
+    var el = document.getElementById(schemaId);
+    if (!el) return;
+    var ar = document.getElementById('ar_' + schemaId);
+    el.classList.add('open');
+    if (ar) ar.textContent = '▾';
+    if (!el.innerHTML.trim()) { el.innerHTML = renderOraCats(cid, schema, pad); }
+    if (el.previousElementSibling) highlightRow(el.previousElementSibling);
+    var iconEl = el.previousElementSibling ? el.previousElementSibling.querySelector('.db-icon') : null;
+    if (iconEl) { iconEl.classList.remove('closed'); iconEl.classList.add('active'); }
+    showOraSchemaInfo(cid, schema);
+}
+window.expandOraSchema = expandOraSchema;
 
 function catRow(cat, icon, cid, db, dbKey, pad, clickFn, ctxFn, schema) {
     var sch = schema || '';

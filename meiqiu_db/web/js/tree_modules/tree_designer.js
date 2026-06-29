@@ -419,3 +419,5 @@ var _execCancelFlags = {};
 var _execStartTime = {};  // ★ 记录执行开始时间，防止按钮瞬间闪回
 var _execRunning = {};    // ★ 可靠的"正在执行"状态标记（按 qid），用于取消判定和 tab 切换后按钮复位
 var _execToken = {};      // ★ 执行令牌（按 qid），每次新执行递增，旧链检测令牌不匹配则放弃
+// ★ 快捷查询编辑器缓存（用于保留 textarea DOM 元素 + 撤销历史，解决 tab 切换后 Ctrl+Z 失效）
+var _textareaCache = {};

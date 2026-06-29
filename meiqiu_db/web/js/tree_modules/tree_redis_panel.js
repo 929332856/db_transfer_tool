@@ -376,14 +376,7 @@ function selectDatabase(cid, db, dbId, arrowId) {
         el._schemaLoading = true;
         var dbPad = parseInt(el.previousElementSibling ? (el.previousElementSibling.style.paddingLeft || '0') : '0') || 40;
         el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#999;font-size:11px;">⏳ 加载架构...</div>';
-        // ★ 添加超时保护（15秒）
-        var schTimeoutId = setTimeout(function() {
-            el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#e74c3c;font-size:11px;">❌ 加载超时（15秒），双击重试</div>';
-            el.classList.remove('open');
-            el._schemaLoading = false;
-        }, 15000);
-        eel.db_explore_get_schemas(activeConnData, db)(function (r) {
-            clearTimeout(schTimeoutId);
+        _eelAutoAsync(eel.db_explore_get_schemas(activeConnData, db), function (r) {
             if (!r || !r.ok) {
                 el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'加载失败')+'，双击重试</div>';
                 el.classList.remove('open');

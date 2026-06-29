@@ -8,13 +8,26 @@ from urllib.parse import quote_plus
 from sqlalchemy import text, create_engine
 from modules.conn_utils import _connect_args, _conn_url, _friendly_error, _DRIVER_HINTS
 
+# ★ 驱动白名单（用于诊断/错误提示，与 conn_utils 保持一致）
 _DRIVER_HINTS = {
-    'mysql':      'pymysql',
-    'ob-mysql':   'pymysql',
-    'postgresql': 'psycopg2-binary',
-    'oracle':     'oracledb',
-    'mssql':      'pymssql',
+    'mysql':      'mysqlclient',      # C 驱动（MySQLdb），比 pymysql 快 5-10 倍
+    'ob-mysql':   'mysqlclient',      # OceanBase MySQL 兼容模式
+    'postgresql': 'psycopg2-binary',  # C 驱动，已是 PG 最快选项
+    'oracle':     'oracledb',         # Thick 模式（Oracle Client C 驱动），比 Thin 快 2-5 倍
+    'mssql':      'pymssql',          # FreeTDS C 驱动
 }
+
+# ★ Oracle 驱动加速：尝试启用 Thick 模式（C 层 Oracle Client）
+try:
+    import oracledb as _oracledb_test
+    try:
+        _oracledb_test.init_oracle_client()
+        print("[oracledb] ✅ Thick 模式已启用")
+    except Exception:
+        print("[oracledb] ⚠️ Thick 模式不可用，使用 Thin 模式")
+        pass
+except ImportError:
+    pass
 
 def _friendly_error(err, db_type='mysql'):
     """将 ModuleNotFoundError 转为带安装提示的友好信息（同时显示原始错误用于诊断）"""
@@ -29,7 +42,7 @@ def debug_python_info():
     """诊断：返回 Python 环境信息"""
     import sys, importlib
     info = {"executable": sys.executable, "version": sys.version}
-    for mod in ["pymysql","psycopg2","oracledb","pymssql","sqlalchemy","eel"]:
+    for mod in ["MySQLdb","psycopg2","oracledb","pymssql","sqlalchemy","eel"]:
         try:
             m = importlib.import_module(mod)
             info[mod] = getattr(m, "__version__", "installed")
@@ -72,7 +85,7 @@ def _conn_url(conn_data):
     db = conn_data.get("db", "")
     db_type = conn_data.get("db_type", "mysql")
     if db_type in ('mysql', 'ob-mysql'):
-        base = f"mysql+pymysql://{u}:{p}@{h}:{port}"
+        base = f"mysql+mysqldb://{u}:{p}@{h}:{port}"
         return f"{base}/{db}?charset=utf8mb4" if db else f"{base}/?charset=utf8mb4"
     elif db_type == 'postgresql':
         base = f"postgresql+psycopg2://{u}:{p}@{h}:{port}"
@@ -90,7 +103,7 @@ def _conn_url(conn_data):
         base = f"mssql+pymssql://{u}:{p}@{h}:{port}"
         return f"{base}/{db}" if db else base
     # fallback mysql
-    base = f"mysql+pymysql://{u}:{p}@{h}:{port}"
+    base = f"mysql+mysqldb://{u}:{p}@{h}:{port}"
     return f"{base}/{db}?charset=utf8mb4" if db else f"{base}/?charset=utf8mb4"
 
 @eel.expose

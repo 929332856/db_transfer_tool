@@ -59,6 +59,8 @@ function setupObjectPanelDrop() {
 function renderObjectPanel() {
     // ★ 保存当前 tab 的编辑状态
     _saveCurrentTabState(activeObjTab);
+    // ★ 缓存当前 textarea DOM 元素（保留原生 undo 历史）
+    _cacheTextareas();
 
     // 增量更新 tab 栏和内容区域，避免全量 innerHTML 重建
     var panel = document.getElementById('object_panel');
@@ -95,6 +97,8 @@ function renderObjectPanel() {
     var at2 = objectTabs.find(function(t){return t.id===activeObjTab;});
     if (contentDiv && at2) {
         contentDiv.innerHTML = at2.content;
+        // ★ 恢复缓存的 textarea/results DOM 元素（保留原生 undo 历史）
+        _restoreTextareas(contentDiv);
         // ★ data/redis 类型 tab 切换后，重新调用 render 填充 tbody
         if (at2.type === 'data' || at2.type === 'redis') {
             var tid2 = _tabIdToTid[activeObjTab];
@@ -116,23 +120,32 @@ function renderObjectPanel() {
             var qm = activeObjTab.match(/^query_(.+)$/);
             if (qm) {
                 var qid3 = qm[1];
-                // ★ 切换到 query tab 时，强制清理可能卡死的 _execRunning 标志（防止切换后永远无法执行）
-                if (_execRunning[qid3]) {
+                // ★ 检查查询是否仍在后端运行（不随意清除 _execRunning）
+                var wasRunningRP = !!_execRunning[qid3];
+                var elapsedRP = Date.now() - (_execStartTime[qid3] || 0);
+                if (wasRunningRP && elapsedRP > 130000) {
                     _execRunning[qid3] = false;
-                }
-                if (_execCancelFlags[qid3]) {
                     _execCancelFlags[qid3] = false;
+                    wasRunningRP = false;
+                }
+                if (wasRunningRP && _execCancelFlags[qid3]) {
+                    wasRunningRP = false;
                 }
                 // ★ 重新绑定 textarea 事件（使用 setTimeout 确保 DOM 完全构建）
-                (function(qidX) {
+                (function(qidX, isRunningRP) {
                     setTimeout(function() {
                         var esX = _queryEditStates[qidX];
                         var sqlTa = document.getElementById('sq_' + qidX);
                         var sqlBtn = document.getElementById('btn_exe_' + qidX);
                         if (!sqlTa || !sqlBtn) return;
-                        // ★ 强制复位按钮状态为"执行"（无论之前是什么状态）
-                        sqlBtn.textContent = '▶ 执行';
-                        sqlBtn.style.background = '#2ecc71';
+                        // ★ 根据运行状态设置按钮
+                        if (isRunningRP) {
+                            sqlBtn.textContent = '⏹ 取消';
+                            sqlBtn.style.background = '#e74c3c';
+                        } else {
+                            sqlBtn.textContent = '▶ 执行';
+                            sqlBtn.style.background = '#2ecc71';
+                        }
                         // ★ 先恢复 textarea value
                         if (esX && Object.prototype.hasOwnProperty.call(esX, '_cachedSql')) {
                             sqlTa.value = esX._cachedSql;
@@ -163,14 +176,19 @@ function renderObjectPanel() {
                         });
                         updateBtnLabel();
                     }, 0);
-                })(qid3);
+                })(qid3, wasRunningRP);
                 // ★ 恢复查询结果：优先从结构化数据重新渲染（最可靠），其次从缓存 HTML 恢复
                 var es = _queryEditStates[qid3];
-                (function(qidR, esR) {
+                (function(qidR, esR, isRunningRP2) {
                     function doRestore() {
                         var rdiv = document.getElementById('qr_' + qidR);
                         if (!rdiv) return;
-                        if (esR && esR.columns && esR.columns.length > 0) {
+                        // ★ 如果查询仍在运行，显示执行中状态，不渲染旧数据
+                        if (isRunningRP2) {
+                            rdiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qidR+'\')">⏹ 取消</button></div>';
+                            return;
+                        }
+                        if (esR && esR.columns && esR.columns.length > 0 && !esR._execJustStarted) {
                             _qRenderTable(qidR);
                             return;
                         }
@@ -186,16 +204,17 @@ function renderObjectPanel() {
                     setTimeout(function() {
                         var rdiv2 = document.getElementById('qr_' + qidR);
                         if (!rdiv2) return;
+                        if (isRunningRP2) return;
                         var hasTable2 = rdiv2.querySelector('.exp-table') || rdiv2.querySelector('table');
                         var txt2 = rdiv2.textContent.trim();
                         var empty2 = !hasTable2 && (!txt2 || /^\s*$/.test(txt2));
-                        if (empty2 && esR && esR.columns && esR.columns.length > 0) {
+                        if (empty2 && esR && esR.columns && esR.columns.length > 0 && !esR._execJustStarted) {
                             _qRenderTable(qidR);
                         } else if (empty2 && esR && esR._cachedHtml) {
                             rdiv2.innerHTML = esR._cachedHtml;
                         }
                     }, 80);
-                })(qid3, es);
+                })(qid3, es, wasRunningRP);
             }
         }
     }
@@ -327,8 +346,10 @@ function switchObjTab(tabId) {
     if (activeObjTab === tabId) return; // 同一个 tab 不做任何事
     var oldId = activeObjTab;
     activeObjTab = tabId;
-    // 保存旧 tab 的 textarea 编辑状态
+    // ★ 先保存 textarea 编辑状态（记录 _cachedSql/_cachedHtml）
     _saveCurrentTabState(oldId);
+    // ★ 再缓存 textarea/results DOM 元素（保留浏览器原生 undo 历史）
+    _cacheTextareas();
     // 只更新 tab 栏 active 类，不重建 DOM
     var tabBar = document.getElementById('obj_tabs_bar');
     if (tabBar) {
@@ -344,9 +365,69 @@ function switchObjTab(tabId) {
     var at = objectTabs.find(function(t){return t.id===tabId;});
     if (contentDiv && at) {
         contentDiv.innerHTML = at.content;
+        // ★ 恢复缓存的 textarea DOM 元素（保留浏览器原生 undo 历史）
+        _restoreTextareas(contentDiv);
         _afterContentUpdate(at, contentDiv);
     }
 }
+// ★ 保存当前 contentDiv 中所有 textarea/sql-editor 到缓存（保留 DOM 元素 + 原生 undo 历史）
+function _cacheTextareas() {
+    var contentDiv = document.getElementById('obj_content');
+    if (!contentDiv) return;
+    var textareas = contentDiv.querySelectorAll('textarea[id^="sq_"]');
+    for (var i = 0; i < textareas.length; i++) {
+        var ta = textareas[i];
+        if (ta.id) {
+            // 将 textarea 从 DOM 移动到缓存容器（防止 innerHTML 替换时被销毁）
+            _textareaCache[ta.id] = ta;
+            ta.parentNode && ta.parentNode.removeChild(ta);
+        }
+    }
+    // 同时缓存结果区域（避免 innerHTML 丢失实时渲染内容）
+    var resultDivs = contentDiv.querySelectorAll('[id^="qr_"]');
+    for (var ri = 0; ri < resultDivs.length; ri++) {
+        var rd = resultDivs[ri];
+        if (rd.id) {
+            _textareaCache[rd.id] = rd;
+            rd.parentNode && rd.parentNode.removeChild(rd);
+        }
+    }
+}
+
+// ★ 将缓存的 textarea/results DOM 元素恢复到新 contentDiv 中（保留原生 undo 历史）
+function _restoreTextareas(contentDiv) {
+    if (!contentDiv) return;
+    var restored = false;
+    // 恢复 textarea 元素
+    var allSq = contentDiv.querySelectorAll('textarea[id^="sq_"]');
+    for (var i = 0; i < allSq.length; i++) {
+        var newTa = allSq[i];
+        var cached = _textareaCache[newTa.id];
+        if (cached && cached.tagName === 'TEXTAREA') {
+            // 用缓存的 textarea 替换新创建的 textarea（保留 undo 历史）
+            newTa.parentNode.replaceChild(cached, newTa);
+            // 同步 value（以防 DOM 重建时 HTML 中的 value 过期）
+            cached.value = (cached.value !== undefined) ? cached.value : newTa.value;
+            delete _textareaCache[newTa.id];
+            restored = true;
+        }
+    }
+    // 恢复结果区域元素
+    var allQr = contentDiv.querySelectorAll('[id^="qr_"]');
+    for (var j = 0; j < allQr.length; j++) {
+        var newRd = allQr[j];
+        var cachedRd = _textareaCache[newRd.id];
+        if (cachedRd && cachedRd.tagName === 'DIV') {
+            newRd.parentNode.replaceChild(cachedRd, newRd);
+            delete _textareaCache[newRd.id];
+            restored = true;
+        }
+    }
+    // 清理不再需要的缓存
+    _textareaCache = {};
+    return restored;
+}
+
 // 保存当前 tab 的 textarea / query 状态
 function _saveCurrentTabState(tabId) {
     var panel = document.getElementById('object_panel');
@@ -395,16 +476,33 @@ function _afterContentUpdate(targetTab, contentDiv) {
         var qm = activeObjTab.match(/^query_(.+)$/);
         if (qm) {
             var qid3 = qm[1];
-            if (_execRunning[qid3]) _execRunning[qid3] = false;
-            if (_execCancelFlags[qid3]) _execCancelFlags[qid3] = false;
-            (function(qidX){
+            // ★ 检查查询是否仍在后端运行（不随意清除 _execRunning，保留真实状态）
+            var wasRunning = !!_execRunning[qid3];
+            var elapsedMs = Date.now() - (_execStartTime[qid3] || 0);
+            // 如果超过 130 秒还没完成，可能是卡死了，强制清除
+            if (wasRunning && elapsedMs > 130000) {
+                _execRunning[qid3] = false;
+                _execCancelFlags[qid3] = false;
+                wasRunning = false;
+            }
+            // 如果被取消标记了，也清除
+            if (wasRunning && _execCancelFlags[qid3]) {
+                wasRunning = false;
+            }
+            (function(qidX, isRunning){
                 setTimeout(function(){
                     var esX = _queryEditStates[qidX];
                     var sqlTa = document.getElementById('sq_' + qidX);
                     var sqlBtn = document.getElementById('btn_exe_' + qidX);
                     if (!sqlTa || !sqlBtn) return;
-                    sqlBtn.textContent = '▶ 执行';
-                    sqlBtn.style.background = '#2ecc71';
+                    // ★ 根据运行状态设置按钮文本
+                    if (isRunning) {
+                        sqlBtn.textContent = '⏹ 取消';
+                        sqlBtn.style.background = '#e74c3c';
+                    } else {
+                        sqlBtn.textContent = '▶ 执行';
+                        sqlBtn.style.background = '#2ecc71';
+                    }
                     if (esX && Object.prototype.hasOwnProperty.call(esX, '_cachedSql')) {
                         sqlTa.value = esX._cachedSql;
                     } else {
@@ -432,13 +530,19 @@ function _afterContentUpdate(targetTab, contentDiv) {
                     });
                     updateBtnLabel();
                 }, 0);
-            })(qid3);
+            })(qid3, wasRunning);
             var es = _queryEditStates[qid3];
-            (function(qidR, esR){
+            (function(qidR, esR, isRunning){
                 function doRestore(){
                     var rdiv = document.getElementById('qr_' + qidR);
                     if (!rdiv) return;
-                    if (esR && esR.columns && esR.columns.length > 0) { _qRenderTable(qidR); return; }
+                    // ★ 如果查询仍在运行，显示执行中状态，不渲染旧数据
+                    if (isRunning) {
+                        rdiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qidR+'\')">⏹ 取消</button></div>';
+                        return;
+                    }
+                    // ★ 只有当确定不是 running 状态时才渲染已完成的查询结果
+                    if (esR && esR.columns && esR.columns.length > 0 && !esR._execJustStarted) { _qRenderTable(qidR); return; }
                     var hasResults = rdiv.querySelector('.exp-table') || rdiv.querySelector('table');
                     var textOnly = rdiv.textContent.trim();
                     if (!hasResults && textOnly && textOnly !== '' && esR && esR._cachedHtml) {
@@ -449,14 +553,15 @@ function _afterContentUpdate(targetTab, contentDiv) {
                 setTimeout(function(){
                     var rdiv2 = document.getElementById('qr_' + qidR);
                     if (!rdiv2) return;
+                    if (isRunning) return; // 仍在运行，不覆盖
                     var hasTable2 = rdiv2.querySelector('.exp-table') || rdiv2.querySelector('table');
                     var txt2 = rdiv2.textContent.trim();
                     if (!hasTable2 && (!txt2 || /^\s*$/.test(txt2))) {
-                        if (esR && esR.columns && esR.columns.length > 0) _qRenderTable(qidR);
+                        if (esR && esR.columns && esR.columns.length > 0 && !esR._execJustStarted) _qRenderTable(qidR);
                         else if (esR && esR._cachedHtml) rdiv2.innerHTML = esR._cachedHtml;
                     }
                 }, 80);
-            })(qid3, es);
+            })(qid3, es, wasRunning);
         }
     }
     requestAnimationFrame(function(){

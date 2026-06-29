@@ -255,13 +255,7 @@ function refreshDatabaseList(cid) {
     children.innerHTML = '<div style="padding-left:36px;color:#999;font-size:11px;">⏳ 刷新中...</div>';
     var prevPad = children.previousElementSibling ? parseInt(children.previousElementSibling.style.paddingLeft || '0') : 20;
     var isPg = conn.db_type === 'postgresql';
-    var refTimeoutId = setTimeout(function() {
-        children.innerHTML = '<div style="padding-left:36px;color:#e74c3c;font-size:11px;">❌ 刷新超时（15秒）</div>';
-        // ★ 超时时移除 open class，允许用户重试双击展开
-        children.classList.remove('open');
-    }, 15000);
-    eel.db_explore_get_databases(conn)(function(r) {
-        clearTimeout(refTimeoutId);
+    _eelAutoAsync(eel.db_explore_get_databases(conn), function(r) {
         if (!r || !r.ok) { children.innerHTML = '<div style="padding-left:36px;color:#e74c3c;font-size:11px;">❌</div>'; children.classList.remove('open'); return; }
         var html = '';
         r.databases.forEach(function(db2) {

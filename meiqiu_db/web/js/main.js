@@ -723,6 +723,41 @@ function _qsExportToFile(content, fmt) {
     });
 }
 
+// ========== 通用异步 Eel 调用（自动检测 _async 并轮询） ==========
+/** 包装 Eel 调用，支持异步非阻塞模式。
+ * 当 Python 端返回 {_async:true, _job_id:"xxx"} 时，
+ * 自动轮询 poll_query_result 直到结果就绪，完全不影响 Eel 主线程。
+ * 
+ * @param {function} eelCall  Eel 调用表达式，如 eel.tree_test_conn(c)
+ * @param {function} callback 结果回调 function(result)
+ * @param {number}   timeoutMs 超时毫秒数，默认 15000
+ * @param {function} onTimeout 超时回调，默认用 callback({ok:false, msg:"超时"})
+ */
+function _eelAutoAsync(eelCall, callback, timeoutMs, onTimeout) {
+    timeoutMs = timeoutMs || 15000;
+    eelCall(function(resp) {
+        if (resp && resp._async && resp._job_id) {
+            var startTime = Date.now();
+            (function poll() {
+                if (Date.now() - startTime > timeoutMs) {
+                    if (onTimeout) onTimeout();
+                    else callback({"ok": false, "msg": "\u64cd\u4f5c\u8d85\u65f6\uff08" + Math.round(timeoutMs/1000) + "\u79d2\uff09"});
+                    return;
+                }
+                eel.poll_query_result(resp._job_id)(function(result) {
+                    if (result && result._pending) {
+                        setTimeout(poll, 200);
+                    } else {
+                        callback(result || {"ok": false, "msg": "\u65e0\u54cd\u5e94"});
+                    }
+                });
+            })();
+        } else {
+            callback(resp);
+        }
+    });
+}
+
 // ========== 初始化 ==========
 window.addEventListener('load', function () {
     loadAllProfiles();

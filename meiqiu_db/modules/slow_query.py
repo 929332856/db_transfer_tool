@@ -25,7 +25,7 @@ def slow_query_get_databases(data: dict):
         db_type = cdata.get("db_type", "mysql")
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "慢SQL查询仅支持 MySQL / OceanBase 数据库"}
-        url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
+        url_no_db = (f"mysql+mysqldb://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:{cdata.get('port','3306')}"
                      f"?charset=utf8mb4")
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=10))
@@ -211,7 +211,7 @@ def slow_query_get_list(data: dict, start_time: str = '', end_time: str = '',
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
 
-        url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
+        url_no_db = (f"mysql+mysqldb://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:"
                      f"{cdata.get('port','3306')}?charset=utf8mb4")
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=30))
@@ -336,7 +336,7 @@ def slow_query_get_log(data: dict, start_time: str = '', end_time: str = '',
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
 
-        url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
+        url_no_db = (f"mysql+mysqldb://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:"
                      f"{cdata.get('port','3306')}?charset=utf8mb4")
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=30))
@@ -442,7 +442,7 @@ def slow_query_get_detail(conn_data: dict, database: str, digest_text: str):
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
 
-        url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
+        url_no_db = (f"mysql+mysqldb://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:"
                      f"{cdata.get('port','3306')}?charset=utf8mb4")
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=15))

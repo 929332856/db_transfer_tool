@@ -53,12 +53,12 @@ def test_connection(data: dict, side: str):
         if side == "src":
             src_db = data.get('src_db', '').strip()
             if src_db:
-                url = (f"mysql+pymysql://{quote_plus(data['src_user'])}:"
+                url = (f"mysql+mysqldb://{quote_plus(data['src_user'])}:"
                        f"{quote_plus(data['src_pwd'])}@{data['src_host']}:"
                        f"{data['src_port']}/{src_db}?charset=utf8mb4")
             else:
                 # 不指定数据库，仅测试服务器连通性
-                url = (f"mysql+pymysql://{quote_plus(data['src_user'])}:"
+                url = (f"mysql+mysqldb://{quote_plus(data['src_user'])}:"
                        f"{quote_plus(data['src_pwd'])}@{data['src_host']}:"
                        f"{data['src_port']}/?charset=utf8mb4")
             label = "源库"
@@ -70,7 +70,7 @@ def test_connection(data: dict, side: str):
         else:
             # 目标库：先连服务器，再检查数据库是否存在
             label = "目标库"
-            url_no_db = (f"mysql+pymysql://{quote_plus(data['dst_user'])}:"
+            url_no_db = (f"mysql+mysqldb://{quote_plus(data['dst_user'])}:"
                          f"{quote_plus(data['dst_pwd'])}@{data['dst_host']}:"
                          f"{data['dst_port']}?charset=utf8mb4")
             engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=5))

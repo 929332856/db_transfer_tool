@@ -75,22 +75,15 @@ function clickOraSchema(cid, db, schema) {
     var conn = treeData.connections[cid];
     if (!conn) return;
     activeConnId = cid; activeConnData = conn; activeDatabase = schema;
-    // ★ Oracle schema 切换时展示该 schema 的数据库信息
+    // ★ 展示该 schema 的数据库信息
     if (typeof showDbInfo === 'function') {
         showDbInfo(cid, schema);
     }
-    // ★ 切换到选中的 schema，刷新分类区域显示该 schema 的对象
-    var connNode = document.querySelector('.tree-node[data-cid="'+cid+'"]');
-    var connChildren = connNode ? connNode.querySelector('.tree-children') : null;
-    if (connChildren && connChildren.classList.contains('open')) {
-        // 重新渲染分类行，替换为选中 schema 的分类
-        var pad = 20;
-        var oldCats = connChildren.querySelectorAll('.cat-row, .tree-children.cat-row-children');
-        // 只保留第一层分类（非用户行），重新渲染
-        var catHtml = renderOraCats(cid, schema, pad);
-        // 替换整个分类区域（保留连接行本身）
-        var connRow = connChildren.previousElementSibling;
-        connChildren.innerHTML = catHtml;
+    // ★ 找到对应的 schema 文件夹并展开
+    var schemaId = cid + '_ora_' + safeBtoa(schema);
+    var schemaEl = document.getElementById(schemaId);
+    if (schemaEl && !schemaEl.classList.contains('open') && typeof expandOraSchema === 'function') {
+        expandOraSchema(cid, schema, schemaId, 20);
     }
     var content = '<table class="exp-table"><thead><tr><th>用户名 / Schema</th></tr></thead><tbody>';
     content += '<tr><td>👤 ' + escapeHtml(schema) + '</td></tr>';

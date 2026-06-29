@@ -5,6 +5,28 @@ function _fmtExecTime(ms) {
     if (ms < 1000) return ms.toFixed(1) + 'ms';
     return (ms / 1000).toFixed(2) + 's';
 }
+// ★ 格式化详细计时分解（exec_ms=提交+元数据, fetch_ms=取数+处理, serial_ms=JSON序列化）
+function _fmtExecTimeDetail(r) {
+    if (!r) return '';
+    var parts = [];
+    if (r.server_ms !== undefined) parts.push('⏱ <b>总 ' + _fmtExecTime(r.server_ms) + '</b>');
+    // 有分解数据时显示详细（server_ms ≈ exec_ms + fetch_ms）
+    if (r.exec_ms !== undefined && r.fetch_ms !== undefined) {
+        parts.push('提交 ' + _fmtExecTime(r.exec_ms));
+        parts.push('取数 ' + _fmtExecTime(r.fetch_ms));
+        if (r.serial_ms !== undefined && r.serial_ms > 1) parts.push('序列化 ' + _fmtExecTime(r.serial_ms));
+        return parts.join(' · ');
+    }
+    return parts[0] || '';
+}
+// ★ 生成含详细计时和 has_more 提示的 HTML
+function _fmtExecTimeHtml(r) {
+    if (!r || r.server_ms === undefined) return '';
+    var detail = _fmtExecTimeDetail(r);
+    var html = ' <span style="color:#5dade2;">' + detail + '</span>';
+    if (r.has_more) html += ' <span style="color:#f39c12;font-size:10px;">⚠ 已达取数上限，请加 LIMIT</span>';
+    return html;
+}
 var _querySplitterInited = {};
 function initQuerySplitter(layoutId, splitterId, editorId, resultsId) {
     if (_querySplitterInited[splitterId]) return; // 防止重复绑定
@@ -86,6 +108,34 @@ function execQueryTab(qid) {
     _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, btnExe);
 }
 
+/** ★ 智能 SQL 分句：处理引号内分号、中文引号等特殊情况 */
+function _smartSplitSQL(text) {
+    var stmts = [];
+    var buf = '';
+    var inSingle = false;
+    var inDouble = false;
+    for (var i = 0; i < text.length; i++) {
+        var ch = text[i];
+        if (ch === '\\' && inSingle) {
+            buf += ch;
+            if (i + 1 < text.length) { buf += text[i + 1]; i++; }
+        } else if ((ch === "'" || ch === '\u2018' || ch === '\u2019') && !inDouble) {
+            inSingle = !inSingle; buf += ch;
+        } else if ((ch === '"' || ch === '\u201c' || ch === '\u201d') && !inSingle) {
+            inDouble = !inDouble; buf += ch;
+        } else if (ch === ';' && !inSingle && !inDouble) {
+            var s = buf.trim();
+            if (s && s.substring(0,2) !== '--' && s.charAt(0) !== '#') stmts.push(s);
+            buf = '';
+        } else {
+            buf += ch;
+        }
+    }
+    var s = buf.trim();
+    if (s && s.substring(0,2) !== '--' && s.charAt(0) !== '#') stmts.push(s);
+    return stmts;
+}
+
 /** ★ 核心执行逻辑（textarea 存在时直接调用，免去 tree_get_query 的延迟） */
 function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, btnExe) {
     // 检查选中文本
@@ -95,7 +145,7 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
         if (st2 !== en2) sel = ta.value.substring(st2, en2).trim();
     }
     var sqlToExec = sel || fullSql;
-    var stmts = sqlToExec.split(';').filter(function(s){return s.trim();});
+    var stmts = _smartSplitSQL(sqlToExec);
 
     if (!stmts.length) { _resetExeBtnLate(qid, btnExe); return; }
 
@@ -126,6 +176,23 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
     _execCancelFlags[qid] = false;
     _execRunning[qid] = true;
     _execStartTime[qid] = Date.now();
+
+    // ★ 释放上次查询的服务端结果缓存
+    _releaseQueryStore(qid);
+    // ★ 清除旧的查询结果数据，防止 tab 切换时闪现旧数据
+    var esClear = _qState(qid);
+    esClear.columns = [];
+    esClear.rows = [];
+    esClear.changedCells = {};
+    esClear.selectedRows = {};
+    esClear._lastClickedIdx = -1;
+    esClear.editing = false;
+    esClear._execJustStarted = true; // 标记刚清空，防止 _afterContentUpdate 恢复旧数据
+    esClear._jobId = null;
+    esClear._showRowCount = 200;
+    esClear._totalRows = 0;
+    esClear._loadingAll = false;
+    esClear._cancelLoadAll = false;
 
     if (btnExe) { btnExe.textContent = '⏹ 取消'; btnExe.style.background = '#e74c3c'; }
     if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
@@ -190,15 +257,47 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
         }
         if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中 ('+(i+1)+'/'+stmts.length+')...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
         var data = {src_host:activeConnData.host, src_port:activeConnData.port, src_user:activeConnData.user, src_pwd:activeConnData.pwd, src_db:execDb, db_type:activeConnData.db_type||'mysql', ora_mode:activeConnData.ora_mode||'service_name'};
-        eel.execute_sql_query(clean, data)(function(result){
+        eel.execute_sql_query(clean, data)(function(resp){
             // ★ 令牌检测：异步回调返回时，确认仍是当前执行
             if (_execToken[qid] !== myToken) return;
-            allResults[i] = result;
-            if (result && result.ok && !result.cancelled && (!result.columns || !result.columns.length) && result.total === undefined) {
-                hasDDL = true;
+
+            // ★ 结果处理函数（同步/异步共用）
+            function handleResult(result) {
+                allResults[i] = result;
+                if (result && result.ok && !result.cancelled && (!result.columns || !result.columns.length) && result.total === undefined) {
+                    hasDDL = true;
+                }
+                execIdx++;
+                execNext();
             }
-            execIdx++;
-            execNext();
+
+            if (resp && resp._async && resp._job_id) {
+                // ★ 异步模式：poll 轮询获取结果（不阻塞 Eel 主线程）
+                var pollStart = Date.now();
+                (function pollLoop() {
+                    if (_execToken[qid] !== myToken) return;
+                    if (_execCancelFlags[qid]) {
+                        _execCancelFlags[qid] = false;
+                        _execRunning[qid] = false;
+                        if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
+                        if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#f39c12;">⏸ 查询已取消</div>';
+                        return;
+                    }
+                    // ★ 显示执行耗时（每秒更新）
+                    var elapsed = Math.round((Date.now() - pollStart) / 1000);
+                    var dots = '.'.repeat((elapsed % 3) + 1);
+                    if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中' + dots + ' (' + elapsed + 's)</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
+                    eel.poll_query_result(resp._job_id)(function(pollResult) {
+                        if (pollResult && pollResult._pending) {
+                            setTimeout(pollLoop, 200);
+                        } else {
+                            handleResult(pollResult || {"ok": false, "msg": "无响应"});
+                        }
+                    });
+                })();
+                return;
+            }
+            handleResult(resp);
         });
     }
     execNext();
@@ -221,6 +320,8 @@ function cancelExecQuery(qid) {
 
 /** 关闭查询结果区域（收起分栏、清空结果、重置编辑状态） */
 function closeQueryResults(qid) {
+    // ★ 释放服务端查询结果缓存
+    _releaseQueryStore(qid);
     var layout = document.getElementById('ql_' + qid);
     if (layout) {
         layout.classList.remove('split');
@@ -242,6 +343,333 @@ function closeQueryResults(qid) {
     es._multiChanged = [];
     es._multiSelected = [];
     es._multiStmts = [];
+    es._jobId = null;
+    es._showRowCount = 200;
+    es._loadingAll = false;
+    es._cancelLoadAll = false;
+    es._totalRows = 0;
+}
+
+// ==================== 查询结果显示行数控制（行数选择器 / 显示全部 / 取消加载） ====================
+
+// ★ 命名分页入口函数（供 onclick 直接调用，避免内联函数字面量）
+function _changeRowCount(qid) {
+    var sel = document.getElementById(qid + '_rowcount_sel');
+    if (!sel) return;
+    var val = sel.value;
+    var es = _qState(qid);
+    if (!es) return;
+
+    if (val === 'all') {
+        _showAllRows(qid);
+        return;
+    }
+
+    var count = parseInt(val) || 200;
+    es._showRowCount = count;
+    es._loadingAll = false;
+    es._cancelLoadAll = false;
+
+    var loaded = es.rows.length;
+    var total = es._totalRows || 0;
+    var need = Math.min(count, total);
+
+    if (loaded < need && es._jobId) {
+        var pagBar = document.getElementById(qid + '_pagbar');
+        if (pagBar) pagBar.innerHTML = '<span style="color:#f39c12;">正在加载更多行...</span>';
+        _loadQueryPage(qid, loaded, need - loaded, function(r) {
+            _qRenderTable(qid);
+        });
+    } else {
+        _qRenderTable(qid);
+    }
+}
+
+// 显示全部按钮：启动分批加载
+function _showAllRows(qid) {
+    var es = _qState(qid);
+    if (!es) return;
+    var jid = es._jobId;
+    if (!jid) return;
+
+    var total = es._totalRows || 0;
+    var loaded = es.rows.length;
+
+    if (loaded >= total) {
+        es._showRowCount = total;
+        es._loadingAll = false;
+        _qRenderTable(qid);
+        return;
+    }
+
+    es._loadingAll = true;
+    es._cancelLoadAll = false;
+    es._showRowCount = total;
+    _showAllBatches(qid, loaded);
+}
+
+// 取消显示全部加载
+function _cancelShowAll(qid) {
+    var es = _qState(qid);
+    if (!es) return;
+    es._cancelLoadAll = true;
+    es._loadingAll = false;
+    es._showRowCount = es.rows.length;
+    _qRenderTable(qid);
+}
+
+// 分批加载全部行（异步递归，支持取消，防卡死）
+function _showAllBatches(qid, offset) {
+    var es = _qState(qid);
+    var jid = es._jobId;
+    if (!jid) return;
+    if (es._cancelLoadAll) return;
+
+    var total = es._totalRows || 0;
+    var BATCH = 500; // 与后端 get_query_page 单次上限一致，小批次防卡死
+
+    var pagBar = document.getElementById(qid + '_pagbar');
+    if (pagBar) {
+        pagBar.innerHTML = '<span style="color:#f39c12;">正在加载全部 ' + offset + '/' + total + ' 行...</span>' +
+            '<button class="btn btn-sm" onclick="_cancelShowAll(\x27' + qid + '\x27)" style="background:#e74c3c;color:#fff;font-size:10px;cursor:pointer;">取消加载</button>';
+    }
+
+    eel.get_query_page(jid, offset, BATCH)(function(r) {
+        if (es._cancelLoadAll) {
+            _qRenderTable(qid);
+            return;
+        }
+        if (r && r.ok) {
+            for (var i = 0; i < r.rows.length; i++) {
+                if (offset + i >= es.rows.length) {
+                    es.rows[offset + i] = r.rows[i];
+                }
+            }
+
+            if (r.page_end >= total) {
+                es._loadingAll = false;
+                _qRenderTable(qid);
+            } else {
+                setTimeout(function() { _showAllBatches(qid, r.page_end); }, 30);
+            }
+        } else {
+            if (pagBar) pagBar.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + (r ? r.msg : '无响应') + '</span>';
+            es._loadingAll = false;
+        }
+    });
+}
+
+/** 从服务端加载指定偏移量和行数的数据 */
+function _loadQueryPage(qid, offset, limit, callback) {
+    var es = _qState(qid);
+    var jid = es._jobId;
+    if (!jid) {
+        var pagBar = document.getElementById(qid + '_pagbar');
+        if (pagBar) pagBar.innerHTML = '<span style="color:#e74c3c;">查询结果已过期，请重新执行 SQL</span>';
+        if (callback) callback(null);
+        return;
+    }
+    eel.get_query_page(jid, offset, limit)(function(r) {
+        if (r && r.ok) {
+            for (var i = 0; i < r.rows.length; i++) {
+                if (offset + i >= es.rows.length) {
+                    es.rows[offset + i] = r.rows[i];
+                }
+            }
+        } else {
+            var pagBar2 = document.getElementById(qid + '_pagbar');
+            if (pagBar2) pagBar2.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + (r ? r.msg : '无响应') + '</span>';
+        }
+        if (callback) callback(r);
+    });
+}
+
+/** 渲染行数控制栏（行数选择器 + 显示全部按钮） */
+function _renderRowControls(qid) {
+    var es = _qState(qid);
+    var total = es._totalRows || es.rows.length;
+    var loaded = es.rows.length;
+    var showCount = es._showRowCount || 200;
+    var isLoadingAll = es._loadingAll;
+
+    if (isLoadingAll) {
+        var html2 = '<div id="' + qid + '_pagbar" style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:#111;border-top:1px solid #333;font-size:11px;color:#888;flex-wrap:wrap;">';
+        html2 += '<span style="color:#f39c12;">正在加载全部 ' + loaded + '/' + total + ' 行...</span>';
+        html2 += '<button class="btn btn-sm" onclick="_cancelShowAll(\x27' + qid + '\x27)" style="background:#e74c3c;color:#fff;font-size:10px;cursor:pointer;">取消加载</button>';
+        html2 += '</div>';
+        return html2;
+    }
+
+    var shownAll = (loaded >= total && showCount >= total);
+    var displayed = Math.min(showCount, loaded, total);
+
+    var html = '<div id="' + qid + '_pagbar" style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:#111;border-top:1px solid #333;font-size:11px;color:#888;flex-wrap:wrap;">';
+    html += '<span>显示 <b>1</b>-<b>' + displayed + '</b> 行，共 <b>' + total + '</b> 行</span>';
+
+    html += '<span>展示:</span>';
+    html += '<select id="' + qid + '_rowcount_sel" onchange="_changeRowCount(\x27' + qid + '\x27)" style="background:#222;color:#ddd;border:1px solid #444;padding:2px 4px;font-size:10px;border-radius:3px;">';
+    var rowOptions = [200, 500, 1000, 2000, 5000];
+    var selVal = showCount;
+    for (var rj = 0; rj < rowOptions.length; rj++) {
+        var optVal = rowOptions[rj];
+        var sel = (optVal === selVal) ? ' selected' : '';
+        html += '<option value="' + optVal + '"' + sel + '>' + optVal + ' 行</option>';
+    }
+    html += '<option value="all"' + (shownAll ? ' selected' : '') + '>全部</option>';
+    html += '</select>';
+
+    if (!shownAll && loaded < total) {
+        html += '<button class="btn btn-sm" onclick="_showAllRows(\x27' + qid + '\x27)" style="background:#27ae60;color:#fff;font-size:10px;cursor:pointer;">显示全部(' + total + '行)</button>';
+    }
+
+    if (shownAll) {
+        html += '<span style="color:#2ecc71;">已显示全部 ' + total + ' 行</span>';
+    } else if (loaded < Math.min(showCount, total)) {
+        html += '<span style="color:#f39c12;">(当前仅显示前 ' + loaded + ' 行，需切换行数后加载更多)</span>';
+    }
+
+    html += '</div>';
+    return html;
+}
+
+// ==================== 虚拟滚动（>500行只渲染可见行，防止DOM卡死） ====================
+var _VT_ROW_H = 28;        // 估算每行像素高度
+var _VT_THRESHOLD = 500;   // 超过此行数启用虚拟滚动
+
+/** 生成单行 HTML（复用于虚拟滚动和普通渲染） */
+function _vtRowHtml(qid, es, i) {
+    var row = es.rows[i];
+    var isSel = !!es.selectedRows[i];
+    var gripCls = isSel ? 'row-sel-grip selected' : 'row-sel-grip';
+    var rowCls = isSel ? ' class="row-selected"' : '';
+    var html = '<tr data-row-idx="'+i+'"'+rowCls+'>';
+    html += '<td class="'+gripCls+'" data-ri="'+i+'" ' +
+        'onclick="_qGripClick(\x27'+qid+'\x27,this,'+i+')" ' +
+        'oncontextmenu="_qRowCtx(\x27'+qid+'\x27,event,'+i+')" ' +
+        'title="">'+(i+1)+'</td>';
+    row.forEach(function(v, ci) {
+        var changedCell = es.changedCells[i + ':' + ci];
+        var val = changedCell ? String(changedCell.newVal) : (v===null ? 'NULL' : String(v));
+        html += '<td><input class="editable-cell" data-ri="'+i+'" data-ci="'+ci+'" data-col="'+escapeAttr(es.columns[ci])+'" value="'+escapeAttr(val)+'" onfocus="this._oldVal=this.value" onblur="_qCellBlur(\x27'+qid+'\x27,'+i+','+ci+',\x27'+escapeAttr(es.columns[ci])+'\x27,this)" spellcheck="false" autocomplete="off"></td>';
+    });
+    html += '</tr>';
+    return html;
+}
+
+/** 虚拟滚动：重新计算可见范围并渲染 tbody */
+function _vtRenderBody(qid) {
+    var es = _qState(qid);
+    var tbody = document.getElementById(qid + '_vtbody');
+    if (!tbody) return;
+    var maxShow = Math.min(es.rows.length, es._showRowCount || 200, es._totalRows || 999999);
+    if (maxShow === 0) return;
+    var wrapper = document.getElementById(qid + '_vtwrap');
+    var scrollTop = wrapper ? wrapper.scrollTop : 0;
+    var viewH = wrapper ? (wrapper.clientHeight || 600) : 600;
+    var first = Math.floor(scrollTop / _VT_ROW_H);
+    var count = Math.ceil(viewH / _VT_ROW_H) + 5; // +5 缓冲行
+    var last = Math.min(first + count, maxShow);
+    if (first >= maxShow) first = Math.max(0, maxShow - count);
+    if (first < 0) first = 0;
+
+    // 总列数 = 行号列(1) + 数据列
+    var totalCols = 1 + (es.columns ? es.columns.length : 0);
+
+    var html = '';
+    if (first > 0) {
+        html += '<tr style="height:'+(first*_VT_ROW_H)+'px;line-height:1px;pointer-events:none;"><td colspan="'+totalCols+'" style="padding:0;border:none;"></td></tr>';
+    }
+    for (var i = first; i < last; i++) {
+        if (es.rows[i]) html += _vtRowHtml(qid, es, i);
+    }
+    if (last < maxShow) {
+        html += '<tr style="height:'+((maxShow-last)*_VT_ROW_H)+'px;line-height:1px;pointer-events:none;"><td colspan="'+totalCols+'" style="padding:0;border:none;"></td></tr>';
+    }
+    tbody.innerHTML = html;
+}
+
+/** 虚拟滚动 onscroll 处理（requestAnimationFrame 节流） */
+function _vtOnScroll(qid) {
+    var es = _qState(qid);
+    if (es._vtRafId) cancelAnimationFrame(es._vtRafId);
+    es._vtRafId = requestAnimationFrame(function() {
+        _vtRenderBody(qid);
+    });
+}
+
+// ==================== 多结果虚拟滚动 ====================
+
+/** 生成多结果单行 HTML */
+function _vtRowHtmlM(qid, tabIdx, cols, rows, selObj, i) {
+    var mr = rows[i];
+    var isSel = !!selObj[i];
+    var gripCls = isSel ? 'row-sel-grip selected' : 'row-sel-grip';
+    var rowCls = isSel ? ' class="row-selected"' : '';
+    var html = '<tr data-row-idx="'+i+'"'+rowCls+'>';
+    html += '<td class="'+gripCls+'" data-ri="'+i+'" ' +
+        'onclick="_qGripClickMulti(\x27'+qid+'\x27,'+tabIdx+',this,'+i+')" ' +
+        'oncontextmenu="_qMultiRowCtx(\x27'+qid+'\x27,'+tabIdx+',event,'+i+')" ' +
+        'title="">'+(i+1)+'</td>';
+    mr.forEach(function(mv, mci){
+        var mval = mv===null?'NULL':String(mv);
+        html += '<td><input class="editable-cell" data-ri="'+i+'" data-ci="'+mci+'" data-col="'+escapeAttr(cols[mci])+'" value="'+escapeAttr(mval)+'" onfocus="this._oldVal=this.value" onblur="_qCellBlurMulti(\x27'+qid+'\x27,'+tabIdx+','+i+','+mci+',this)" spellcheck="false" autocomplete="off" style="min-width:60px;"></td>';
+    });
+    html += '</tr>';
+    return html;
+}
+
+/** 多结果虚拟滚动：渲染可见行 */
+function _vtRenderBodyM(qid, tabIdx) {
+    var es = _qState(qid);
+    var tbody = document.getElementById(qid + '_mvtbody' + tabIdx);
+    if (!tbody) return;
+    var cols = es._multiCols[tabIdx] || [];
+    var rows = es._multiRows[tabIdx] || [];
+    var selObj = es._multiSelected[tabIdx] || {};
+    var maxShow = rows.length;
+    if (maxShow === 0) return;
+    var wrapper = document.getElementById(qid + '_mvt' + tabIdx);
+    var scrollTop = wrapper ? wrapper.scrollTop : 0;
+    var viewH = wrapper ? (wrapper.clientHeight || 600) : 600;
+    var first = Math.floor(scrollTop / _VT_ROW_H);
+    var count = Math.ceil(viewH / _VT_ROW_H) + 5;
+    var last = Math.min(first + count, maxShow);
+    if (first >= maxShow) first = Math.max(0, maxShow - count);
+    if (first < 0) first = 0;
+
+    var totalCols = 1 + cols.length;
+
+    var html = '';
+    if (first > 0) {
+        html += '<tr style="height:'+(first*_VT_ROW_H)+'px;line-height:1px;pointer-events:none;"><td colspan="'+totalCols+'" style="padding:0;border:none;"></td></tr>';
+    }
+    for (var i = first; i < last; i++) {
+        if (rows[i]) html += _vtRowHtmlM(qid, tabIdx, cols, rows, selObj, i);
+    }
+    if (last < maxShow) {
+        html += '<tr style="height:'+((maxShow-last)*_VT_ROW_H)+'px;line-height:1px;pointer-events:none;"><td colspan="'+totalCols+'" style="padding:0;border:none;"></td></tr>';
+    }
+    tbody.innerHTML = html;
+}
+
+/** 多结果虚拟滚动 onscroll 节流 */
+function _vtOnScrollM(qid, tabIdx) {
+    var es = _qState(qid);
+    var key = '_vtRafIdM' + tabIdx;
+    if (es[key]) cancelAnimationFrame(es[key]);
+    es[key] = requestAnimationFrame(function() {
+        _vtRenderBodyM(qid, tabIdx);
+    });
+}
+
+/** 释放查询结果缓存（切换 tab 或关闭结果时调用） */
+function _releaseQueryStore(qid) {
+    var es = _qState(qid);
+    var jid = es._jobId;
+    if (jid) {
+        eel.release_query_result(jid)();
+        es._jobId = null;
+    }
 }
 
 // 查询结果编辑状态（按 qid）
@@ -250,7 +678,7 @@ var _queryEditStates = {};
 /** 获取查询结果编辑状态 */
 function _qState(qid) {
     if (!_queryEditStates[qid]) {
-        _queryEditStates[qid] = { columns: [], rows: [], changedCells: {}, selectedRows: {}, editing: false, connData: null, execDb: '', _colComments: {}, _colTypes: {}, _lastClickedIdx: -1, server_ms: undefined };
+        _queryEditStates[qid] = { columns: [], rows: [], changedCells: {}, selectedRows: {}, editing: false, connData: null, execDb: '', _colComments: {}, _colTypes: {}, _lastClickedIdx: -1, server_ms: undefined, _lastResult: null, _multiResults: [], _jobId: null, _showRowCount: 200, _totalRows: 0, _loadingAll: false, _cancelLoadAll: false };
     }
     return _queryEditStates[qid];
 }
@@ -688,15 +1116,31 @@ function _qRefreshData(qid, tabIdx) {
         if (pane) pane.innerHTML = '<div style="padding:10px;color:#999;">🔄 正在刷新...</div>';
         var data = {src_host:es.connData.host, src_port:es.connData.port, src_user:es.connData.user,
             src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql', ora_mode:es.connData.ora_mode||'service_name'};
-        eel.execute_sql_query(stmt, data)(function(result){
-            // 重建该 tab 的结果，保持其他 tab 不变
-            if (!result || !result.ok) {
-                if (pane) pane.innerHTML = '<div style="padding:10px;color:#e74c3c;">❌ '+(result?result.msg:'无响应')+'</div>';
-                return;
+        // ★ execute_sql_query 是异步的，需要轮询获取结果
+        eel.execute_sql_query(stmt, data)(function(resp){
+            function handleRefreshSingle(result) {
+                if (!result || !result.ok) {
+                    if (pane) pane.innerHTML = '<div style="padding:10px;color:#e74c3c;">❌ '+(result?result.msg:'无响应')+'</div>';
+                    return;
+                }
+                es._multiCols[tabIdx] = result.columns || [];
+                es._multiRows[tabIdx] = result.rows || [];
+                es._multiResults[tabIdx] = result;  // ★ 保存完整结果用于显示详细计时
+                _qRebuildSingleTab(qid, tabIdx);
             }
-            es._multiCols[tabIdx] = result.columns || [];
-            es._multiRows[tabIdx] = result.rows || [];
-            _qRebuildSingleTab(qid, tabIdx);
+            if (resp && resp._async && resp._job_id) {
+                (function pollLoop() {
+                    eel.poll_query_result(resp._job_id)(function(pollResult) {
+                        if (pollResult && pollResult._pending) {
+                            setTimeout(pollLoop, 200);
+                        } else {
+                            handleRefreshSingle(pollResult || {"ok": false, "msg": "\u65e0\u54cd\u5e94"});
+                        }
+                    });
+                })();
+            } else {
+                handleRefreshSingle(resp);
+            }
         });
         return;
     }
@@ -720,6 +1164,14 @@ function _qRefreshData(qid, tabIdx) {
     resultsDiv.innerHTML = '<div style="padding:10px;color:#999;">🔄 正在刷新...</div>';
     var allResults = [];
     var refIdx = 0;
+
+    // ★ 辅助：处理单条刷新结果
+    function handleRefreshResult(result, stmtIdx) {
+        allResults[stmtIdx] = result;
+        refIdx++;
+        execNextRefresh();
+    }
+
     function execNextRefresh() {
         if (refIdx >= stmts.length) {
             renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
@@ -731,10 +1183,21 @@ function _qRefreshData(qid, tabIdx) {
         resultsDiv.innerHTML = '<div style="padding:10px;color:#999;">🔄 正在刷新 ('+(i+1)+'/'+stmts.length+')...</div>';
         var data = {src_host:es.connData.host, src_port:es.connData.port, src_user:es.connData.user,
             src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql', ora_mode:es.connData.ora_mode||'service_name'};
-        eel.execute_sql_query(clean, data)(function(result){
-            allResults[i] = result;
-            refIdx++;
-            execNextRefresh();
+        // ★ execute_sql_query 现在是异步的，需要轮询获取结果
+        eel.execute_sql_query(clean, data)(function(resp){
+            if (resp && resp._async && resp._job_id) {
+                (function pollLoop() {
+                    eel.poll_query_result(resp._job_id)(function(pollResult) {
+                        if (pollResult && pollResult._pending) {
+                            setTimeout(pollLoop, 200);
+                        } else {
+                            handleRefreshResult(pollResult || {"ok": false, "msg": "无响应"}, i);
+                        }
+                    });
+                })();
+            } else {
+                handleRefreshResult(resp, i);
+            }
         });
     }
     execNextRefresh();
@@ -759,34 +1222,57 @@ function _qRebuildSingleTab(qid, tabIdx) {
             '<button class="btn btn-sm" id="'+qid+'_mqdel_'+tabIdx+'" onclick="_qDoDeleteMulti(\''+qid+'\','+tabIdx+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
             '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\','+tabIdx+')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
             '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-        tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows.length+' 行'+(es._multiServerMs[tabIdx]!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(es._multiServerMs[tabIdx])+'</span>':'')+'</div>';
-        tabBody += '<div style="overflow:auto;flex:1;min-height:0;"><table class="exp-table"><thead><tr>';
-        tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+tabIdx+'" onclick="_qToggleSelAllMulti(\''+qid+'\','+tabIdx+')" title="全选/取消全选">#</th>';
-        cols.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
-        tabBody += '</tr></thead><tbody>';
-        var mMax = Math.min(rows.length, 200);
-        for (var mi = 0; mi < mMax; mi++) {
-            var mr = rows[mi];
-            var isSel = !!es._multiSelected[tabIdx][mi];
-            var gripCls = isSel ? 'row-sel-grip selected' : 'row-sel-grip';
-            var rowCls = isSel ? ' class="row-selected"' : '';
-            tabBody += '<tr data-row-idx="'+mi+'"'+rowCls+'>';
-            tabBody += '<td class="'+gripCls+'" data-ri="'+mi+'" ' +
-                'onclick="_qGripClickMulti(\''+qid+'\','+tabIdx+',this,'+mi+')" ' +
-                'oncontextmenu="_qMultiRowCtx(\''+qid+'\','+tabIdx+',event,'+mi+')" ' +
-                'title="左键选择行 | Shift多选 | 右键菜单">'+(mi+1)+'</td>';
-            mr.forEach(function(mv,mci){
-                var mval = mv===null?'NULL':String(mv);
-                tabBody += '<td><input class="editable-cell" data-ri="'+mi+'" data-ci="'+mci+'" data-col="'+escapeAttr(cols[mci])+'" value="'+escapeAttr(mval)+'" onfocus="this._oldVal=this.value" onblur="_qCellBlurMulti(\''+qid+'\','+tabIdx+','+mi+','+mci+',this)" spellcheck="false" autocomplete="off" style="min-width:60px;"></td>';
-            });
-            tabBody += '</tr>';
+        var multiTotal = es._multiTotalRows[tabIdx] || rows.length;
+        tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+multiTotal+' 行'+_fmtExecTimeHtml(es._multiResults && es._multiResults[tabIdx])+'</div>';
+        // ★ 超过500行启用虚拟滚动
+        var mMax = rows.length;
+        var needVTM = (mMax > _VT_THRESHOLD);
+        if (needVTM) {
+            tabBody += '<div id="'+qid+'_mvt'+tabIdx+'" style="overflow-y:auto;flex:1;min-height:0;" onscroll="_vtOnScrollM(\x27'+qid+'\x27,'+tabIdx+')">';
+            tabBody += '<table class="exp-table" style="width:100%;">';
+            tabBody += '<thead style="position:sticky;top:0;z-index:2;background:#1a1a2e;"><tr>';
+            tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+tabIdx+'" onclick="_qToggleSelAllMulti(\x27'+qid+'\x27,'+tabIdx+')" title="全选/取消全选">#</th>';
+            cols.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
+            tabBody += '</tr></thead>';
+            tabBody += '<tbody id="'+qid+'_mvtbody'+tabIdx+'"></tbody>';
+            tabBody += '</table></div>';
+        } else {
+            tabBody += '<div style="overflow:auto;flex:1;min-height:0;"><table class="exp-table"><thead><tr>';
+            tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+tabIdx+'" onclick="_qToggleSelAllMulti(\x27'+qid+'\x27,'+tabIdx+')" title="全选/取消全选">#</th>';
+            cols.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
+            tabBody += '</tr></thead><tbody>';
+            for (var mi = 0; mi < mMax; mi++) {
+                var mr = rows[mi];
+                if (!mr) continue;
+                var isSel = !!es._multiSelected[tabIdx][mi];
+                var gripCls = isSel ? 'row-sel-grip selected' : 'row-sel-grip';
+                var rowCls = isSel ? ' class="row-selected"' : '';
+                tabBody += '<tr data-row-idx="'+mi+'"'+rowCls+'>';
+                tabBody += '<td class="'+gripCls+'" data-ri="'+mi+'" ' +
+                    'onclick="_qGripClickMulti(\x27'+qid+'\x27,'+tabIdx+',this,'+mi+')" ' +
+                    'oncontextmenu="_qMultiRowCtx(\x27'+qid+'\x27,'+tabIdx+',event,'+mi+')" ' +
+                    'title="左键选择行 | Shift多选 | 右键菜单">'+(mi+1)+'</td>';
+                mr.forEach(function(mv,mci){
+                    var mval = mv===null?'NULL':String(mv);
+                    tabBody += '<td><input class="editable-cell" data-ri="'+mi+'" data-ci="'+mci+'" data-col="'+escapeAttr(cols[mci])+'" value="'+escapeAttr(mval)+'" onfocus="this._oldVal=this.value" onblur="_qCellBlurMulti(\x27'+qid+'\x27,'+tabIdx+','+mi+','+mci+',this)" spellcheck="false" autocomplete="off" style="min-width:60px;"></td>';
+                });
+                tabBody += '</tr>';
+            }
+            tabBody += '</tbody></table></div>';
         }
-        tabBody += '</tbody></table></div>';
-        if (rows.length > mMax) tabBody += '<div style="padding:5px;color:#777;font-size:10px;">... 共 '+rows.length+' 行，显示前 '+mMax+' 行</div>';
+        // ★ 多结果分页：总数超过已加载行数时显示分页按钮
+        var multiJid = es._multiJobIds[tabIdx];
+        if (multiTotal > rows.length && multiJid) {
+            tabBody += '<div id="' + qid + '_mpb_' + tabIdx + '" style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#111;border-top:1px solid #333;font-size:10px;color:#888;">';
+            tabBody += '<span>显示 <b>1</b>-<b>' + rows.length + '</b> 行，共 <b>' + multiTotal + '</b> 行</span>';
+            tabBody += '<button class="btn btn-sm" onclick="_loadMultiAll(\''+qid+'\',' + tabIdx + ',' + multiTotal + ')" style="background:#27ae60;color:#fff;font-size:9px;">显示全部(' + multiTotal + '行)</button>';
+            tabBody += '</div>';
+        }
     } else {
         tabBody = '<div style="padding:12px;color:#888;">查询成功，无结果集</div>';
     }
     pane.innerHTML = tabBody;
+    if (needVTM) { _vtRenderBodyM(qid, tabIdx); }
 }
 
 /** 渲染可编辑表格（从已有状态） */
@@ -794,7 +1280,7 @@ function _qRenderTable(qid) {
     var es = _qState(qid);
     var div = document.getElementById('qr_' + qid);
     if (!div || !es.columns.length) return;
-    var rc = es.rows.length;
+    var rc = es._totalRows || es.rows.length;
     var html = '';
     html += '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:#111;border-bottom:1px solid #333;flex-wrap:wrap;">' +
         '<button class="btn btn-sm" id="'+qid+'_qsave_btn" onclick="_qDoSave(\''+qid+'\')" disabled style="background:#2ecc71;color:#fff;font-size:10px;">💾 保存 (0)</button>' +
@@ -803,45 +1289,75 @@ function _qRenderTable(qid) {
         '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
         '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
         '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-    html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — ' + rc + ' 行'+(es.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(es.server_ms)+'</span>':'')+'</div>';
+    html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — ' + rc + ' 行'+_fmtExecTimeHtml(es._lastResult)+'</div>';
 
-    html += '<div style="overflow:auto;flex:1;min-height:0;"><table class="exp-table"><thead><tr>';
-    html += '<th class="row-sel-header" id="'+qid+'_qsel_all" onclick="_qToggleSelAll(\x27'+qid+'\x27)" title="全选/取消全选">#</th>';
-    es.columns.forEach(function(c){
-        var cType = (es._colTypes && es._colTypes[c]) ? es._colTypes[c] : '';
-        var cCmt = (es._colComments && es._colComments[c]) ? es._colComments[c] : '';
-        var cmtTitle = cCmt ? ' title="'+escapeAttr(cCmt)+'"' : '';
-        var cmtData = cCmt ? ' data-cmt="'+escapeAttr(cCmt)+'"' : '';
-        var ctypeData = cType ? ' data-ctype="'+escapeAttr(cType)+'"' : '';
-        html += '<th'+cmtTitle+cmtData+ctypeData+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
-        if (cType) html += '<div class="col-type">'+escapeHtml(cType)+'</div>';
-        html += '</th>';
-    });
-    html += '</tr></thead><tbody>';
+    // ★ 超过500行启用虚拟滚动：只渲染屏幕上可见的30-50行DOM，滚动流畅不卡死
+    var maxShow = Math.min(es.rows.length, es._showRowCount || 200);
+    var needVT = (maxShow > _VT_THRESHOLD);
+    var ROW_H = _VT_ROW_H;
 
-    var maxShow = Math.min(es.rows.length, 200);
-    for (var i = 0; i < maxShow; i++) {
-        var row = es.rows[i];
-        var isSel = !!es.selectedRows[i];
-        var gripCls = isSel ? 'row-sel-grip selected' : 'row-sel-grip';
-        var rowCls = isSel ? ' class="row-selected"' : '';
-        html += '<tr data-row-idx="'+i+'"'+rowCls+'>';
-        html += '<td class="'+gripCls+'" data-ri="'+i+'" ' +
-            'onclick="_qGripClick(\''+qid+'\',this,'+i+')" ' +
-            'oncontextmenu="_qRowCtx(\''+qid+'\',event,'+i+')" ' +
-            'title="左键选择行 | Shift多选 | 右键菜单">'+(i+1)+'</td>';
-                    row.forEach(function(v, ci){
-            var changedCell = es.changedCells[i + ':' + ci];
-            var val = changedCell ? String(changedCell.newVal) : (v===null ? 'NULL' : String(v));
-            html += '<td><input class="editable-cell" data-ri="'+i+'" data-ci="'+ci+'" data-col="'+escapeAttr(es.columns[ci])+'" value="'+escapeAttr(val)+'" onfocus="this._oldVal=this.value" onblur="_qCellBlur(\''+qid+'\','+i+','+ci+',\''+escapeAttr(es.columns[ci])+'\',this)" spellcheck="false" autocomplete="off"></td>';
+    if (needVT) {
+        // ----- 虚拟滚动模式 -----
+        html += '<div id="'+qid+'_vtwrap" style="overflow-y:auto;flex:1;min-height:0;" onscroll="_vtOnScroll(\x27'+qid+'\x27)">';
+        html += '<table id="'+qid+'_vttable" class="exp-table" style="width:100%;">';
+        html += '<thead style="position:sticky;top:0;z-index:2;background:#1a1a2e;"><tr>';
+        html += '<th class="row-sel-header" id="'+qid+'_qsel_all" onclick="_qToggleSelAll(\x27'+qid+'\x27)" title="全选/取消全选">#</th>';
+        es.columns.forEach(function(c){
+            var cType = (es._colTypes && es._colTypes[c]) ? es._colTypes[c] : '';
+            var cCmt = (es._colComments && es._colComments[c]) ? es._colComments[c] : '';
+            var cmtTitle = cCmt ? ' title="'+escapeAttr(cCmt)+'"' : '';
+            var cmtData = cCmt ? ' data-cmt="'+escapeAttr(cCmt)+'"' : '';
+            var ctypeData = cType ? ' data-ctype="'+escapeAttr(cType)+'"' : '';
+            html += '<th'+cmtTitle+cmtData+ctypeData+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
+            if (cType) html += '<div class="col-type">'+escapeHtml(cType)+'</div>';
+            html += '</th>';
         });
-        html += '</tr>';
+        html += '</tr></thead>';
+        html += '<tbody id="'+qid+'_vtbody"></tbody>';
+        html += '</table></div>';
+    } else {
+        // ----- 普通渲染模式（≤500行）-----
+        html += '<div style="overflow:auto;flex:1;min-height:0;"><table class="exp-table"><thead><tr>';
+        html += '<th class="row-sel-header" id="'+qid+'_qsel_all" onclick="_qToggleSelAll(\x27'+qid+'\x27)" title="全选/取消全选">#</th>';
+        es.columns.forEach(function(c){
+            var cType = (es._colTypes && es._colTypes[c]) ? es._colTypes[c] : '';
+            var cCmt = (es._colComments && es._colComments[c]) ? es._colComments[c] : '';
+            var cmtTitle = cCmt ? ' title="'+escapeAttr(cCmt)+'"' : '';
+            var cmtData = cCmt ? ' data-cmt="'+escapeAttr(cCmt)+'"' : '';
+            var ctypeData = cType ? ' data-ctype="'+escapeAttr(cType)+'"' : '';
+            html += '<th'+cmtTitle+cmtData+ctypeData+'><div class="col-name"'+cmtTitle+'>'+escapeHtml(c)+'</div>';
+            if (cType) html += '<div class="col-type">'+escapeHtml(cType)+'</div>';
+            html += '</th>';
+        });
+        html += '</tr></thead><tbody>';
+        for (var i = 0; i < maxShow; i++) {
+            var row = es.rows[i];
+            if (!row) continue;
+            var isSel = !!es.selectedRows[i];
+            var gripCls = isSel ? 'row-sel-grip selected' : 'row-sel-grip';
+            var rowCls = isSel ? ' class="row-selected"' : '';
+            html += '<tr data-row-idx="'+i+'"'+rowCls+'>';
+            html += '<td class="'+gripCls+'" data-ri="'+i+'" ' +
+                'onclick="_qGripClick(\x27'+qid+'\x27,this,'+i+')" ' +
+                'oncontextmenu="_qRowCtx(\x27'+qid+'\x27,event,'+i+')" ' +
+                'title="左键选择行 | Shift多选 | 右键菜单">'+(i+1)+'</td>';
+            row.forEach(function(v, ci){
+                var changedCell = es.changedCells[i + ':' + ci];
+                var val = changedCell ? String(changedCell.newVal) : (v===null ? 'NULL' : String(v));
+                html += '<td><input class="editable-cell" data-ri="'+i+'" data-ci="'+ci+'" data-col="'+escapeAttr(es.columns[ci])+'" value="'+escapeAttr(val)+'" onfocus="this._oldVal=this.value" onblur="_qCellBlur(\x27'+qid+'\x27,'+i+','+ci+',\x27'+escapeAttr(es.columns[ci])+'\x27,this)" spellcheck="false" autocomplete="off"></td>';
+            });
+            html += '</tr>';
+        }
+        html += '</tbody></table></div>';
     }
-    html += '</tbody></table></div>';
-    if (es.rows.length > maxShow) {
-        html += '<div style="padding:5px;color:#777;font-size:10px;">... 共 ' + es.rows.length + ' 行，显示前 ' + maxShow + ' 行</div>';
+
+    // 行数控制栏
+    if ((es._totalRows > 0 || es.rows.length > 0) && es.columns.length > 0) {
+        html += _renderRowControls(qid);
     }
     div.innerHTML = html;
+    // ★ 虚拟滚动模式下，用 JS 渲染初始可见行
+    if (needVT) { _vtRenderBody(qid); }
     _qUpdateBtns(qid);
     _syncQueryContent(qid);
 }
@@ -861,6 +1377,8 @@ function renderQueryResults(div, results, total, stmtsArr) {
 
     // ★ 保存本次实际执行的 SQL 语句数组，供 _qRefreshData 刷新时复用
     es._executedStmts = stmtsArr || [];
+    // ★ 清除"刚执行"标记（结果已到达，允许渲染）
+    es._execJustStarted = false;
 
     // 只有一个结果时直接展示（支持编辑）
     if (total <= 1) {
@@ -875,6 +1393,13 @@ function renderQueryResults(div, results, total, stmtsArr) {
             es._colTypes = r0.col_types || {};
             es._colComments = r0.comments || {};
             es.server_ms = r0.server_ms;
+            es._lastResult = r0;
+            // 行数元数据（后端返回首屏200行，其余按需加载）
+            es._jobId = r0._job_id || null;
+            es._totalRows = r0.total || 0;
+            es._showRowCount = Math.min(r0.page_size || 200, r0.total || 0);
+            es._loadingAll = false;
+            es._cancelLoadAll = false;
             var rc = r0.total || 0;
             var hc = es.columns.length > 0;
             // 重置编辑状态
@@ -910,7 +1435,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
                     '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
                     '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-                html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rc+' 行'+(r0.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r0.server_ms)+'</span>':'')+'</div>';
+                html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rc+' 行'+_fmtExecTimeHtml(r0)+'</div>';
                 html += '<div style="overflow:auto;flex:1;min-height:0;"><table class="exp-table"><thead><tr>';
                 html += '<th class="row-sel-header" id="'+qid+'_qsel_all" onclick="_qToggleSelAll(\x27'+qid+'\x27)" title="全选/取消全选">#</th>';
                 es.columns.forEach(function(c){
@@ -944,8 +1469,9 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     html += '</tr>';
                 }
                 html += '</tbody></table></div>';
-                if (es.rows.length > maxShow) {
-                    html += '<div style="padding:5px;color:#777;font-size:10px;">... 共 ' + es.rows.length + ' 行，显示前 ' + maxShow + ' 行</div>';
+                // 行数控制栏
+                if ((es._totalRows > 0 || es.rows.length > 0) && es.columns.length > 0) {
+                    html += _renderRowControls(qid);
                 }
             } else {
                 // ★ INSERT/UPDATE/DELETE 等无结果集操作：显示影响行数
@@ -958,10 +1484,10 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     else if (sqlLower.indexOf('DELETE') === 0) opType = '删除';
                     else if (sqlLower.indexOf('REPLACE') === 0) opType = '替换';
                     else if (sqlLower.indexOf('TRUNCATE') === 0) opType = '截断';
-                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+opType+'成功，影响 <b>'+affRows+'</b> 行'+(r0.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r0.server_ms)+'</span>':'')+'</div>';
+                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+opType+'成功，影响 <b>'+affRows+'</b> 行'+_fmtExecTimeHtml(r0)+'</div>';
                 } else {
                     var msg = (r0 && r0.msg) ? r0.msg : '执行成功，无返回结果集';
-                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+escapeHtml(msg)+(r0.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r0.server_ms)+'</span>':'')+'</div>';
+                    html += '<div style="padding:12px;color:#2ecc71;font-size:12px;">✅ '+escapeHtml(msg)+_fmtExecTimeHtml(r0)+'</div>';
                 }
             }
         }
@@ -989,8 +1515,8 @@ function renderQueryResults(div, results, total, stmtsArr) {
             } else {
                 count = ' ✅';
             }
-            // ★ 多结果 tab 标签也显示服务器执行时间
-            if (rr.server_ms !== undefined) count += ' ⏱'+_fmtExecTime(rr.server_ms);
+            // ★ 多结果 tab 标签也显示执行计时（详细分解）
+            count += _fmtExecTimeHtml(rr).replace(' <span style="color:#5dade2;">', ' ').replace('</span>', '');
             var s = (stmtsArr||[])[i] || '';
             var shortSql = s.replace(/\s+/g,' ').trim().substring(0, 30);
             if (shortSql) label = shortSql;
@@ -1008,13 +1534,17 @@ function renderQueryResults(div, results, total, stmtsArr) {
     es._multiLastClicked = new Array(results.length);
     es._multiTableNames = new Array(results.length);
     es._multiStmts = stmtsArr || [];  // ★ 保存每条 SQL，供单 tab 刷新使用
-    es._multiServerMs = new Array(results.length);  // ★ 保存每条 SQL 的服务器执行时间
+    es._multiResults = new Array(results.length);  // ★ 保存每条 SQL 的完整结果（含详细计时、has_more）
+    es._multiJobIds = new Array(results.length);   // ★ 每条 SQL 的 _job_id（供分页）
+    es._multiTotalRows = new Array(results.length); // ★ 每条 SQL 的总行数
     for (var im = 0; im < results.length; im++) {
         es._multiChanged[im] = {};
         es._multiSelected[im] = {};
         es._multiLastClicked[im] = -1;
         es._multiTableNames[im] = detectTableFromSql((stmtsArr||[])[im]||'');
-        es._multiServerMs[im] = (results[im] && results[im].server_ms !== undefined) ? results[im].server_ms : undefined;
+        es._multiResults[im] = results[im] || null;  // ★ 保存完整结果对象
+        es._multiJobIds[im] = (results[im] && results[im]._job_id) || null;
+        es._multiTotalRows[im] = (results[im] && results[im].total) || 0;
     }
 
     html += '<div class="result-tab-content">';
@@ -1038,12 +1568,12 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     '<button class="btn btn-sm" id="'+qid+'_mqdel_'+i2+'" onclick="_qDoDeleteMulti(\''+qid+'\','+i2+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
                     '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\','+i2+')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
                     '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-                tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows2.length+' 行'+(r2.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r2.server_ms)+'</span>':'')+'</div>';
+                tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows2.length+' 行'+_fmtExecTimeHtml(r2)+'</div>';
                 tabBody += '<div style="overflow:auto;flex:1;min-height:0;"><table class="exp-table"><thead><tr>';
                 tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+i2+'" onclick="_qToggleSelAllMulti(\''+qid+'\','+i2+')" title="全选/取消全选">#</th>';
                 cols2.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
                 tabBody += '</tr></thead><tbody>';
-                var mMax = Math.min(rows2.length, 200);
+                var mMax = Math.min(rows2.length, es._showRowCount || 200);
                 for (var mi = 0; mi < mMax; mi++) {
                     var mr = rows2[mi];
                     var isSel = !!es._multiSelected[i2][mi];
@@ -1062,7 +1592,15 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     tabBody += '</tr>';
                 }
                 tabBody += '</tbody></table></div>';
-                if (rows2.length > mMax) tabBody += '<div style="padding:5px;color:#777;font-size:10px;">... 共 '+rows2.length+' 行，显示前 '+mMax+' 行</div>';
+                // ★ 多结果分页：总数超过已显示行数时显示分页按钮
+                var multiTotal = es._multiTotalRows[i2] || rows2.length;
+                var multiJid = es._multiJobIds[i2];
+                if (multiTotal > rows2.length && multiJid) {
+                    tabBody += '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#111;border-top:1px solid #333;font-size:10px;color:#888;">';
+                    tabBody += '<span>显示 <b>1</b>-<b>' + rows2.length + '</b> 行，共 <b>' + multiTotal + '</b> 行</span>';
+                    tabBody += '<button class="btn btn-sm" onclick="_loadMultiAll(\''+qid+'\',' + i2 + ',' + multiTotal + ')" style="background:#27ae60;color:#fff;font-size:9px;">显示全部(' + multiTotal + '行)</button>';
+                    tabBody += '</div>';
+                }
             } else {
                 // ★ INSERT/UPDATE/DELETE 无结果集操作：显示影响行数
                 if (rc2 > 0) {
@@ -1073,9 +1611,9 @@ function renderQueryResults(div, results, total, stmtsArr) {
                     else if (s2u.indexOf('UPDATE') === 0) opType2 = '更新';
                     else if (s2u.indexOf('DELETE') === 0) opType2 = '删除';
                     else if (s2u.indexOf('REPLACE') === 0) opType2 = '替换';
-                    tabBody = '<div style="padding:12px;color:#2ecc71;">✅ '+opType2+'成功，影响 <b>'+rc2+'</b> 行'+(r2.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r2.server_ms)+'</span>':'')+'</div>';
+                    tabBody = '<div style="padding:12px;color:#2ecc71;">✅ '+opType2+'成功，影响 <b>'+rc2+'</b> 行'+_fmtExecTimeHtml(r2)+'</div>';
                 } else {
-                    tabBody = '<div style="padding:12px;color:#2ecc71;">✅ '+escapeHtml(r2.msg||'执行成功')+(r2.server_ms!==undefined?' <span style="color:#5dade2;">⏱ '+_fmtExecTime(r2.server_ms)+'</span>':'')+'</div>';
+                    tabBody = '<div style="padding:12px;color:#2ecc71;">✅ '+escapeHtml(r2.msg||'执行成功')+_fmtExecTimeHtml(r2)+'</div>';
                 }
             }
         }
@@ -1109,6 +1647,72 @@ function renderQueryResults(div, results, total, stmtsArr) {
 }
 
 // ===== 多结果辅助函数 =====
+
+/** 多结果分页：加载下一页 */
+function _loadMultiPage(qid, tabIdx, offset, limit) {
+    var es = _qState(qid);
+    var jid = es._multiJobIds[tabIdx];
+    if (!jid) return;
+    var loaded = es._multiRows[tabIdx].length;
+    eel.get_query_page(jid, loaded, limit)(function(r) {
+        if (r && r.ok) {
+            var existing = es._multiRows[tabIdx];
+            for (var i = 0; i < r.rows.length; i++) {
+                if (loaded + i >= existing.length) {
+                    existing[loaded + i] = r.rows[i];
+                }
+            }
+            _qRebuildSingleTab(qid, tabIdx);
+        }
+    });
+}
+
+/** 多结果分批拉取（用于显示全部，支持取消，防卡死） */
+function _multiFetchBatch(qid, tabIdx, offset) {
+    var es = _qState(qid);
+    var jid = es._multiJobIds[tabIdx];
+    if (!jid) return;
+    if (es._cancelLoadAll) { _qRebuildSingleTab(qid, tabIdx); return; }
+    var total = es._multiTotalRows[tabIdx] || 0;
+    var BATCH = 500;
+    var pagBar = document.getElementById(qid + '_mpb_' + tabIdx);
+    if (pagBar) {
+        pagBar.innerHTML = '<span style="color:#f39c12;">正在加载全部 ' + offset + '/' + total + ' 行...</span>' +
+            '<button class="btn btn-sm" onclick="_cancelShowAll(\x27' + qid + '\x27)" style="background:#e74c3c;color:#fff;font-size:9px;cursor:pointer;">取消</button>';
+    }
+
+    eel.get_query_page(jid, offset, BATCH)(function(r) {
+        if (es._cancelLoadAll) { _qRebuildSingleTab(qid, tabIdx); return; }
+        if (r && r.ok) {
+            var existing = es._multiRows[tabIdx];
+            for (var i = 0; i < r.rows.length; i++) {
+                if (offset + i >= existing.length) {
+                    existing[offset + i] = r.rows[i];
+                }
+            }
+            if (r.page_end >= total || offset + BATCH >= total) {
+                es._loadingAll = false;
+                _qRebuildSingleTab(qid, tabIdx);
+            } else {
+                setTimeout(function() { _multiFetchBatch(qid, tabIdx, offset + BATCH); }, 30);
+            }
+        } else {
+            if (pagBar) pagBar.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + (r ? r.msg : '无响应') + '</span>';
+            es._loadingAll = false;
+        }
+    });
+}
+
+/** 多结果显示全部（分批加载，支持取消） */
+function _loadMultiAll(qid, tabIdx, total) {
+    var es = _qState(qid);
+    var jid = es._multiJobIds[tabIdx];
+    if (!jid) return;
+    es._loadingAll = true;
+    es._cancelLoadAll = false;
+    var loaded = es._multiRows[tabIdx].length;
+    _multiFetchBatch(qid, tabIdx, loaded);
+}
 
 /** 多结果单元格编辑失焦 */
 function _qCellBlurMulti(qid, tabIdx, rowIdx, colIdx, inputEl) {
@@ -1408,7 +2012,7 @@ function closeSingleResultTab(evt, qid, tabIdx, tid) {
 // ==================== 工具函数 ====================
 function loadCategoryItems(conn, db, cat, callback, schema) {
     var sch = schema || '';
-    if (cat === 'tables') eel.db_explore_get_tables(conn,db,sch)(function(r){callback(r&&r.ok?(r.tables||[]):[]);});
+    if (cat === 'tables') _eelAutoAsync(eel.db_explore_get_tables(conn,db,sch), function(r){callback(r&&r.ok?(r.tables||[]):[]);});
     else if (cat === 'views') eel.db_explore_get_views(conn,db,sch)(function(r){callback(r&&r.ok?(r.views||[]).map(function(v){return{name:v};}):[]);});
     else if (cat === 'procedures') eel.db_explore_get_procedures(conn,db,sch)(function(r){callback(r&&r.ok?(r.procedures||[]).filter(function(p){return p.type==='PROCEDURE';}):[]);});
     else if (cat === 'functions') eel.db_explore_get_procedures(conn,db,sch)(function(r){callback(r&&r.ok?(r.procedures||[]).filter(function(p){return p.type==='FUNCTION';}):[]);});

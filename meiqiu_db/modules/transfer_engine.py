@@ -33,19 +33,19 @@ class TransferEngine:
     def src_url(self) -> str:
         u = quote_plus(self.src_user)
         p = quote_plus(self.src_pwd)
-        return f"mysql+pymysql://{u}:{p}@{self.src_host}:{self.src_port}/{self.src_db}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.src_host}:{self.src_port}/{self.src_db}?charset=utf8mb4"
 
     @property
     def dst_url(self) -> str:
         u = quote_plus(self.dst_user)
         p = quote_plus(self.dst_pwd)
-        return f"mysql+pymysql://{u}:{p}@{self.dst_host}:{self.dst_port}/{self.dst_db}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}/{self.dst_db}?charset=utf8mb4"
 
     @property
     def dst_url_no_db(self) -> str:
         u = quote_plus(self.dst_user)
         p = quote_plus(self.dst_pwd)
-        return f"mysql+pymysql://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4"
 
     def _create_dst_database(self):
         tmp_engine = create_engine(self.dst_url_no_db, connect_args=_connect_args("mysql", timeout=10))

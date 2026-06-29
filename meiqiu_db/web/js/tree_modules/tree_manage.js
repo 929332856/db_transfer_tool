@@ -283,7 +283,6 @@ function showConnDialog(pid, editCid) {
     document.getElementById('conn_modal_overlay').classList.add('show');
 }
 function hideConnDlg() { document.getElementById('conn_modal_overlay').classList.remove('show'); }
-var _connTestTimer = null;
 var _connTesting = false;
 function connTest() {
     var c = readConnForm(); var st = document.getElementById('cf_test');
@@ -291,18 +290,13 @@ function connTest() {
     if (_connTesting) { st.textContent='⏳ 正在测试...'; st.style.color='#f39c12'; return; }
     _connTesting = true;
     st.textContent='⏳'; st.style.color='#f39c12';
-    if (_connTestTimer) clearTimeout(_connTestTimer);
-    _connTestTimer = setTimeout(function() {
-        if (_connTesting) {
-            st.textContent='⏱ 连接超时（20秒）'; st.style.color='#e74c3c';
-            _connTesting = false;
-        }
-    }, 20000);
-    eel.tree_test_conn(c)(function(r){
-        if (_connTestTimer) clearTimeout(_connTestTimer);
+    _eelAutoAsync(eel.tree_test_conn(c), function(r){
         _connTesting = false;
         if(r&&r.ok){st.textContent='✅ '+r.msg;st.style.color='#2ecc71';}
         else{st.textContent='❌ '+(r?r.msg:'失败');st.style.color='#e74c3c';}
+    }, 20000, function() {
+        _connTesting = false;
+        st.textContent='⏱ 连接超时（20秒）'; st.style.color='#e74c3c';
     });
 }
 function connSave(pid, editCid) {

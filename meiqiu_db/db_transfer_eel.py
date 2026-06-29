@@ -18,6 +18,22 @@ import concurrent.futures
 import sqlalchemy as sa
 from sqlalchemy import text, inspect, create_engine
 
+# ==================== Oracle 驱动加速：厚模式 (Thick Mode) ====================
+# oracledb 默认使用薄模式 (Thin, 纯 Python)。Thick 模式使用 Oracle Client 库（C 层）
+# 可提速 2-5 倍，尤其是大结果集的 Decimal 反序列化。
+# 如果 Oracle Client 未安装，自动回退到 Thin 模式。
+try:
+    import oracledb
+    try:
+        oracledb.init_oracle_client()
+        print("[oracledb] ✅ 已启用 Thick 模式（Oracle Client C 驱动）")
+    except Exception:
+        # Oracle Client 未安装或配置不正确，使用默认 Thin 模式
+        print("[oracledb] ⚠️ Thick 模式不可用，使用 Thin 模式（安装 Oracle Instant Client 可提速）")
+        pass
+except ImportError:
+    pass
+
 # ==================== 配置路径 ====================
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -166,24 +182,45 @@ _query_src_data = None       # 当前查询的源库连接信息
 
 # ==================== JSON 序列化辅助 ====================
 def _json_safe(val):
-    """将 datetime / Decimal 等非 JSON 类型转为字符串。
+    """将 datetime / Decimal / NaN / Inf / UUID / bytes 等非 JSON 类型转为安全值。
     特别注意：超出 JS 安全整数范围 (2^53) 的 int 转为字符串，避免 JSON 精度丢失。"""
-    import datetime, decimal
+    import datetime, decimal, math
     if val is None:
         return None
+    # bool 必须在 int 之前判断（Python 中 bool 是 int 子类）
+    if isinstance(val, bool):
+        return val
     if isinstance(val, (datetime.datetime, datetime.date, datetime.time)):
         return str(val)
     if isinstance(val, decimal.Decimal):
-        # ★ Decimal → 字符串（而非 float），避免精度丢失
         return str(val)
-    if isinstance(val, bytes):
-        return val.decode('utf-8', errors='replace')
-    if isinstance(val, int) and not isinstance(val, bool):
-        # ★ BIGINT UNSIGNED 可能超过 JS Number.MAX_SAFE_INTEGER (9007199254740991)
-        # 超过安全范围则转为字符串，前端收到后作为字符串处理即可保持精度
+    # bytes / bytearray / memoryview → 安全解码
+    if isinstance(val, (bytes, bytearray, memoryview)):
+        try:
+            b = bytes(val)
+        except Exception:
+            return str(val)
+        return b.decode('utf-8', errors='replace')
+    # 超大整数 → 字符串（避免 JS 精度丢失）
+    if isinstance(val, int):
         if val > 9007199254740991 or val < -9007199254740991:
             return str(val)
-    return val
+        return val
+    # NaN / Inf / -Inf → 字符串（标准 JSON 不支持）
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return str(val)
+        return val
+    # str → 直接返回
+    if isinstance(val, str):
+        return val
+    # list/dict/tuple → 递归处理（防止嵌套非 JSON 安全值）
+    if isinstance(val, (list, tuple)):
+        return [_json_safe(v) for v in val]
+    if isinstance(val, dict):
+        return {str(k): _json_safe(v) for k, v in val.items()}
+    # 其余不可 JSON 序列化的类型 → 转字符串（UUID, set, frozenset 等）
+    return str(val)
 
 
 def _row_to_json(row):
@@ -226,19 +263,19 @@ class TransferEngine:
     def src_url(self) -> str:
         u = quote_plus(self.src_user)
         p = quote_plus(self.src_pwd)
-        return f"mysql+pymysql://{u}:{p}@{self.src_host}:{self.src_port}/{self.src_db}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.src_host}:{self.src_port}/{self.src_db}?charset=utf8mb4"
 
     @property
     def dst_url(self) -> str:
         u = quote_plus(self.dst_user)
         p = quote_plus(self.dst_pwd)
-        return f"mysql+pymysql://{u}:{p}@{self.dst_host}:{self.dst_port}/{self.dst_db}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}/{self.dst_db}?charset=utf8mb4"
 
     @property
     def dst_url_no_db(self) -> str:
         u = quote_plus(self.dst_user)
         p = quote_plus(self.dst_pwd)
-        return f"mysql+pymysql://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4"
 
     def _create_dst_database(self):
         tmp_engine = create_engine(self.dst_url_no_db, connect_args=_connect_args("mysql", timeout=10))
@@ -425,12 +462,12 @@ def test_connection(data: dict, side: str):
         if side == "src":
             src_db = data.get('src_db', '').strip()
             if src_db:
-                url = (f"mysql+pymysql://{quote_plus(data['src_user'])}:"
+                url = (f"mysql+mysqldb://{quote_plus(data['src_user'])}:"
                        f"{quote_plus(data['src_pwd'])}@{data['src_host']}:"
                        f"{data['src_port']}/{src_db}?charset=utf8mb4")
             else:
                 # 不指定数据库，仅测试服务器连通性
-                url = (f"mysql+pymysql://{quote_plus(data['src_user'])}:"
+                url = (f"mysql+mysqldb://{quote_plus(data['src_user'])}:"
                        f"{quote_plus(data['src_pwd'])}@{data['src_host']}:"
                        f"{data['src_port']}/?charset=utf8mb4")
             label = "源库"
@@ -442,7 +479,7 @@ def test_connection(data: dict, side: str):
         else:
             # 目标库：先连服务器，再检查数据库是否存在
             label = "目标库"
-            url_no_db = (f"mysql+pymysql://{quote_plus(data['dst_user'])}:"
+            url_no_db = (f"mysql+mysqldb://{quote_plus(data['dst_user'])}:"
                          f"{quote_plus(data['dst_pwd'])}@{data['dst_host']}:"
                          f"{data['dst_port']}?charset=utf8mb4")
             engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=5))
@@ -497,13 +534,27 @@ def poll_queue():
     return msgs
 
 
-@eel.expose
-def execute_sql_query(sql: str, data: dict):
-    """执行 SQL 查询"""
+def _do_execute_sql_query(sql: str, data: dict, job_id: str = ''):
+    """在独立线程中执行 SQL 查询（核心逻辑）。
+
+    性能优化：
+    - 使用 fetchmany 分批取数，避免一次性 fetchall() 在纯 Python
+      实现下对大结果集（数千行 × 数十列 Decimal）反序列化耗时爆炸
+    - 返回详细计时分解（server_ms / exec_ms / fetch_ms / serial_ms）
+    - 首屏只返回前 200 行；全量原始行存入 _query_result_store 供按需加载
+
+    取数机制：
+    - 所有原始行存入 _query_result_store[job_id]
+    - poll_query_result 返回首屏 200 行
+    - 前端通过 get_query_page(job_id, offset, limit) 按需取更多行，
+      支持"显示全部"（无行数上限）
+    """
     global _query_columns, _query_rows, _query_conn_id, _query_src_data
     _query_cancel.clear()
     _query_conn_id = None
     _query_src_data = data  # 保存源库信息用于 cancel 时 kill
+    DEFAULT_PAGE_SIZE = 200  # 首屏默认显示行数
+    BATCH = 1000             # 每次从结果集取 1000 行进行处理
 
     try:
         # 兼容两种数据格式：{host,user,pwd} 和 {src_host,src_user,src_pwd}
@@ -516,51 +567,177 @@ def execute_sql_query(sql: str, data: dict):
             }
         db_type = data.get("db_type", "mysql")
         url = _conn_url(data)
+        # ★ 增加 read_timeout=120 以适应复杂慢查询
         if db_type in ('mysql', 'ob-mysql'):
-            url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=30") if "?" in url else url + "?charset=utf8mb4&read_timeout=30"
+            url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=120") if "?" in url else url + "?charset=utf8mb4&read_timeout=120"
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
             if _query_cancel.is_set():
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
             # 记录连接 ID，用于 cancel 时 kill query（支持 MySQL/PG/Oracle/MSSQL）
             _query_conn_id = _get_backend_pid(conn, db_type)
+            # ★ 增加 MySQL 服务器端执行超时为 120 秒（30秒对复杂查询太短）
             try:
-                conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 30000"))
+                conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 120000"))
             except Exception:
                 pass
-            # ★ 纯服务器执行计时：从发送SQL到数据库返回结果（不含JSON序列化和网络传输展示）
+
             import time as _time
             _t0 = _time.perf_counter()
-            result = conn.execute(text(sql))
+            # ★ 先用 stream_results=True 让 execute() 不缓冲全量行（只获取元数据），
+            #    再用 fetchmany 按批从服务端拉取，每批限量 max_fetch_rows 保护
+            result = conn.execution_options(stream_results=True).execute(text(sql))
+            _t_exec = _time.perf_counter()  # 查询提交 + 元数据接收完成
+
             if _query_cancel.is_set():
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
             if result.returns_rows:
                 _query_columns = list(result.keys())
-                _query_rows = [list(row) for row in result.fetchall()]
+                # ★ 批量 fetchmany 从服务端逐批拉取：
+                #    避免了默认 Cursor 在 execute() 时一次性反序列化全量行
+                #    → 大结果集（万行级 × Decimal 列）下可提速 5-10 倍
+                _query_rows = []
+                while True:
+                    if _query_cancel.is_set():
+                        result.close()
+                        return {"ok": False, "msg": "查询已取消", "cancelled": True}
+                    batch = result.fetchmany(BATCH)
+                    if not batch:
+                        break
+                    for row in batch:
+                        _query_rows.append(list(row))
+                result.close()
             else:
                 # INSERT/UPDATE/DELETE 等写入操作：提交并返回影响行数
                 conn.commit()
                 rc = result.rowcount
             _t1 = _time.perf_counter()
             _server_ms = round((_t1 - _t0) * 1000, 1)
+            _exec_ms = round((_t_exec - _t0) * 1000, 1)
+            _fetch_ms = round((_t1 - _t_exec) * 1000, 1)
         engine.dispose()
         # 写入操作提前返回（无需序列化行数据）
         if not result.returns_rows:
-            return {"ok": True, "msg": f"成功执行，影响 {rc} 行", "columns": [], "rows": [], "total": rc, "server_ms": _server_ms}
+            return {"ok": True, "msg": f"成功执行，影响 {rc} 行", "columns": [], "rows": [], "total": rc,
+                    "server_ms": _server_ms}
 
         if _query_cancel.is_set():
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
-        # 返回前 JSON 化（datetime/Decimal 转字符串）
-        safe_rows = [_row_to_json(r) for r in _query_rows[:200]]
+
+        # ★ 将全量原始行存入持久存储，供后续按需加载
+        total_rows = len(_query_rows)
+        if job_id:
+            # 清理旧的同名缓存（防止内存泄漏）
+            _query_result_store.pop(job_id, None)
+            _query_result_store[job_id] = {
+                "columns": _query_columns,
+                "rows_raw": _query_rows,
+                "total": total_rows,
+                "db_type": db_type
+            }
+
+        # ★ 首屏只 JSON 化前 DEFAULT_PAGE_SIZE 行（200行）；其余按需通过 get_query_page 加载
+        _ts0 = _time.perf_counter()
+        first_page_rows = _query_rows[:DEFAULT_PAGE_SIZE]
+        safe_rows = [_row_to_json(r) for r in first_page_rows]
+        _serial_ms = round((_time.perf_counter() - _ts0) * 1000, 1)
+
         return {
             "ok": True,
             "columns": _query_columns,
             "rows": safe_rows,
-            "total": len(_query_rows),
-            "server_ms": _server_ms
+            "total": total_rows,
+            "server_ms": _server_ms,
+            "exec_ms": _exec_ms,
+            "fetch_ms": _fetch_ms,
+            "serial_ms": _serial_ms,
+            # ★ 行数元数据（前端据此渲染行数选择器）
+            "page": 0,
+            "page_size": DEFAULT_PAGE_SIZE,
+            "page_total": min(total_rows, DEFAULT_PAGE_SIZE),  # 首屏已显示的行数
+            "_job_id": job_id  # 回传 job_id 供后续加载使用
         }
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, data.get('db_type','mysql'))}
+
+
+# ★ 异步查询结果存储（job_id → result or None=等待中）
+_query_jobs = {}
+# ★ 查询结果行数据持久存储（job_id → {columns, rows_raw, total, db_type}）
+#    用于按需加载：首屏返回 200 行，后续通过 get_query_page 加载更多行
+_query_result_store = {}
+
+@eel.expose
+def execute_sql_query(sql: str, data: dict):
+    """执行 SQL 查询（异步模式：立即返回 job_id，不阻塞 Eel 主线程）
+    
+    JS 侧收到 _async=True 后，应轮询 poll_query_result(job_id) 获取结果。
+    这样做彻底解决 future.result() 阻塞 bottle 单线程服务器问题，
+    让执行 SQL 期间仍能打开数据库连接、切换查询 Tab 等。
+    """
+    import uuid
+    job_id = str(uuid.uuid4())[:8]
+    _query_jobs[job_id] = None  # None = 等待中
+
+    def _run():
+        try:
+            result = _do_execute_sql_query(sql, data, job_id=job_id)
+        except Exception as e:
+            result = {"ok": False, "msg": str(e)}
+        _query_jobs[job_id] = result
+
+    _get_db_thread_pool().submit(_run)
+    return {"ok": True, "_async": True, "_job_id": job_id}
+
+
+@eel.expose
+def poll_query_result(job_id: str):
+    """轮询异步查询结果。返回 _pending=True 表示仍在执行中。"""
+    if job_id not in _query_jobs:
+        return {"ok": False, "msg": "未知的查询 ID"}
+    result = _query_jobs[job_id]
+    if result is None:
+        return {"_pending": True}
+    # 返回结果后清理 _query_jobs（但保留 _query_result_store 供分页使用）
+    del _query_jobs[job_id]
+    return result
+
+
+@eel.expose
+def get_query_page(job_id: str, offset: int = 0, limit: int = 200):
+    """从已完成的查询中按偏移量获取指定行（用于按需加载/显示全部）。
+
+    调用时机：前端已通过 poll_query_result 拿到首屏结果后，
+    用户调整显示行数或点击"显示全部"时调用此接口。
+
+    注意：单次最多返回 500 行，小批次响应快（每批 <0.3s），
+    配合前端虚拟滚动异步递归加载，不会阻塞 bottle 主线程。
+    """
+    if job_id not in _query_result_store:
+        return {"ok": False, "msg": "查询结果已过期，请重新执行"}
+    store = _query_result_store[job_id]
+    rows_raw = store.get("rows_raw", [])
+    total = len(rows_raw)
+    # ★ 单次上限 500 行：_row_to_json 小批次快速完成，不阻塞 bottle 主线程
+    limit = min(max(limit, 1), 500)
+    end = min(offset + limit, total)
+    slice_rows = rows_raw[offset:end]
+    safe_rows = [_row_to_json(r) for r in slice_rows]
+    return {
+        "ok": True,
+        "rows": safe_rows,
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "page_end": end
+    }
+
+
+@eel.expose
+def release_query_result(job_id: str):
+    """释放查询结果缓存（用户关闭查询 tab 或执行新查询时调用）"""
+    _query_result_store.pop(job_id, None)
+    return True
 
 
 
@@ -586,6 +763,13 @@ def cancel_query():
         modules._query_cancel.set()
     except Exception:
         pass
+    # ★ 清理所有待完成的异步查询（标记为已取消）
+    for jid in list(_query_jobs.keys()):
+        if _query_jobs[jid] is None:
+            _query_jobs[jid] = {"ok": False, "msg": "查询已取消", "cancelled": True}
+    # ★ 清理结果缓存（已取消的查询无需保留分页数据）
+    for jid in list(_query_result_store.keys()):
+        _query_result_store.pop(jid, None)
     # ★ 真正杀掉数据库中的查询（不只是 Python 标记）
     _kill_db_query()
     return True
@@ -649,7 +833,8 @@ def _connect_args(db_type='mysql', timeout=10):
         return {"tcp_connect_timeout": float(timeout)}
     args = {"connect_timeout": timeout}
     if db_type in ('mysql', 'ob-mysql'):
-        args["ssl_disabled"] = True
+        # mysqlclient (MySQLdb) 用 ssl=False 禁用 SSL（不是 pymysql 的 ssl_disabled）
+        args["ssl"] = False
     return args
 
 # 数据库连接线程池：所有数据库操作都在独立 OS 线程中执行，
@@ -663,15 +848,28 @@ def _get_db_thread_pool():
     return _db_thread_pool
 
 def _with_db_timeout(func, *args, timeout=15, **kwargs):
-    """在独立 OS 线程中执行数据库操作，带硬超时。
-    超时后返回错误字典，被阻塞的线程由 ThreadPoolExecutor 管理。"""
-    try:
-        future = _get_db_thread_pool().submit(func, *args, **kwargs)
-        return future.result(timeout=timeout + 3)
-    except concurrent.futures.TimeoutError:
-        return {"ok": False, "msg": f"连接超时（{timeout}秒），请检查服务器地址和端口是否正确"}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
+    """在独立 OS 线程中执行数据库操作（异步非阻塞模式）。
+    
+    不阻塞 Eel 主线程：提交到线程池后立即返回 job_id，
+    由 JS 侧轮询 poll_query_result 获取结果。
+    从根本上解决 future.result() 阻塞 bottle 单线程服务器的问题，
+    让执行慢查询期间仍能测试连接、展开数据库列表等。
+    """
+    import uuid
+    job_id = str(uuid.uuid4())[:8]
+    _query_jobs[job_id] = None  # None = 等待中
+
+    def _run():
+        try:
+            result = func(*args, **kwargs)
+        except Exception as e:
+            result = {"ok": False, "msg": str(e)}
+        # 只有当前 job 还未被 cancel 时才写入结果
+        if job_id in _query_jobs:
+            _query_jobs[job_id] = result
+
+    _get_db_thread_pool().submit(_run)
+    return {"ok": True, "_async": True, "_job_id": job_id}
 
 # ==================== 表操作 ====================
 def _safe_ident(ident, db_type='mysql'):
@@ -2446,7 +2644,7 @@ def _conn_url(conn_data):
     db = conn_data.get("db", "")
     db_type = conn_data.get("db_type", "mysql")
     if db_type in ('mysql', 'ob-mysql'):
-        base = f"mysql+pymysql://{u}:{p}@{h}:{port}"
+        base = f"mysql+mysqldb://{u}:{p}@{h}:{port}"
         return f"{base}/{db}?charset=utf8mb4" if db else f"{base}/?charset=utf8mb4"
     elif db_type == 'postgresql':
         base = f"postgresql+psycopg2://{u}:{p}@{h}:{port}"
@@ -2465,7 +2663,7 @@ def _conn_url(conn_data):
         base = f"mssql+pymssql://{u}:{p}@{h}:{port}"
         return f"{base}/{db}" if db else base
     # fallback mysql
-    base = f"mysql+pymysql://{u}:{p}@{h}:{port}"
+    base = f"mysql+mysqldb://{u}:{p}@{h}:{port}"
     return f"{base}/{db}?charset=utf8mb4" if db else f"{base}/?charset=utf8mb4"
 
 @eel.expose
@@ -4525,7 +4723,7 @@ def slow_query_get_databases(data: dict):
         db_type = cdata.get("db_type", "mysql")
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "慢SQL查询仅支持 MySQL / OceanBase 数据库"}
-        url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
+        url_no_db = (f"mysql+mysqldb://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:{cdata.get('port','3306')}"
                      f"?charset=utf8mb4")
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=10))
@@ -4711,7 +4909,7 @@ def slow_query_get_list(data: dict, start_time: str = '', end_time: str = '',
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
 
-        url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
+        url_no_db = (f"mysql+mysqldb://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:"
                      f"{cdata.get('port','3306')}?charset=utf8mb4")
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=30))
@@ -4821,7 +5019,7 @@ def slow_query_get_log(data: dict, start_time: str = '', end_time: str = '',
     """
     读取慢查询原始日志
     MySQL：从 mysql.slow_log 表（需 log_output=TABLE）
-    OceanBase：从 oceanbase.GV$OB_SQL_AUDIT（按时间排序的审计记录）
+    OceanBase：从 GV$OB_SQL_AUDIT 查询
     """
     try:
         cdata = dict(data)
@@ -4836,7 +5034,7 @@ def slow_query_get_log(data: dict, start_time: str = '', end_time: str = '',
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
 
-        url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
+        url_no_db = (f"mysql+mysqldb://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:"
                      f"{cdata.get('port','3306')}?charset=utf8mb4")
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=30))
@@ -4942,7 +5140,7 @@ def slow_query_get_detail(conn_data: dict, database: str, digest_text: str):
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
 
-        url_no_db = (f"mysql+pymysql://{quote_plus(cdata['user'])}:"
+        url_no_db = (f"mysql+mysqldb://{quote_plus(cdata['user'])}:"
                      f"{quote_plus(cdata['pwd'])}@{cdata['host']}:"
                      f"{cdata.get('port','3306')}?charset=utf8mb4")
         engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=15))

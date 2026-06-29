@@ -6,7 +6,7 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 # 收集各包的子模块（字符串列表，用于 hiddenimports）
 eel_subs = collect_submodules('eel')
 sa_subs = collect_submodules('sqlalchemy')
-py_subs = collect_submodules('pymysql')
+py_subs = collect_submodules('MySQLdb')
 bt_subs = collect_submodules('bottle')
 pg_subs = collect_submodules('psycopg2')
 or_subs = collect_submodules('oracledb')
@@ -17,7 +17,7 @@ cr_subs = collect_submodules('cryptography')  # oracle thin 模式依赖
 # 收集各包的数据文件（元组列表，用于 datas）
 eel_datas = collect_data_files('eel')
 sa_datas = collect_data_files('sqlalchemy')
-py_datas = collect_data_files('pymysql')
+py_datas = collect_data_files('MySQLdb')
 bt_datas = collect_data_files('bottle')
 pg_datas = collect_data_files('psycopg2')
 or_datas = collect_data_files('oracledb')

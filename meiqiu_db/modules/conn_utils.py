@@ -5,6 +5,16 @@ from urllib.parse import quote_plus
 import re
 from sqlalchemy import create_engine, text
 
+# ★ Oracle oracledb 驱动加速：尝试 Thick 模式（C 层 Oracle Client，比 Thin 快 2-5 倍）
+try:
+    import oracledb as _odb
+    try:
+        _odb.init_oracle_client()
+    except Exception:
+        pass
+except ImportError:
+    pass
+
 def _connect_args(db_type='mysql', timeout=10):
     """返回 create_engine 的 connect_args，MySQL 禁用 SSL
     注意：oracledb 不支持 connect_timeout 参数，Oracle 不使用此参数
@@ -14,7 +24,8 @@ def _connect_args(db_type='mysql', timeout=10):
         return {}
     args = {"connect_timeout": timeout}
     if db_type in ('mysql', 'ob-mysql'):
-        args["ssl_disabled"] = True
+        # mysqlclient (MySQLdb) 用 ssl=False 禁用 SSL（不是 pymysql 的 ssl_disabled）
+        args["ssl"] = False
     return args
 
 # ==================== 表操作 ====================
@@ -47,8 +58,8 @@ def _build_table_ref(conn_data, database, table_name, schema=''):
 
 
 _DRIVER_HINTS = {
-    'mysql':      'pymysql',
-    'ob-mysql':   'pymysql',
+    'mysql':      'mysqlclient',
+    'ob-mysql':   'mysqlclient',
     'postgresql': 'psycopg2-binary',
     'oracle':     'oracledb',
     'mssql':      'pymssql',
@@ -70,7 +81,7 @@ def _conn_url(conn_data):
     db = conn_data.get("db", "")
     db_type = conn_data.get("db_type", "mysql")
     if db_type in ('mysql', 'ob-mysql'):
-        base = f"mysql+pymysql://{u}:{p}@{h}:{port}"
+        base = f"mysql+mysqldb://{u}:{p}@{h}:{port}"
         return f"{base}/{db}?charset=utf8mb4" if db else f"{base}/?charset=utf8mb4"
     elif db_type == 'postgresql':
         base = f"postgresql+psycopg2://{u}:{p}@{h}:{port}"
@@ -89,5 +100,5 @@ def _conn_url(conn_data):
         base = f"mssql+pymssql://{u}:{p}@{h}:{port}"
         return f"{base}/{db}" if db else base
     # fallback mysql
-    base = f"mysql+pymysql://{u}:{p}@{h}:{port}"
+    base = f"mysql+mysqldb://{u}:{p}@{h}:{port}"
     return f"{base}/{db}?charset=utf8mb4" if db else f"{base}/?charset=utf8mb4"
