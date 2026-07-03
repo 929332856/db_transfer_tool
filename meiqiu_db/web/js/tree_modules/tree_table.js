@@ -372,8 +372,13 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         window['_activeWhereSql_'+tid] = '';
 
         // ★ 服务端重新加载数据（带当前 WHERE 条件）
+        // ★ 取消令牌：每次 _serverReload / _fetchPage 前自增，回调中检查令牌是否匹配，防止旧异步回调污染 UI
+        var _reloadToken = 0;
+
         function _serverReload() {
             _pageLoading = true;
+            // ★ 自增令牌，使之前的异步回调失效
+            var myToken = ++_reloadToken;
             _activeWhereSql = window['_activeWhereSql_'+tid] || '';
             var whereSql = _activeWhereSql;
             if (_pageOffset !== 0 || _pageSize !== 50) { _pageOffset = 0; _pageSize = 50; }
@@ -382,11 +387,55 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             var infoEl = document.getElementById(tid+'_pager_info');
             if (infoEl) infoEl.textContent = '⏳ 查询中...';
             var wrap = document.getElementById(tid);
-            if (wrap) { wrap.style.opacity = '0.6'; wrap.style.pointerEvents = 'none'; }
-            eel.table_preview_data_fast(conn, _connDb, _connTn, _connSch, sortCol, sortDir, whereSql)(function(r2){
-                _pageLoading = false;
+            // ★ 显示取消遮罩（带 kill query 按钮）
+            var overlay = null;
+            var _cancelled = false;
+            if (wrap) {
+                wrap.style.opacity = '0.6'; wrap.style.pointerEvents = 'none';
+                overlay = document.createElement('div');
+                overlay.id = tid + '_reload_overlay';
+                overlay.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;' +
+                    'background:rgba(0,0,0,0.5);z-index:100;display:flex;' +
+                    'flex-direction:column;align-items:center;justify-content:center;gap:12px;' +
+                    'border-radius:6px;min-height:120px;';
+                overlay.innerHTML = '<div style="font-size:28px;animation:spin 1s linear infinite;">⏳</div>' +
+                    '<div style="color:#ccc;font-size:14px;">正在加载数据...</div>' +
+                    '<button id="' + tid + '_cancel_reload_btn" style="padding:6px 20px;border:1px solid #e74c3c;' +
+                    'border-radius:4px;background:rgba(255,255,255,0.1);color:#e74c3c;cursor:pointer;font-size:12px;">✕ 取消查询</button>';
+                wrap.style.position = 'relative';
+                wrap.appendChild(overlay);
+                // 绑定取消按钮
+                setTimeout(function(){
+                    var cbtn = document.getElementById(tid + '_cancel_reload_btn');
+                    if (cbtn) cbtn.onclick = function() {
+                        _cancelled = true;
+                        myToken = 0; // ★ 使旧令牌失效
+                        _pageLoading = false;
+                        // ★ 调用后端取消查询并 kill 数据库连接
+                        eel.cancel_query()();
+                        _hideOverlay();
+                        if (infoEl) infoEl.textContent = '⏸ 查询已取消';
+                    };
+                }, 50);
+            }
+            function _hideOverlay() {
+                var ov = document.getElementById(tid + '_reload_overlay');
+                if (ov) ov.remove();
                 if (wrap) { wrap.style.opacity = '1'; wrap.style.pointerEvents = ''; }
+            }
+            eel.table_preview_data_fast(conn, _connDb, _connTn, _connSch, sortCol, sortDir, whereSql)(function(r2){
+                // ★ 令牌不匹配或已取消，忽略此回调
+                if (myToken !== _reloadToken || _cancelled) {
+                    _hideOverlay();
+                    return;
+                }
+                _pageLoading = false;
+                _hideOverlay();
                 if (!r2 || !r2.ok) {
+                    if (r2 && r2.cancelled) {
+                        if (infoEl) infoEl.textContent = '⏸ 查询已取消';
+                        return;
+                    }
                     if (infoEl) infoEl.textContent = (r2 && r2.msg) || '查询失败';
                     return;
                 }
@@ -579,13 +628,24 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 return;
             }
             // ★ 构建 SQL WHERE 条件（LIKE 模糊匹配）
+            // 根据数据库类型使用正确的引号（MySQL 用反引号，PostgreSQL/Oracle 用双引号，MSSQL 用方括号）
+            var dbType = (conn && conn.db_type) || 'mysql';
+            function _quoteCol(name) {
+                if (dbType === 'postgresql' || dbType === 'oracle') {
+                    return '"' + name + '"';
+                } else if (dbType === 'mssql') {
+                    return '[' + name + ']';
+                } else {
+                    return '`' + name + '`';
+                }
+            }
             var conditions = [];
             for (var ci in _colFilters) {
                 var ft = _colFilters[ci];
                 if (!ft || ft.trim() === '') continue;
                 var colName = cols[parseInt(ci)];
                 var escapedVal = ft.trim().replace(/'/g, "\\'").replace(/\\/g, "\\\\");
-                conditions.push('`' + colName + '` LIKE \'%' + escapedVal + '%\'');
+                conditions.push(_quoteCol(colName) + ' LIKE \'%' + escapedVal + '%\'');
             }
             var whereSql = conditions.join(' AND ');
             window['_activeWhereSql_'+tid] = whereSql;
@@ -896,6 +956,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
 
         registerWhereState(tid, cols, rows, sortRef, function(){_serverReload();}, colTypes);
         _tabIdToTid['data_'+tn] = tid;
+        // ★ 暴露本地 render（仅重新绘制 DOM，不请求服务端），供 renderObjectPanel 切换 tab 时使用
+        window['_renderLocal_'+tid] = render;
 
         // ★ 暴露清除列筛选的函数，供 applyWhere 调用
         window['_clearColFilters_'+tid] = function() {
@@ -996,16 +1058,54 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
 
         function _fetchPageFromServer(offset, limit) {
             _pageLoading = true;
+            var myToken = ++_reloadToken;
+            var _cancelled = false;
             var wrap = document.getElementById(tid);
+            var overlay = null;
             if (wrap) { wrap.style.opacity = '0.6'; wrap.style.pointerEvents = 'none'; }
             var infoEl = document.getElementById(tid + '_pager_info');
             if (infoEl) infoEl.textContent = '⏳ 加载第 ' + (Math.floor(offset/Math.max(limit,1))+1) + ' 页...';
+            // ★ 显示取消按钮（翻页加载也可能很慢）
+            if (wrap) {
+                overlay = document.createElement('div');
+                overlay.id = tid + '_page_overlay';
+                overlay.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;' +
+                    'background:rgba(0,0,0,0.5);z-index:100;display:flex;' +
+                    'flex-direction:column;align-items:center;justify-content:center;gap:12px;' +
+                    'border-radius:6px;min-height:120px;';
+                overlay.innerHTML = '<div style="font-size:28px;animation:spin 1s linear infinite;">⏳</div>' +
+                    '<div style="color:#ccc;font-size:14px;">正在加载分页数据...</div>' +
+                    '<button id="' + tid + '_cancel_page_btn" style="padding:6px 20px;border:1px solid #e74c3c;' +
+                    'border-radius:4px;background:rgba(255,255,255,0.1);color:#e74c3c;cursor:pointer;font-size:12px;">✕ 取消加载</button>';
+                wrap.style.position = 'relative';
+                wrap.appendChild(overlay);
+                setTimeout(function(){
+                    var cbtn = document.getElementById(tid + '_cancel_page_btn');
+                    if (cbtn) cbtn.onclick = function() {
+                        _cancelled = true;
+                        myToken = 0;
+                        _pageLoading = false;
+                        eel.cancel_query()();
+                        _hidePageOverlay();
+                        if (infoEl) infoEl.textContent = '⏸ 加载已取消';
+                    };
+                }, 50);
+            }
+            function _hidePageOverlay() {
+                var ov = document.getElementById(tid + '_page_overlay');
+                if (ov) ov.remove();
+                if (wrap) { wrap.style.opacity = '1'; wrap.style.pointerEvents = ''; }
+            }
             var orderCol = sortRef.col >= 0 ? cols[sortRef.col] : '';
             var orderDir = sortRef.dir === 1 ? 'asc' : 'desc';
             var whereSql = window['_activeWhereSql_'+tid] || '';
             eel.table_load_page(conn, _connDb, _connTn, _connSch, offset, limit, orderCol, orderDir, whereSql)(function(rp){
+                if (myToken !== _reloadToken || _cancelled) {
+                    _hidePageOverlay();
+                    return;
+                }
                 _pageLoading = false;
-                if (wrap) { wrap.style.opacity = '1'; wrap.style.pointerEvents = ''; }
+                _hidePageOverlay();
                 if (!rp || !rp.ok) { if (infoEl) infoEl.textContent = '加载失败'; return; }
                 var newRows = rp.rows || [];
                 // ★ offset=0 时替换（切 pageSize 从0重新拉），否则追加
@@ -1398,7 +1498,11 @@ function buildDesignerUI(tabId, tn, design) {
     var fks = design.foreign_keys || [];
     var opts = design.table_options || {};
 
-    var dataTypes = ['INT', 'BIGINT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'FLOAT', 'DOUBLE', 'DECIMAL',
+    // ★ 根据当前 tabId 对应的连接类型，动态选择字段类型列表
+    var _ds = window._tableDesigns && window._tableDesigns[tabId];
+    var _dbType = (_ds && _ds.conn && _ds.conn.db_type) || 'mysql';
+    var _dtInfo = (typeof _getDataTypesForDB === 'function') ? _getDataTypesForDB(_dbType) : null;
+    var dataTypes = _dtInfo ? _dtInfo.types : ['INT', 'BIGINT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'FLOAT', 'DOUBLE', 'DECIMAL',
         'VARCHAR', 'CHAR', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT', 'TINYTEXT',
         'DATE', 'TIME', 'DATETIME', 'TIMESTAMP', 'YEAR',
         'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'TINYBLOB', 'JSON', 'ENUM', 'SET', 'BOOLEAN'];

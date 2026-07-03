@@ -99,13 +99,14 @@ function renderObjectPanel() {
         contentDiv.innerHTML = at2.content;
         // ★ 恢复缓存的 textarea/results DOM 元素（保留原生 undo 历史）
         _restoreTextareas(contentDiv);
-        // ★ data/redis 类型 tab 切换后，重新调用 render 填充 tbody
+        // ★ data/redis 类型 tab 切换后，重新调用本地 render 填充 tbody
+        //    不触发 _serverReload，避免切换连接/数据库时重复请求服务端
         if (at2.type === 'data' || at2.type === 'redis') {
             var tid2 = _tabIdToTid[activeObjTab];
             if (tid2) {
-                var st2 = _whereStates[tid2];
-                if (st2 && st2.onRender) {
-                    setTimeout(function(){ st2.onRender(); }, 0);
+                var renderLocalFn = window['_renderLocal_'+tid2];
+                if (renderLocalFn) {
+                    setTimeout(function(){ renderLocalFn(); }, 0);
                 }
                 // ★ 重新绑定排序事件（DOM 重建后旧监听器已丢失）
                 var bindSortFn = window['_bindSort_'+tid2];
@@ -465,8 +466,9 @@ function _afterContentUpdate(targetTab, contentDiv) {
     if (targetTab.type === 'data' || targetTab.type === 'redis') {
         var tid2 = _tabIdToTid[activeObjTab];
         if (tid2) {
-            var st2 = _whereStates[tid2];
-            if (st2 && st2.onRender) setTimeout(function(){ st2.onRender(); }, 0);
+            // ★ 只做本地 DOM 渲染，不触发服务端查询
+            var renderLocalFn = window['_renderLocal_'+tid2];
+            if (renderLocalFn) setTimeout(function(){ renderLocalFn(); }, 0);
             var bindSortFn = window['_bindSort_'+tid2];
             if (bindSortFn) setTimeout(function(){ bindSortFn(); }, 50);
             // ★ 分页按钮使用内联 onclick，无需重新绑定
