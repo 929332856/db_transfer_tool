@@ -137,7 +137,7 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
 #tabs_collapse_dropdown::-webkit-scrollbar { width: 4px; }
 #tabs_collapse_dropdown::-webkit-scrollbar-thumb { background: #555; border-radius: 2px; }
 .obj-content { flex: 1; overflow: auto; display: flex; flex-direction: column; }
-.query-editor { width:100%; min-height:120px; background:#1a1f2a; border:none; color:#e0e0e0; padding:10px; font-family:Consolas,monospace; font-size:12px; resize:vertical; }
+/* 注意：第 159 行有 .query-editor 的完整定义（带行号栏布局兼容） */
 .cat-row:hover { background: #2a3a4a; }
 .cat-refresh { margin-left: auto; font-size: 10px; opacity: 0; padding-right: 8px; transition: opacity 0.15s; }
 .cat-row:hover .cat-refresh { opacity: 0.5; }
@@ -154,15 +154,123 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
 
 /* ========== 查询窗口 3:1 分栏 ========== */
 .query-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-.query-toolbar { display: flex; gap: 8px; align-items: center; padding: 4px 8px; border-bottom: 1px solid #333; flex-shrink: 0; }
-.query-editor-wrap { flex: 1; min-height: 100px; }
-.query-editor { width: 100%; height: 100%; background: #1a1f2a; border: none; color: #e0e0e0; padding: 10px; font-family: Consolas, monospace; font-size: 12px; resize: none; }
+.query-toolbar { display: flex; gap: 8px; align-items: center; padding: 4px 8px; border-bottom: 1px solid #333; flex-shrink: 0; position: relative; }
+.query-editor-wrap { flex: 1; display: flex; overflow: hidden; min-height: 0; max-height: 100%; }
+.query-editor { flex: 1; min-width: 0; background: #1a1f2a; border: none; color: #e0e0e0; padding: 10px; font-family: Consolas, monospace; font-size: 12px; resize: none; line-height: 18px; tab-size: 4; box-sizing: border-box; overflow: auto; }
+.sql-editor-inner { position: relative; flex: 1; min-width: 0; display: flex; overflow: hidden; }
+.sql-highlight {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    padding: 10px;
+    margin: 0;
+    border: 0;
+    background: #1a1f2a;
+    color: #e0e0e0;
+    font-family: Consolas, monospace;
+    font-size: 12px;
+    line-height: 18px;
+    tab-size: 4;
+    white-space: pre;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 1;
+    box-sizing: border-box;
+}
+.sql-highlight .sql-hl {
+    background: rgba(255, 213, 79, 0.35);
+    color: #fff;
+    border-radius: 2px;
+    box-shadow: 0 0 0 4px rgba(255, 213, 79, 0.18);
+}
+.sql-highlight .sql-hl-cur {
+    background: rgba(255, 152, 0, 0.55);
+    color: #fff;
+    box-shadow: 0 0 0 4px rgba(255, 152, 0, 0.25);
+}
+/* SQL 编辑器 - 查找栏 */
+.sql-find-bar {
+    position: absolute;
+    right: 12px;
+    top: 4px;
+    display: none;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+    background: #1a1f2a;
+    border: 1px solid #5dade2;
+    border-radius: 4px;
+    z-index: 10;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+.sql-find-bar input {
+    background: #151921;
+    border: 1px solid #2a3040;
+    color: #e0e0e0;
+    padding: 3px 8px;
+    font-size: 12px;
+    width: 180px;
+    outline: none;
+    border-radius: 3px;
+    font-family: Consolas, monospace;
+}
+.sql-find-bar input:focus { border-color: #5dade2; }
+.sql-find-bar .sql-find-count {
+    font-size: 11px;
+    color: #888;
+    min-width: 38px;
+    text-align: center;
+    font-family: Consolas, monospace;
+}
+.sql-find-bar button {
+    background: #2a3040;
+    border: 1px solid #3a4050;
+    color: #ddd;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    border-radius: 3px;
+}
+.sql-find-bar button:hover { background: #3a4555; }
+
 .query-splitter { display: none; height: 4px; background: #333; cursor: ns-resize; flex-shrink: 0; }
 .query-splitter:hover, .query-splitter.active { background: #5dade2; }
 .query-results-wrap { display: none; overflow: auto; min-height: 0; }
 .query-layout.split .query-editor-wrap { flex: none; min-height: 60px; }
 .query-layout.split .query-splitter { display: block; }
 .query-layout.split .query-results-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+/* SQL 编辑器行号侧边栏 */
+.sql-ln-gutter {
+    width: 44px;
+    min-width: 44px;
+    align-self: stretch;
+    background: #151921;
+    border-right: 1px solid #2a3040;
+    color: #4a5568;
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 12px;
+    text-align: right;
+    padding: 10px 6px 10px 0;
+    overflow: hidden;
+    user-select: none;
+    flex-shrink: 0;
+    line-height: 18px;
+    box-sizing: border-box;
+}
+.sql-ln-gutter .ln-row {
+    height: 18px;
+    line-height: 18px;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+.sql-ln-gutter .ln-row:hover {
+    background: #2a3040;
+    color: #718096;
+}
+.sql-ln-gutter .ln-row.ln-active {
+    background: rgba(93, 173, 226, 0.18);
+    color: #5dade2;
+}
 .my-conn-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #333; flex-shrink: 0; }
 .my-conn-title { font-size: 13px; font-weight: bold; }
 .my-conn-hint { font-size: 10px; color: #666; }
@@ -204,6 +312,8 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
 .btn-sm:hover { background: #666; }
 .btn-sm.btn-green { background: #2ecc71; }
 .btn-sm.btn-green:hover { background: #27ae60; }
+.btn-sm.btn-fmt { background: #f39c12; color: #fff; }
+.btn-sm.btn-fmt:hover { background: #e67e22; }
 
 /* ========== 数据库选择器 ========== */
 .db-sel {
@@ -683,6 +793,12 @@ td.cell-with-icon:hover .text-expand-icon {
 .data-table-scroll tbody tr.row-selected td { color: #e0e0e0; }
 .data-table-scroll tbody tr.row-selected:hover { background: rgba(93,173,226,0.25) !important; }
 
+/* ★ 点击行高亮（独立于 checkbox 选中状态，非常轻微的背景） */
+.exp-table tbody tr.row-clicked { background: rgba(255,255,255,0.04) !important; }
+.exp-table tbody tr.row-clicked:hover { background: rgba(255,255,255,0.07) !important; }
+.data-table-scroll tbody tr.row-clicked { background: rgba(255,255,255,0.04) !important; }
+.data-table-scroll tbody tr.row-clicked:hover { background: rgba(255,255,255,0.07) !important; }
+
 /* 列类型显示（列名下方） */
 .col-type {
     font-size: 10px; color: #999; font-weight: normal;
@@ -737,6 +853,18 @@ td.cell-with-icon:hover .text-expand-icon {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* SQL 编辑器 / 结果区加大滚动条，避免误触 */
+.query-editor::-webkit-scrollbar { width: 8px; height: 10px; }
+.query-editor::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+.query-editor::-webkit-scrollbar-thumb:hover { background: #777; }
+.query-editor::-webkit-scrollbar-corner { background: transparent; }
+
+.query-results-wrap::-webkit-scrollbar { width: 8px; height: 8px; }
+.query-results-wrap::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+.query-results-wrap::-webkit-scrollbar-thumb:hover { background: #777; }
+.query-results-wrap .exp-table-container::-webkit-scrollbar { width: 8px; height: 8px; }
+.query-results-wrap .exp-table-container::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
 
 /* ========== Redis 键列表表格 ========== */
 .redis-key-list-table tbody td { cursor: default !important; max-width: 200px; }
@@ -1039,14 +1167,20 @@ html.light-theme .obj-search-input { background: #f0f2f5; color: #222; border-co
 html.light-theme .obj-search-input:focus { border-color: #5dade2; }
 html.light-theme .obj-tab-info { color: #444; }
 html.light-theme .obj-content { background: #fff; }
-html.light-theme .query-editor { background: #f7f7f7; color: #222; border: 1px solid #ddd; }
+html.light-theme .query-editor { background: #f7f7f7; color: #222; border: 1px solid #ddd; line-height: 18px; tab-size: 4; }
 html.light-theme .query-toolbar { border-bottom-color: #ddd; }
 html.light-theme .query-splitter { background: #ddd; }
 html.light-theme .query-splitter:hover, html.light-theme .query-splitter.active { background: #5dade2; }
+/* 浅色主题 - SQL 行号侧边栏 */
+html.light-theme .sql-ln-gutter { background: #f0f2f5; border-right-color: #d0d7e0; color: #a0aec0; }
+html.light-theme .sql-ln-gutter .ln-row:hover { background: #e0e6ed; color: #555; }
+html.light-theme .sql-ln-gutter .ln-row.ln-active { background: rgba(93, 173, 226, 0.15); color: #2a7db8; }
 /* ========== 浅色主题 - 对象列表/表 ========== */
 html.light-theme .exp-table tbody tr:hover { background: #e8eaed; }
 html.light-theme .exp-table tbody tr.row-selected { background: rgba(93,173,226,0.22) !important; }
 html.light-theme .exp-table tbody tr.row-selected:hover { background: rgba(93,173,226,0.32) !important; }
+html.light-theme .exp-table tbody tr.row-clicked { background: rgba(0,0,0,0.04) !important; }
+html.light-theme .exp-table tbody tr.row-clicked:hover { background: rgba(0,0,0,0.07) !important; }
 /* ========== 浅色主题 - 树形节点 ========== */
 html.light-theme .cat-row:hover { background: #e8eaed; }
 html.light-theme .tree-highlight { background: #d6e4f0 !important; }
@@ -1134,6 +1268,8 @@ html.light-theme .row-sel-header:hover { background: #d6e4f0; color: #555; }
 /* ========== 浅色主题 - 数据表格悬停 ========== */
 html.light-theme .data-table-scroll tbody tr:hover { background: #e8eaed; }
 html.light-theme .data-table-scroll tbody tr.row-selected td { color: #333; }
+html.light-theme .data-table-scroll tbody tr.row-clicked { background: rgba(0,0,0,0.04) !important; }
+html.light-theme .data-table-scroll tbody tr.row-clicked:hover { background: rgba(0,0,0,0.07) !important; }
 /* ========== 浅色主题 - 数据库选择器 ========== */
 html.light-theme .db-sel { background: #fff; border-color: #ccc; color: #333; }
 /* ========== 浅色主题 - 工具提示/弹窗 ========== */
@@ -1189,3 +1325,81 @@ html.light-theme .theme-option.selected { border-color: #5dade2; background: #d6
 html.light-theme .theme-option .theme-name { color: #555; }
 /* ========== 浅色主题 - 可编辑单元格 ========== */
 html.light-theme .editable-cell:hover { background: rgba(0,0,0,0.03); }
+
+/* ========== 查询结果搜索栏 ========== */
+.query-search-bar {
+    display: none;
+    align-items: center; gap: 6px;
+    padding: 4px 8px; background: #1a1a2e; border-bottom: 1px solid #333;
+    flex-shrink: 0;
+}
+.query-search-bar.active { display: flex; }
+.query-search-input {
+    flex: 1; min-width: 120px; padding: 3px 8px; font-size: 11px;
+    background: #0d1117; color: #e0e0e0; border: 1px solid #444; border-radius: 3px;
+    outline: none; font-family: Consolas, monospace;
+}
+.query-search-input:focus { border-color: #5dade2; }
+.query-search-input::placeholder { color: #555; }
+.query-search-count {
+    font-size: 10px; color: #888; white-space: nowrap; min-width: 50px; text-align: center;
+}
+.query-search-btn {
+    background: #2a2a3a; border: 1px solid #444; color: #aaa;
+    padding: 2px 6px; font-size: 10px; cursor: pointer; border-radius: 2px;
+}
+.query-search-btn:hover { background: #3a3a50; color: #fff; }
+
+/* 搜索高亮：单元格级别（匹配内容所在的格子） */
+td.search-highlight {
+    background: rgba(241, 196, 15, 0.25) !important;
+    outline: 1px solid #f1c40f !important;
+}
+td.search-highlight:hover {
+    background: rgba(241, 196, 15, 0.4) !important;
+}
+/* 兼容旧的行高亮（备用） */
+tr.search-highlight {
+    background: rgba(241, 196, 15, 0.2) !important;
+    outline: 1px solid #f1c40f !important;
+}
+tr.search-highlight:hover {
+    background: rgba(241, 196, 15, 0.3) !important;
+}
+
+/* ========== 列宽拖动调整 ========== */
+.col-resize-handle {
+    position: absolute; top: 0; right: 0; width: 6px; height: 100%;
+    cursor: col-resize; user-select: none; z-index: 3;
+}
+.col-resize-handle:hover,
+.col-resize-handle:active { background: rgba(93, 173, 226, 0.4); }
+.col-resize-handle.dragging { background: #5dade2; }
+
+th.col-resizable { position: relative; }
+th.col-resizable .col-resize-handle { display: block; }
+
+/* 拖动中：表头高亮边框提示 */
+th.col-resize-active {
+    box-shadow: inset -2px 0 0 #5dade2;
+}
+
+/* 拖动中：全局光标 = col-resize（不再渲染浮层，零开销） */
+/* 旧的 .col-resize-line 不再使用，保留兼容 */
+
+/* 浅色主题覆盖 */
+html.light-theme .query-search-bar { background: #f5f5f5; border-bottom-color: #ddd; }
+html.light-theme .query-search-input { background: #fff; color: #222; border-color: #ccc; }
+html.light-theme .query-search-btn { background: #e0e0e0; border-color: #ccc; color: #555; }
+html.light-theme .query-search-btn:hover { background: #ccc; color: #222; }
+html.light-theme td.search-highlight {
+    background: rgba(241, 196, 15, 0.3) !important;
+    outline: 1px solid #d4a017 !important;
+}
+html.light-theme tr.search-highlight {
+    background: rgba(241, 196, 15, 0.25) !important;
+    outline: 1px solid #d4a017 !important;
+}
+html.light-theme .col-resize-handle:hover,
+html.light-theme .col-resize-handle:active { background: rgba(93, 173, 226, 0.25); }
+html.light-theme .col-resize-handle.dragging { background: #5dade2; }
