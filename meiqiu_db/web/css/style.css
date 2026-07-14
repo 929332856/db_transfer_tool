@@ -1164,6 +1164,22 @@ html.light-theme .dash-status-table tr:nth-child(even) td { background: #fff; }
     padding-top: 14px; border-top: 1px solid #333;
 }
 
+/* ========== 快捷键参考 ========== */
+.shortcuts-tab { padding-right: 4px; }
+.shortcut-group { margin-bottom: 14px; }
+.shortcut-group-title { font-size: 12px; font-weight: bold; color: #5dade2; margin-bottom: 4px; padding-bottom: 2px; border-bottom: 1px solid #2a2f38; }
+.shortcut-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.shortcut-table td { padding: 3px 8px; border-bottom: 1px solid #1a1d24; }
+.shortcut-key {
+    font-family: Consolas, monospace; font-size: 12px; color: #f39c12; white-space: nowrap;
+    width: 170px; font-weight: bold; background: #15181f; border-radius: 3px;
+}
+.shortcut-desc { color: #bbb; }
+html.light-theme .shortcut-group-title { border-bottom-color: #e0e3e8; }
+html.light-theme .shortcut-table td { border-bottom-color: #eee; }
+html.light-theme .shortcut-key { background: #f0f3f7; color: #d35400; }
+html.light-theme .shortcut-desc { color: #555; }
+
 /* ========== 浅色主题 ========== */
 html.light-theme {
     --bg-primary: #f0f2f5; --bg-secondary: #ffffff; --bg-card: #ffffff;

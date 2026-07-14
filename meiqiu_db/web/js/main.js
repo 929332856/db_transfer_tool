@@ -1502,9 +1502,12 @@ function renderDashKpis(kpis, server) {
 function _fmtKpiVal(v) {
     if (typeof v === 'number') {
         if (v >= 1000000) return (v/1000000).toFixed(1) + 'M';
-        if (v >= 10000) return v.toLocaleString();
+        if (v >= 10000) return String(v.toLocaleString());
+        // 浮点数保留 2 位小数
+        if (v % 1 !== 0) return String(v.toFixed(2));
+        return String(v);
     }
-    return v;
+    return String(v != null ? v : '');
 }
 
 function _fmtUptime(sec) {
@@ -2064,6 +2067,8 @@ function _renderSettingsContent(tab) {
     var html = '';
     if (tab === 'general') {
         html = _renderGeneralTab();
+    } else if (tab === 'shortcuts') {
+        html = _renderShortcutsTab();
     } else if (tab === 'files') {
         html = _renderFilesTab();
     }
@@ -2096,6 +2101,86 @@ function _renderGeneralTab() {
     html += '<div class="settings-btn-row">';
     html += '<button class="btn btn-gray btn-sm" onclick="closeSettings()">取消</button>';
     html += '<button class="btn btn-green btn-sm" onclick="_saveSettings()">确定</button>';
+    html += '</div>';
+
+    return html;
+}
+
+/** 快捷键参考页 */
+function _renderShortcutsTab() {
+    var groups = [
+        {
+            title: 'SQL 编辑器',
+            items: [
+                {key:'Ctrl + Enter',  desc:'执行 SQL 查询'},
+                {key:'Ctrl + S',      desc:'保存查询文件'},
+                {key:'Ctrl + B',      desc:'格式化/美化 SQL 代码'},
+                {key:'Ctrl + D',      desc:'复制当前行（或选中多行）到下一行'},
+                {key:'Ctrl + /',      desc:'切换行注释（-- 注释/取消注释）'},
+                {key:'Ctrl + Shift + K', desc:'删除当前行（或选中多行）'},
+                {key:'Tab',           desc:'缩进选中行（插入 4 个空格）'},
+                {key:'Shift + Tab',   desc:'减少缩进（移除最多 4 个前导空格）'},
+                {key:'Ctrl + F',      desc:'在编辑器中打开查找栏'},
+                {key:'Escape',        desc:'关闭编辑器内查找栏'},
+                {key:'Ctrl + Z',      desc:'撤销（支持 Ctrl+D 等操作的撤回）'},
+                {key:'Ctrl + Y',      desc:'重做'},
+            ]
+        },
+        {
+            title: '查询结果',
+            items: [
+                {key:'Ctrl + F',      desc:'搜索查询结果内容（焦点在结果区时）'},
+                {key:'Escape',        desc:'关闭查询结果搜索栏'},
+                {key:'Enter',         desc:'搜索下一个匹配项'},
+            ]
+        },
+        {
+            title: '连接树 / 全局',
+            items: [
+                {key:'F2',            desc:'重命名当前选中的表/连接/文件夹'},
+                {key:'双击连接',       desc:'展开/选中数据库连接'},
+                {key:'双击数据库',       desc:'展开数据库分类（表/视图/存储过程/函数/查询）'},
+                {key:'右键菜单',        desc:'更多操作（编辑/删除/刷新/新建查询等）'},
+                {key:'拖拽表名',        desc:'将表拖到查询编辑器生成 SELECT 语句'},
+            ]
+        },
+        {
+            title: '数据浏览',
+            items: [
+                {key:'双击单元格',       desc:'复制单元格内容到剪贴板'},
+                {key:'右键单元格',       desc:'查看完整内容（长文本截断时）'},
+                {key:'Ctrl + 点击行',    desc:'多选行（切换选中状态）'},
+            ]
+        },
+        {
+            title: '慢SQL分析 / 仪表盘',
+            items: [
+                {key:'5s 自动刷新',     desc:'仪表盘自动刷新间隔（可调 2s/5s/10s/30s）'},
+            ]
+        },
+    ];
+
+    var html = '<div class="settings-section shortcuts-tab" style="max-height:460px;overflow-y:auto;">';
+    html += '<h4>⌨️ 快捷键参考</h4>';
+
+    for (var g = 0; g < groups.length; g++) {
+        var group = groups[g];
+        html += '<div class="shortcut-group">';
+        html += '<div class="shortcut-group-title">' + escapeHtml(group.title) + '</div>';
+        html += '<table class="shortcut-table">';
+        for (var i = 0; i < group.items.length; i++) {
+            var item = group.items[i];
+            html += '<tr><td class="shortcut-key">' + escapeHtml(item.key) + '</td>' +
+                    '<td class="shortcut-desc">' + escapeHtml(item.desc) + '</td></tr>';
+        }
+        html += '</table></div>';
+    }
+
+    html += '</div>';
+
+    // 底部按钮
+    html += '<div class="settings-btn-row">';
+    html += '<button class="btn btn-gray btn-sm" onclick="closeSettings()">关闭</button>';
     html += '</div>';
 
     return html;
