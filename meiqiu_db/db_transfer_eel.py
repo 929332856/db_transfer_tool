@@ -6356,6 +6356,163 @@ def slow_query_get_running(conn_data: dict):
         return {"ok": False, "msg": str(e)}
 
 
+# ==================== 服务器仪表盘 ====================
+
+@eel.expose
+def dashboard_get_metrics(conn_data: dict):
+    """获取仪表盘所有指标（关键指标卡片 + 4 个时间序列数组 + 状态变量列表）
+    支持: MySQL / OceanBase (其他数据库返回 ok=False)
+    ★ 异步执行，避免阻塞 Eel 主线程
+    """
+    try:
+        cdata = dict(conn_data)
+        # 兼容两种格式
+        if "user" not in cdata:
+            cdata = {
+                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
+                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
+                "db": cdata.get("src_db", ""), "db_type": cdata.get("db_type", "mysql")
+            }
+        db_type = cdata.get("db_type", "mysql")
+        if db_type not in ('mysql', 'ob-mysql'):
+            return {"ok": False, "msg": f"仪表盘暂不支持 {db_type} 数据库"}
+
+        def _do_collect():
+            engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+            try:
+                with engine.connect() as conn:
+                    # ★ 1. 服务器信息（版本、启动时长等）
+                    version_row = conn.execute(text("SELECT VERSION()")).fetchone()
+                    version = version_row[0] if version_row else "unknown"
+                    server_info = {
+                        "version": version,
+                        "version_short": version.split('-')[0] if version else "",
+                        "version_comment": ""
+                    }
+                    try:
+                        vcomment_row = conn.execute(text("SHOW VARIABLES LIKE 'version_comment'")).fetchone()
+                        if vcomment_row: server_info["version_comment"] = vcomment_row[1] or ""
+                    except Exception:
+                        pass
+                    # 启动时间
+                    try:
+                        up_row = conn.execute(text("SHOW STATUS LIKE 'Uptime'")).fetchone()
+                        server_info["uptime_sec"] = int(up_row[1]) if up_row else 0
+                    except Exception:
+                        server_info["uptime_sec"] = 0
+
+                    # ★ 2. 一次性获取 SHOW GLOBAL STATUS 全部变量（342 个左右）
+                    status_rows = conn.execute(text("SHOW GLOBAL STATUS")).fetchall()
+                    status = {r[0]: r[1] for r in status_rows}
+
+                    # ★ 3. 一次性获取 SHOW GLOBAL VARIABLES 关键变量
+                    var_rows = conn.execute(text("SHOW GLOBAL VARIABLES")).fetchall()
+                    variables = {r[0]: r[1] for r in var_rows}
+
+                    def _n(k, default=0):
+                        try: return int(status.get(k, default))
+                        except: return default
+                    def _nv(k, default=0):
+                        try: return int(variables.get(k, default))
+                        except: return default
+
+                    # ★ 4. 关键指标卡片
+                    threads_connected = _n('Threads_connected', 0)
+                    threads_running = _n('Threads_running', 0)
+                    max_connections = _nv('max_connections', 0)
+                    slow_queries = _n('Slow_queries', 0)
+                    questions = _n('Questions', 0)
+                    uptime = max(server_info.get("uptime_sec", 1), 1)
+
+                    # QPS / TPS（累计值，需要前端 diff）
+                    com_select = _n('Com_select', 0)
+                    com_insert = _n('Com_insert', 0)
+                    com_update = _n('Com_update', 0)
+                    com_delete = _n('Com_delete', 0)
+                    com_commit = _n('Com_commit', 0)
+                    connections_total = _n('Connections', 0)
+
+                    # 网络流量（Bytes_received/sent 是累计字节数）
+                    bytes_received = _n('Bytes_received', 0)
+                    bytes_sent = _n('Bytes_sent', 0)
+
+                    # InnoDB 命中率
+                    innodb_buf_read = _n('Innodb_buffer_pool_read_requests', 0)
+                    innodb_buf_disk = _n('Innodb_buffer_pool_reads', 0)
+                    if innodb_buf_read > 0:
+                        innodb_hit_pct = round((1 - innodb_buf_disk / innodb_buf_read) * 100, 2)
+                    else:
+                        innodb_hit_pct = 100.0
+
+                    # 锁等待
+                    innodb_row_lock_waits = _n('Innodb_row_lock_waits', 0)
+                    innodb_row_lock_time = _n('Innodb_row_lock_time', 0)
+
+                    # 临时表
+                    created_tmp_tables = _n('Created_tmp_tables', 0)
+                    created_tmp_disk = _n('Created_tmp_disk_tables', 0)
+                    tmp_disk_pct = round(created_tmp_disk / max(created_tmp_tables, 1) * 100, 2) if created_tmp_tables > 0 else 0
+
+                    # 慢查询开关状态
+                    slow_query_log_on = variables.get('slow_query_log', 'OFF') == 'ON'
+                    long_query_time = variables.get('long_query_time', '0')
+
+                    kpis = [
+                        {"key":"threads_connected", "label":"当前连接数", "value":threads_connected,
+                         "unit":"/ "+max_connections, "sub":f"运行中: {threads_running}", "level":"good" if threads_connected<max_connections*0.8 else "warn"},
+                        {"key":"innodb_hit", "label":"InnoDB 命中率", "value":innodb_hit_pct,
+                         "unit":"%", "sub":f"磁盘读: {innodb_buf_disk}", "level":"good" if innodb_hit_pct>=99 else ("warn" if innodb_hit_pct>=95 else "bad")},
+                        {"key":"slow_queries", "label":"慢查询数", "value":slow_queries,
+                         "unit":"次", "sub":f"阈值 {long_query_time}s " + ("✅已开" if slow_query_log_on else "❌未开"),
+                         "level":"good" if slow_queries<100 else "warn"},
+                        {"key":"qps", "label":"累计 Questions", "value":questions,
+                         "unit":"次", "sub":f"累计 {questions:,}", "level":""},
+                        {"key":"com_select", "label":"累计 SELECT", "value":com_select,
+                         "unit":"次", "sub":f"INSERT: {com_insert}  UPDATE: {com_update}  DELETE: {com_delete}",
+                         "level":""},
+                        {"key":"tps_estimate", "label":"累计 Com_commit", "value":com_commit,
+                         "unit":"次", "sub":f"连接累计: {connections_total}", "level":""},
+                        {"key":"tmp_disk_pct", "label":"临时表磁盘率", "value":tmp_disk_pct,
+                         "unit":"%", "sub":f"临时表: {created_tmp_tables} (磁盘: {created_tmp_disk})",
+                         "level":"good" if tmp_disk_pct<10 else "warn"},
+                        {"key":"row_lock_waits", "label":"行锁等待次数", "value":innodb_row_lock_waits,
+                         "unit":"次", "sub":f"等待时长: {innodb_row_lock_time}ms", "level":"good" if innodb_row_lock_waits<100 else "warn"},
+                    ]
+
+                    # ★ 5. 时间序列累计值（前端按时间间隔 diff 算出每秒值）
+                    # 不在后端做 diff —— 前端已有上一次累计值，可正确计算瞬时速率
+                    series = {
+                        "qps":          {"cum": questions,           "name":"QPS"},
+                        "new_conn":     {"cum": connections_total,   "name":"Connections/s"},
+                        "net_in":       {"cum": bytes_received,      "name":"Bytes Received"},
+                        "net_out":      {"cum": bytes_sent,          "name":"Bytes Sent"},
+                        "cmd_select":   {"cum": com_select,          "name":"SELECT"},
+                        "cmd_insert":   {"cum": com_insert,          "name":"INSERT"},
+                        "cmd_update":   {"cum": com_update,          "name":"UPDATE"},
+                        "cmd_delete":   {"cum": com_delete,          "name":"DELETE"},
+                    }
+
+                    # ★ 6. 状态变量列表（按名字排序）
+                    status_list = sorted(
+                        [{"name": n, "value": str(v)} for n, v in status.items()],
+                        key=lambda x: x["name"].lower()
+                    )
+
+                    return {
+                        "ok": True,
+                        "server": server_info,
+                        "kpis": kpis,
+                        "series": series,
+                        "status_vars": status_list,
+                    }
+            finally:
+                engine.dispose()
+
+        return _with_db_timeout(_do_collect, timeout=15)
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, conn_data.get("db_type", "mysql")) if 'db_type' in conn_data else str(e)}
+
+
 # ==================== 右侧信息面板：连接/数据库详情 ====================
 
 @eel.expose

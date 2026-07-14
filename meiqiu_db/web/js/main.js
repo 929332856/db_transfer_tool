@@ -886,6 +886,13 @@ function slowQueryConnect() {
             _sqSortDir = 'desc';
             document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
             slowQueryRefresh();
+            // ★ 如果当前在仪表盘tab，连接成功后自动刷新并启动定时器
+            if (typeof _dashSubtab !== 'undefined' && _dashSubtab === 'dash') {
+                _dashPrev = null; _dashPrevTime = 0;
+                for (var k in _dashHistory) _dashHistory[k] = [];
+                dashboardRefresh();
+                changeDashInterval();
+            }
         } else {
             _sqConnected = false;
             statusEl.style.color = '#e74c3c';
@@ -1381,6 +1388,352 @@ function slowQueryKill(pid) {
         });
     });
 }
+
+
+// ==================== 服务器仪表盘 ====================
+
+var _dashSubtab = 'sq';              // 当前子tab: 'sq'=慢SQL / 'dash'=仪表盘
+var _dashTimer = null;               // 自动刷新定时器
+var _dashPrev = null;                // 上一次累计值（用于计算每秒速率）
+var _dashPrevTime = 0;               // 上一次采集时间戳
+var _dashHistory = {                 // 历史数据（最多 60 个点，约 5 分钟@5s）
+    qps: [], new_conn: [], net_in: [], net_out: [],
+    cmd_select: [], cmd_insert: [], cmd_update: [], cmd_delete: []
+};
+var _dashStatusVars = [];            // 状态变量全量
+var _dashStatusFilter = '';          // 搜索过滤词
+var DASH_MAX_POINTS = 60;
+var DASH_CHART_COLORS = {
+    qps: '#5dade2', new_conn: '#2ecc71',
+    net_in: '#5dade2', net_out: '#a855f7',
+    cmd_select: '#5dade2', cmd_insert: '#2ecc71',
+    cmd_update: '#f39c12', cmd_delete: '#e74c3c'
+};
+
+/** 切换慢SQL子tab */
+function switchSqSubtab(name) {
+    _dashSubtab = name;
+    var sqTab = $('sq_subtab_sq'), dashTab = $('sq_subtab_dash');
+    var sqBody = document.querySelector('.slow-table-wrap');
+    if (sqTab) sqTab.classList.toggle('active', name === 'sq');
+    if (dashTab) dashTab.classList.toggle('active', name === 'dash');
+    // 隐藏/显示顶部右侧额外控件
+    var sqOnlyEls = ['sq_btn_enable', 'sq_source_sel', 'sq_threshold_wrap', 'sq_btn_running'];
+    sqOnlyEls.forEach(function(id){
+        var el = $(id); if (el) el.style.display = (name === 'sq' ? '' : 'none');
+    });
+    $('sq_btn_refresh').style.display = '';
+    if (name === 'dash') {
+        sqBody.style.display = 'none';
+        var statsBar = document.querySelector('.slow-stats-bar');
+        if (statsBar) statsBar.style.display = 'none';
+        $('dash_view').style.display = '';
+        // 启动仪表盘
+        if (_sqConnected) {
+            dashboardRefresh();
+            changeDashInterval();
+        } else {
+            $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5">请先在上方选择并连接数据库</div>';
+        }
+    } else {
+        sqBody.style.display = '';
+        var statsBar2 = document.querySelector('.slow-stats-bar');
+        if (statsBar2) statsBar2.style.display = '';
+        $('dash_view').style.display = 'none';
+        // 停止自动刷新
+        if (_dashTimer) { clearInterval(_dashTimer); _dashTimer = null; }
+    }
+}
+
+/** 仪表盘自动刷新间隔 */
+function changeDashInterval() {
+    if (_dashTimer) { clearInterval(_dashTimer); _dashTimer = null; }
+    var sec = parseInt(($('dash_interval')||{}).value || '0');
+    if (sec > 0 && _dashSubtab === 'dash' && _sqConnected) {
+        _dashTimer = setInterval(dashboardRefresh, sec * 1000);
+    }
+}
+
+/** 手动刷新仪表盘 */
+function dashboardRefresh() {
+    if (!_sqConnData) return;
+    if (!_sqConnected) {
+        $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5">⏳ 请先连接数据库</div>';
+        return;
+    }
+    _eelAutoAsync(eel.dashboard_get_metrics(_sqConnData), function(r) {
+        if (!r || !r.ok) {
+            $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5;color:#e74c3c">❌ '+(r?r.msg:'无响应')+'</div>';
+            return;
+        }
+        renderDashKpis(r.kpis, r.server);
+        updateDashSeries(r.series);
+        // 状态变量只在第一次加载或总数变化时更新
+        if (r.status_vars && r.status_vars.length !== _dashStatusVars.length) {
+            _dashStatusVars = r.status_vars;
+            renderDashStatus();
+        } else if (r.status_vars && _dashStatusVars.length === 0) {
+            _dashStatusVars = r.status_vars;
+            renderDashStatus();
+        }
+    });
+}
+
+/** 渲染关键指标卡片 */
+function renderDashKpis(kpis, server) {
+    // 更新服务器信息
+    if (server) {
+        var info = (server.version || '') + ' · 运行时长 ' + _fmtUptime(server.uptime_sec || 0);
+        $('dash_server_info').textContent = info;
+    }
+    var html = '';
+    (kpis || []).forEach(function(k) {
+        var lvl = k.level || '';
+        html += '<div class="dash-kpi">' +
+            '<div class="dash-kpi-label">' + escapeHtml(k.label) + '</div>' +
+            '<div class="dash-kpi-value kpi-' + lvl + '">' + _fmtKpiVal(k.value) +
+                '<span class="dash-kpi-unit">' + escapeHtml(k.unit || '') + '</span></div>' +
+            (k.sub ? '<div class="dash-kpi-sub">' + escapeHtml(k.sub) + '</div>' : '') +
+            '</div>';
+    });
+    $('dash_kpi_grid').innerHTML = html;
+}
+
+function _fmtKpiVal(v) {
+    if (typeof v === 'number') {
+        if (v >= 1000000) return (v/1000000).toFixed(1) + 'M';
+        if (v >= 10000) return v.toLocaleString();
+    }
+    return v;
+}
+
+function _fmtUptime(sec) {
+    if (!sec) return '0秒';
+    var d = Math.floor(sec/86400), h = Math.floor((sec%86400)/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+    if (d > 0) return d + '天' + h + '小时';
+    if (h > 0) return h + '小时' + m + '分';
+    if (m > 0) return m + '分' + s + '秒';
+    return s + '秒';
+}
+
+/** 更新时间序列历史 + 重绘图表 */
+function updateDashSeries(series) {
+    if (!series) return;
+    var now = Date.now();
+    var dt = _dashPrevTime > 0 ? (now - _dashPrevTime) / 1000 : 0;
+    if (_dashPrev && dt > 0) {
+        // 计算每秒速率
+        function rate(key) {
+            var cur = series[key] ? parseFloat(series[key].cum || 0) : 0;
+            var prev = _dashPrev[key] ? parseFloat(_dashPrev[key].cum || 0) : 0;
+            // 累计值可能因重启/计数器溢出变小，过滤异常
+            if (cur < prev) return 0;
+            return (cur - prev) / dt;
+        }
+        // QPS: questions 是累计"已发送查询数"
+        _pushPoint('qps', rate('qps'));
+        _pushPoint('new_conn', rate('new_conn'));
+        // 网络流量用 KB/s（避免大数）
+        _pushPoint('net_in', rate('net_in') / 1024);
+        _pushPoint('net_out', rate('net_out') / 1024);
+        _pushPoint('cmd_select', rate('cmd_select'));
+        _pushPoint('cmd_insert', rate('cmd_insert'));
+        _pushPoint('cmd_update', rate('cmd_update'));
+        _pushPoint('cmd_delete', rate('cmd_delete'));
+    }
+    _dashPrev = series;
+    _dashPrevTime = now;
+    // 重绘 4 个图表
+    _drawLineChart('dash_chart_qps', [_dashHistory.qps], ['QPS'], ['#5dade2'], 'num');
+    _drawLineChart('dash_chart_conn', [_dashHistory.new_conn], ['新建连接'], ['#2ecc71'], 'num');
+    _drawLineChart('dash_chart_net', [_dashHistory.net_in, _dashHistory.net_out], ['入','出'], ['#5dade2','#a855f7'], 'kb');
+    _drawLineChart('dash_chart_cmd', [_dashHistory.cmd_select, _dashHistory.cmd_insert, _dashHistory.cmd_update, _dashHistory.cmd_delete],
+        ['SELECT','INSERT','UPDATE','DELETE'], ['#5dade2','#2ecc71','#f39c12','#e74c3c'], 'num');
+}
+
+function _pushPoint(key, val) {
+    if (!_dashHistory[key]) _dashHistory[key] = [];
+    _dashHistory[key].push(val);
+    if (_dashHistory[key].length > DASH_MAX_POINTS) {
+        _dashHistory[key].shift();
+    }
+}
+
+/** 折线图绘制（Canvas，纯手绘） */
+function _drawLineChart(canvasId, series, labels, colors, unit) {
+    var canvas = $(canvasId);
+    if (!canvas) return;
+    // 适配设备像素比，避免模糊
+    var dpr = window.devicePixelRatio || 1;
+    var cssW = canvas.parentElement.clientWidth - 28;  // 减去 padding
+    var cssH = 200;
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var w = cssW, h = cssH;
+    ctx.clearRect(0, 0, w, h);
+    // 边距
+    var ml = 45, mr = 12, mt = 10, mb = 22;
+    var plotW = w - ml - mr, plotH = h - mt - mb;
+
+    // 找全局最大值（多系列取 max）
+    var maxV = 0.1, allEmpty = true;
+    for (var s = 0; s < series.length; s++) {
+        for (var i = 0; i < series[s].length; i++) {
+            if (series[s][i] > 0) allEmpty = false;
+            if (series[s][i] > maxV) maxV = series[s][i];
+        }
+    }
+    if (allEmpty) maxV = 1;
+    // 留 15% 头部空间
+    maxV = maxV * 1.15;
+    // 如果 maxV 太小，向上取整到合适的数量级
+    if (maxV < 1) maxV = 1;
+
+    // 网格 + Y 轴
+    ctx.strokeStyle = '#2a2f38';
+    ctx.lineWidth = 1;
+    ctx.fillStyle = '#888';
+    ctx.font = '10px Consolas, monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    var ySteps = 4;
+    for (var i = 0; i <= ySteps; i++) {
+        var yv = (maxV * (ySteps - i) / ySteps);
+        var py = mt + plotH * i / ySteps;
+        ctx.beginPath();
+        ctx.moveTo(ml, py);
+        ctx.lineTo(w - mr, py);
+        ctx.stroke();
+        var ytxt = _fmtChartVal(yv, unit);
+        ctx.fillText(ytxt, ml - 4, py);
+    }
+    // X 轴：4 个时间刻度
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    var n = series[0] ? series[0].length : 0;
+    for (var i = 0; i <= 3; i++) {
+        var ratio = i / 3;
+        var px = ml + plotW * ratio;
+        ctx.beginPath(); ctx.moveTo(px, mt); ctx.lineTo(px, mt + plotH); ctx.stroke();
+        var ago = Math.round((1 - ratio) * (n - 1) * 5);  // 假设每点 5s
+        ctx.fillText(ago + 's', px, mt + plotH + 4);
+    }
+
+    // 绘制每条曲线
+    for (var s = 0; s < series.length; s++) {
+        var data = series[s];
+        if (data.length < 2) continue;
+        var color = colors[s];
+        // 填充区
+        ctx.beginPath();
+        ctx.moveTo(ml, mt + plotH);
+        for (var i = 0; i < data.length; i++) {
+            var x = ml + plotW * (i / (DASH_MAX_POINTS - 1));
+            var y = mt + plotH * (1 - data[i] / maxV);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.lineTo(ml + plotW * ((data.length - 1) / (DASH_MAX_POINTS - 1)), mt + plotH);
+        ctx.closePath();
+        ctx.fillStyle = color + '22';  // 13% 透明
+        ctx.fill();
+        // 折线
+        ctx.beginPath();
+        for (var i = 0; i < data.length; i++) {
+            var x = ml + plotW * (i / (DASH_MAX_POINTS - 1));
+            var y = mt + plotH * (1 - data[i] / maxV);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+    }
+    // 图例（在画布上方）
+    if (labels && labels.length > 1) {
+        var lx = ml + 4, ly = mt + 4;
+        ctx.font = '10px "Microsoft YaHei", sans-serif';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        for (var s = 0; s < labels.length; s++) {
+            ctx.fillStyle = colors[s];
+            ctx.beginPath(); ctx.arc(lx + 4, ly + 4, 3, 0, Math.PI*2); ctx.fill();
+            ctx.fillStyle = '#ccc';
+            ctx.fillText(labels[s], lx + 12, ly + 4);
+            lx += ctx.measureText(labels[s]).width + 28;
+        }
+    }
+}
+
+function _fmtChartVal(v, unit) {
+    if (unit === 'kb') {
+        if (v >= 1024) return (v/1024).toFixed(1) + 'M';
+        return v.toFixed(0) + 'K';
+    }
+    if (v >= 1000000) return (v/1000000).toFixed(1) + 'M';
+    if (v >= 1000) return (v/1000).toFixed(1) + 'K';
+    return v.toFixed(0);
+}
+
+/** 渲染状态变量表格（虚拟列表：最多渲染 500 行避免卡顿） */
+function renderDashStatus() {
+    $('dash_status_count').textContent = _dashStatusVars.length;
+    if (_dashStatusVars.length === 0) {
+        $('dash_status_body').innerHTML = '<div class="dash-status-empty">暂无状态变量数据</div>';
+        return;
+    }
+    var html = '<table class="dash-status-table"><thead><tr><th style="width:55%">变量名</th><th style="text-align:right">当前值</th></tr></thead><tbody id="dash_status_tbody"></tbody></table>';
+    $('dash_status_body').innerHTML = html;
+    _renderDashStatusRows();
+}
+
+function _renderDashStatusRows() {
+    var tbody = $('dash_status_tbody');
+    if (!tbody) return;
+    var filter = (_dashStatusFilter || '').toLowerCase();
+    var rows = '';
+    var matched = 0;
+    for (var i = 0; i < _dashStatusVars.length; i++) {
+        var v = _dashStatusVars[i];
+        if (filter && v.name.toLowerCase().indexOf(filter) < 0) continue;
+        if (matched >= 500) continue;  // 最多渲染 500 行
+        var valStr = v.value;
+        // 长值截断
+        if (valStr.length > 80) valStr = valStr.substring(0, 80) + '...';
+        rows += '<tr><td>' + escapeHtml(v.name) + '</td><td class="val-num">' + escapeHtml(valStr) + '</td></tr>';
+        matched++;
+    }
+    if (matched === 0) {
+        rows = '<tr><td colspan="2" class="dash-status-empty">没有匹配的状态变量</td></tr>';
+    }
+    tbody.innerHTML = rows;
+}
+
+function filterDashStatus() {
+    _dashStatusFilter = ($('dash_status_search')||{}).value || '';
+    _renderDashStatusRows();
+}
+
+function toggleDashStatus() {
+    var sec = document.querySelector('.dash-status-section');
+    if (sec) sec.classList.toggle('collapsed');
+}
+
+// 窗口大小变化时重绘图表（保持 canvas 适配）
+var _dashResizeTimer = null;
+window.addEventListener('resize', function() {
+    if (_dashSubtab !== 'dash') return;
+    if (_dashResizeTimer) clearTimeout(_dashResizeTimer);
+    _dashResizeTimer = setTimeout(function() {
+        if (!_dashPrev) return;
+        _drawLineChart('dash_chart_qps', [_dashHistory.qps], ['QPS'], ['#5dade2'], 'num');
+        _drawLineChart('dash_chart_conn', [_dashHistory.new_conn], ['新建连接'], ['#2ecc71'], 'num');
+        _drawLineChart('dash_chart_net', [_dashHistory.net_in, _dashHistory.net_out], ['入','出'], ['#5dade2','#a855f7'], 'kb');
+        _drawLineChart('dash_chart_cmd', [_dashHistory.cmd_select, _dashHistory.cmd_insert, _dashHistory.cmd_update, _dashHistory.cmd_delete],
+            ['SELECT','INSERT','UPDATE','DELETE'], ['#5dade2','#2ecc71','#f39c12','#e74c3c'], 'num');
+    }, 200);
+});
 
 
 // ==================== DataGrip 连接导入 ====================

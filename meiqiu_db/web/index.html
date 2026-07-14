@@ -148,7 +148,12 @@
 
             <!-- 慢SQL分析 -->
             <div class="content-panel" id="panel_slowquery">
-                <!-- 连接选择器 -->
+                <!-- ★ 子 Tab 切换：慢SQL分析 / 仪表盘 -->
+                <div class="sq-subtabs">
+                    <button class="sq-subtab active" id="sq_subtab_sq" onclick="switchSqSubtab('sq')">📊 慢SQL分析</button>
+                    <button class="sq-subtab" id="sq_subtab_dash" onclick="switchSqSubtab('dash')">📈 服务器仪表盘</button>
+                </div>
+                <!-- 连接选择器（两个子tab共用） -->
                 <div class="slow-top-bar">
                     <div class="slow-top-left">
                         <span class="slow-label">🔗 连接:</span>
@@ -160,17 +165,20 @@
                         <span class="test-status" id="sq_test_status"></span>
                     </div>
                     <div class="slow-top-right">
-                        <label class="slow-label">阈值:</label>
-                        <input type="number" id="sq_threshold" value="2.0" min="0.1" step="0.5"
-                               style="width:60px;height:26px;" title="慢查询时间阈值（秒）">
-                        <button class="btn btn-sm btn-green" onclick="slowQueryEnable()">开启记录</button>
-                        <select id="sq_source_sel" onchange="onSqSourceChange()" style="height:28px;font-size:11px;"
+                        <span id="sq_right_extra"></span>
+                        <button class="btn btn-sm btn-green" onclick="slowQueryEnable()" id="sq_btn_enable" style="display:none;">开启记录</button>
+                        <select id="sq_source_sel" onchange="onSqSourceChange()" style="height:28px;font-size:11px;display:none;"
                                 title="数据来源：performance_schema=历史聚合统计 / slow_log=开启记录后的原始日志">
                             <option value="ps">📊 聚合统计</option>
                             <option value="log">📜 慢日志</option>
                         </select>
-                        <button class="btn btn-sm btn-blue" onclick="slowQueryRefresh()">🔄 刷新</button>
-                        <button class="btn btn-sm" onclick="slowQueryLoadRunning()">🏃 运行进程</button>
+                        <span id="sq_threshold_wrap" style="display:none;">
+                            <label class="slow-label">阈值:</label>
+                            <input type="number" id="sq_threshold" value="2.0" min="0.1" step="0.5"
+                                   style="width:60px;height:26px;" title="慢查询时间阈值（秒）">
+                        </span>
+                        <button class="btn btn-sm btn-blue" id="sq_btn_refresh" onclick="slowQueryRefresh()">🔄 刷新</button>
+                        <button class="btn btn-sm" id="sq_btn_running" onclick="slowQueryLoadRunning()">🏃 运行进程</button>
                     </div>
                 </div>
 
@@ -225,6 +233,57 @@
                             <tr><td colspan="10" class="sq-empty">请在顶部选择已保存的连接，或从"我的连接"中右键跳转</td></tr>
                         </tbody>
                     </table>
+                </div>
+
+                <!-- ★ 仪表盘视图（默认隐藏） -->
+                <div class="dash-view" id="dash_view" style="display:none;">
+                    <div class="dash-toolbar">
+                        <div class="dash-title">📈 服务器仪表盘 <span id="dash_server_info" class="dash-server-info">--</span></div>
+                        <div class="dash-toolbar-right">
+                            <span class="slow-label">自动刷新:</span>
+                            <select id="dash_interval" onchange="changeDashInterval()" style="height:26px;">
+                                <option value="0">关闭</option>
+                                <option value="2">2s</option>
+                                <option value="5" selected>5s</option>
+                                <option value="10">10s</option>
+                                <option value="30">30s</option>
+                            </select>
+                            <button class="btn btn-sm btn-blue" onclick="dashboardRefresh()">🔄 刷新</button>
+                        </div>
+                    </div>
+                    <!-- 关键指标卡片（2行 × 4列） -->
+                    <div class="dash-kpi-grid" id="dash_kpi_grid"></div>
+                    <!-- 4个时间序列图（2行 × 2列） -->
+                    <div class="dash-charts-grid">
+                        <div class="dash-chart-card">
+                            <div class="dash-chart-title">每秒查询数</div>
+                            <canvas class="dash-canvas" id="dash_chart_qps"></canvas>
+                        </div>
+                        <div class="dash-chart-card">
+                            <div class="dash-chart-title">每秒新建会话</div>
+                            <canvas class="dash-canvas" id="dash_chart_conn"></canvas>
+                        </div>
+                        <div class="dash-chart-card">
+                            <div class="dash-chart-title">每秒网络流量</div>
+                            <canvas class="dash-canvas" id="dash_chart_net"></canvas>
+                        </div>
+                        <div class="dash-chart-card">
+                            <div class="dash-chart-title">每秒命令数</div>
+                            <canvas class="dash-canvas" id="dash_chart_cmd"></canvas>
+                        </div>
+                    </div>
+                    <!-- 状态变量区（可折叠 + 搜索） -->
+                    <div class="dash-status-section">
+                        <div class="dash-status-header" onclick="toggleDashStatus()">
+                            <span class="dash-status-toggle" id="dash_status_toggle">▾</span>
+                            <span>状态变量 (<span id="dash_status_count">0</span>)</span>
+                            <input type="text" class="dash-status-search" id="dash_status_search"
+                                   placeholder="🔍 筛选状态变量..." onclick="event.stopPropagation()" oninput="filterDashStatus()">
+                        </div>
+                        <div class="dash-status-body" id="dash_status_body">
+                            <div class="dash-status-empty">加载中...</div>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="content-panel" id="panel_explorer">
