@@ -138,13 +138,13 @@ function _smartSplitSQL(text) {
 
 /** ★ 核心执行逻辑（textarea 存在时直接调用，免去 tree_get_query 的延迟） */
 function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, btnExe) {
-    // 检查选中文本
+    // 检查选中文本（过滤注释）
     var sel = '';
     if (ta) {
         var st2 = ta.selectionStart, en2 = ta.selectionEnd;
-        if (st2 !== en2) sel = ta.value.substring(st2, en2).trim();
+        if (st2 !== en2) sel = _stripSqlComments(ta.value.substring(st2, en2).trim());
     }
-    var sqlToExec = sel || fullSql;
+    var sqlToExec = sel || _stripSqlComments(fullSql);
     var stmts = _smartSplitSQL(sqlToExec);
 
     if (!stmts.length) { _resetExeBtnLate(qid, btnExe); return; }
@@ -1360,6 +1360,8 @@ function _qRenderTable(qid) {
     if (needVT) { _vtRenderBody(qid); }
     _qUpdateBtns(qid);
     _syncQueryContent(qid);
+    // ★ 初始化列宽拖动
+    setTimeout(function(){ _initResultColResize(div, qid); }, 50);
 }
 
 function renderQueryResults(div, results, total, stmtsArr) {
@@ -1495,6 +1497,10 @@ function renderQueryResults(div, results, total, stmtsArr) {
         _qUpdateBtns(qid);
         // ★ Issue 4: 同步内容到 objectTabs，切换 tab 后保留
         setTimeout(function(){ _syncQueryContent(qid); }, 50);
+        // ★ 初始化列宽拖动
+        if (es.columns && es.columns.length > 0) {
+            setTimeout(function(){ _initResultColResize(div, qid); }, 80);
+        }
         return;
     }
 
@@ -1623,6 +1629,13 @@ function renderQueryResults(div, results, total, stmtsArr) {
     div.innerHTML = html;
     // 多结果也同步
     setTimeout(function(){ _syncQueryContent(qid); }, 50);
+    // ★ 为每个结果 tab 初始化列宽拖动
+    setTimeout(function() {
+        var panes = div.querySelectorAll('.result-tab-pane');
+        panes.forEach(function(pane, pidx) {
+            _initResultColResize(pane, qid, pidx);
+        });
+    }, 80);
 
     // ★ 加载各 tab 的列类型，检测是否包含所有列（用于拦截不完整列时的修改/删除）
     es._multiAllColsPresent = new Array(results.length);
@@ -2016,8 +2029,8 @@ function loadCategoryItems(conn, db, cat, callback, schema) {
     else if (cat === 'views') eel.db_explore_get_views(conn,db,sch)(function(r){callback(r&&r.ok?(r.views||[]).map(function(v){return{name:v};}):[]);});
     else if (cat === 'procedures') eel.db_explore_get_procedures(conn,db,sch)(function(r){callback(r&&r.ok?(r.procedures||[]).filter(function(p){return p.type==='PROCEDURE';}):[]);});
     else if (cat === 'functions') eel.db_explore_get_procedures(conn,db,sch)(function(r){callback(r&&r.ok?(r.procedures||[]).filter(function(p){return p.type==='FUNCTION';}):[]);});
-    else if (cat === 'triggers') eel.db_explore_get_triggers(conn,db)(function(r){callback(r&&r.ok?(r.triggers||[]):[]);});
-    else if (cat === 'indexes'||cat==='sequences'||cat==='synonyms'||cat==='packages'||cat==='mviews') eel.db_explore_get_objlist(conn,db,cat)(function(r){callback(r&&r.ok?(r.items||[]):[]);});
+    else if (cat === 'triggers') eel.db_explore_get_triggers(conn,db,sch)(function(r){callback(r&&r.ok?(r.triggers||[]):[]);});
+    else if (cat === 'indexes'||cat==='sequences'||cat==='synonyms'||cat==='packages'||cat==='mviews') eel.db_explore_get_objlist(conn,db,cat,sch)(function(r){callback(r&&r.ok?(r.items||[]):[]);});
     else if (cat === 'queries') loadQueries(cid_from_conn(conn), db, callback);
     else callback([]);
 }
@@ -2112,3 +2125,555 @@ function autoRefreshTreeTables(cid, connData, execDb, qDb) {
 }
 
 // Redis DB 节点：仅折叠/展开（不加载数据）
+
+// ==================== 查询结果搜索 (Ctrl+F) ====================
+var _qSearchStates = {}; // qid → { matches:[], currentIdx:int, query:string, tabIdx:int|null }
+
+// 全局 Ctrl+F / Escape 键盘处理
+(function() {
+    document.addEventListener('keydown', function(e) {
+        // Ctrl+F 打开搜索
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+            var el = document.activeElement;
+            // 判断焦点是否在查询结果区域内或其子元素中
+            var qid = _qSearchFindQid(el);
+            if (qid) {
+                e.preventDefault();
+                _qSearchToggle(qid);
+            }
+        }
+        // Escape 关闭搜索栏
+        if (e.key === 'Escape') {
+            var activeBar = document.querySelector('.query-search-bar.active');
+            if (activeBar) {
+                var qrWrap = activeBar.closest('.query-results-wrap');
+                if (qrWrap && qrWrap.id) {
+                    _qSearchClose(qrWrap.id.replace(/^qr_/, ''));
+                }
+            }
+        }
+    });
+})();
+
+/** 从元素向上查找所属的查询结果 qid */
+function _qSearchFindQid(el) {
+    while (el) {
+        if (el.classList && el.classList.contains('query-results-wrap') && el.id && el.id.indexOf('qr_') === 0) {
+            return el.id.replace(/^qr_/, '');
+        }
+        if (el.classList && el.classList.contains('result-tab-pane') && el.classList.contains('active')) {
+            var wrap = el.closest('.query-results-wrap');
+            if (wrap && wrap.id && wrap.id.indexOf('qr_') === 0) return wrap.id.replace(/^qr_/, '');
+        }
+        el = el.parentElement;
+    }
+    return null;
+}
+
+/** 打开/切换搜索栏 */
+function _qSearchToggle(qid) {
+    var qrWrap = document.getElementById('qr_' + qid);
+    if (!qrWrap) return;
+
+    // 如果已有搜索栏，只是切换显示/聚焦
+    var existingBar = qrWrap.querySelector('.query-search-bar');
+    if (existingBar) {
+        if (existingBar.classList.contains('active')) {
+            // 已显示：全选搜索词
+            var input = existingBar.querySelector('input');
+            if (input) { input.focus(); input.select(); }
+            return;
+        } else {
+            existingBar.classList.add('active');
+            var input2 = existingBar.querySelector('input');
+            if (input2) { input2.focus(); input2.select(); }
+            return;
+        }
+    }
+
+    // 新建搜索栏
+    _qSearchBuild(qid, qrWrap);
+}
+
+/** 构建并插入搜索栏 */
+function _qSearchBuild(qid, qrWrap) {
+    var bar = document.createElement('div');
+    bar.className = 'query-search-bar active';
+    bar.innerHTML =
+        '<span style="color:#5dade2;font-size:11px;flex-shrink:0;">🔍</span>' +
+        '<input type="text" class="query-search-input" placeholder="模糊搜索所有字段 (Enter/Shift+Enter导航)" ' +
+        'oninput="_qSearchDo(\'' + qid + '\',this.value)" ' +
+        'onkeydown="_qSearchKey(\'' + qid + '\',event)">' +
+        '<span class="query-search-count" id="' + qid + '_scount"></span>' +
+        '<button class="query-search-btn" onclick="_qSearchNav(\'' + qid + '\',-1)" title="上一个 (Shift+Enter)">▲</button>' +
+        '<button class="query-search-btn" onclick="_qSearchNav(\'' + qid + '\',1)" title="下一个 (Enter)">▼</button>' +
+        '<button class="query-search-btn" onclick="_qSearchClose(\'' + qid + '\')" title="关闭 (Esc)">✕</button>';
+
+    // 插入到结果容器最前面
+    var firstChild = qrWrap.firstChild;
+    if (firstChild) {
+        qrWrap.insertBefore(bar, firstChild);
+    } else {
+        qrWrap.appendChild(bar);
+    }
+
+    _qSearchStates[qid] = { matches: [], currentIdx: -1, query: '', tabIdx: null };
+    setTimeout(function() {
+        var inp = bar.querySelector('input');
+        if (inp) inp.focus();
+    }, 50);
+}
+
+/** 执行搜索 */
+function _qSearchDo(qid, query) {
+    var state = _qSearchStates[qid];
+    if (!state) { state = { matches: [], currentIdx: -1, query: '', tabIdx: null }; _qSearchStates[qid] = state; }
+
+    // 清除之前的高亮和结果
+    _qClearHighlights(qid);
+    state.matches = [];
+    state.currentIdx = -1;
+    state.query = query;
+
+    var countEl = document.getElementById(qid + '_scount');
+
+    if (!query || !query.trim()) {
+        if (countEl) countEl.textContent = '';
+        return;
+    }
+
+    var q = query.toLowerCase().trim();
+    var es = _qState(qid);
+    if (!es) { if (countEl) countEl.textContent = '无结果'; return; }
+
+    // 判断场景：单结果 or 多Tab结果
+    var hasMultiTabs = !!(es._multiRows && es._multiRows.length > 0);
+
+    if (hasMultiTabs) {
+        // 多tab：搜索当前激活的 tab
+        var qrWrap = document.getElementById('qr_' + qid);
+        if (!qrWrap) { if (countEl) countEl.textContent = '无结果'; return; }
+        var activePane = qrWrap.querySelector('.result-tab-pane.active') ||
+                         qrWrap.querySelector('.result-tab-pane');
+        var tabIdx = activePane ? parseInt(activePane.getAttribute('data-ri')) : 0;
+        if (isNaN(tabIdx)) tabIdx = 0;
+        state.tabIdx = tabIdx;
+        var rows = (es._multiRows || [])[tabIdx];
+        if (rows && rows.length > 0) {
+            for (var i = 0; i < rows.length; i++) {
+                var cols = _qRowMatchesCols(rows[i], q);
+                if (cols.length > 0) {
+                    state.matches.push({ row: i, tab: tabIdx, cols: cols });
+                }
+            }
+        }
+    } else if (es.rows && es.rows.length > 0) {
+        // 单结果
+        state.tabIdx = undefined;
+        for (var j = 0; j < es.rows.length; j++) {
+            var cols = _qRowMatchesCols(es.rows[j], q);
+            if (cols.length > 0) {
+                state.matches.push({ row: j, cols: cols });
+            }
+        }
+    }
+
+    if (countEl) {
+        if (state.matches.length > 0) {
+            state.currentIdx = 0;
+            countEl.textContent = '1/' + state.matches.length;
+            _qScrollToMatch(qid, 0);
+        } else {
+            countEl.textContent = '无结果';
+        }
+    }
+}
+
+/** 检查一行数据中哪些字段包含搜索词，返回匹配的列索引数组 */
+function _qRowMatchesCols(row, queryLower) {
+    if (!row) return [];
+    var cols = [];
+    for (var k = 0; k < row.length; k++) {
+        var val = row[k];
+        if (val === null || val === undefined) {
+            if ('null'.indexOf(queryLower) !== -1) cols.push(k);
+            continue;
+        }
+        if (String(val).toLowerCase().indexOf(queryLower) !== -1) cols.push(k);
+    }
+    return cols;
+}
+
+/** 搜索框键盘事件 */
+function _qSearchKey(qid, e) {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        _qSearchNav(qid, e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape') {
+        e.preventDefault();
+        _qSearchClose(qid);
+    }
+}
+
+/** 上下导航匹配结果 */
+function _qSearchNav(qid, direction) {
+    var state = _qSearchStates[qid];
+    if (!state || state.matches.length === 0) return;
+    var count = state.matches.length;
+    state.currentIdx = ((state.currentIdx + direction) % count + count) % count;
+    var countEl = document.getElementById(qid + '_scount');
+    if (countEl) countEl.textContent = (state.currentIdx + 1) + '/' + count;
+    _qScrollToMatch(qid, state.currentIdx);
+}
+
+/** 滚动到匹配行并高亮匹配的单元格 */
+function _qScrollToMatch(qid, matchIdx) {
+    var state = _qSearchStates[qid];
+    if (!state || matchIdx < 0 || matchIdx >= state.matches.length) return;
+    var match = state.matches[matchIdx];
+
+    _qClearHighlights(qid);
+
+    var qrWrap = document.getElementById('qr_' + qid);
+    if (!qrWrap) return;
+
+    var es = _qState(qid);
+    if (!es) return;
+
+    var rowIdx = match.row;
+    var tabIdx = match.tab;
+    var cols = match.cols || [];
+
+    // 多结果：确保正确的 tab 处于激活状态
+    if (tabIdx !== undefined) {
+        var tabsCt = qrWrap.querySelector('.result-tabs');
+        if (tabsCt && tabsCt.id && typeof switchResultTab === 'function') {
+            var tabPane = qrWrap.querySelector('.result-tab-pane[data-ri="' + tabIdx + '"]');
+            if (tabPane && !tabPane.classList.contains('active')) {
+                switchResultTab(tabsCt.id, tabIdx);
+            }
+        }
+    }
+
+    _qFindAndScroll(qid, rowIdx, tabIdx, cols);
+
+    // 延迟高亮（等待虚拟滚动渲染完成）
+    setTimeout(function() { _qHighlightCells(qid, rowIdx, cols); }, 150);
+    setTimeout(function() { _qHighlightCells(qid, rowIdx, cols); }, 350);
+}
+
+/** 滚动到指定行（并水平定位到匹配的列） */
+function _qFindAndScroll(qid, rowIdx, tabIdx, colIndices) {
+    var qrWrap = document.getElementById('qr_' + qid);
+    if (!qrWrap) return;
+
+    // ★ 优先用 ID 查找滚动容器（虚拟滚动模式有明确 ID）
+    var scrollContainer = null;
+    var isVT = false;
+
+    if (tabIdx !== undefined) {
+        // 多 tab：先找虚拟滚动容器 {qid}_mvt{tabIdx}
+        var vtId = qid + '_mvt' + tabIdx;
+        var vtEl = document.getElementById(vtId);
+        if (vtEl) {
+            scrollContainer = vtEl;
+            isVT = true;
+        } else {
+            // 多 tab 普通模式：在对应 pane 内找 .exp-table 的父级 div
+            var pane = qrWrap.querySelector('.result-tab-pane[data-ri="' + tabIdx + '"]');
+            if (pane) {
+                var tbl = pane.querySelector('table.exp-table');
+                if (tbl && tbl.parentElement) scrollContainer = tbl.parentElement;
+            }
+        }
+    } else {
+        // 单结果：先找虚拟滚动容器 {qid}_vtwrap
+        var vtWrap = document.getElementById(qid + '_vtwrap');
+        if (vtWrap) {
+            scrollContainer = vtWrap;
+            isVT = true;
+        } else {
+            // 单结果普通模式：找 .exp-table 的父级 div
+            var tbl2 = qrWrap.querySelector('table.exp-table');
+            if (tbl2 && tbl2.parentElement) scrollContainer = tbl2.parentElement;
+        }
+    }
+
+    if (!scrollContainer) return;
+
+    if (isVT) {
+        // 虚拟滚动：直接设置 scrollTop，让目标行出现在可视区域中部
+        var targetScroll = rowIdx * _VT_ROW_H - Math.floor(scrollContainer.clientHeight / 3);
+        if (targetScroll < 0) targetScroll = 0;
+        scrollContainer.scrollTop = targetScroll;
+
+        // 触发虚拟滚动重渲染
+        setTimeout(function() {
+            if (tabIdx !== undefined) {
+                if (typeof _vtRenderBodyM === 'function') _vtRenderBodyM(qid, tabIdx);
+            } else {
+                if (typeof _vtRenderBody === 'function') _vtRenderBody(qid);
+            }
+            // ★ 渲染完成后水平定位到匹配列
+            _qScrollToCellHorizontally(scrollContainer, rowIdx, colIndices);
+        }, 60);
+    } else {
+        // 普通模式：手动计算 scrollTop，避免 scrollIntoView 影响外层布局
+        var table = scrollContainer.querySelector('table.exp-table');
+        if (!table) return;
+        var tr = table.querySelector('tr[data-row-idx="' + rowIdx + '"]');
+        if (!tr) return;
+        // ★ 计算行相对于滚动容器的偏移
+        var rowTop = tr.offsetTop;
+        // offsetTop 是相对于 offsetParent，需要累加到 table 顶部
+        var tableTop = table.offsetTop;
+        var targetTop = tableTop + rowTop;
+        var viewTop = scrollContainer.scrollTop;
+        var viewH = scrollContainer.clientHeight;
+        var viewBottom = viewTop + viewH;
+        var rowH = tr.offsetHeight || 28;
+
+        if (targetTop < viewTop) {
+            // 行在可视区域上方 → 滚到该行顶部（留一点边距）
+            scrollContainer.scrollTop = Math.max(0, targetTop - 10);
+        } else if (targetTop + rowH > viewBottom) {
+            // 行在可视区域下方 → 滚到该行底部可见
+            scrollContainer.scrollTop = targetTop + rowH - viewH + 10;
+        }
+        // 行已在可视区域内则不滚动
+        // ★ 水平定位到匹配列
+        _qScrollToCellHorizontally(scrollContainer, rowIdx, colIndices);
+    }
+}
+
+/** 水平滚动使匹配的单元格可见 */
+function _qScrollToCellHorizontally(scrollContainer, rowIdx, colIndices) {
+    if (!scrollContainer || !colIndices || !colIndices.length) return;
+    var table = scrollContainer.querySelector('table.exp-table');
+    if (!table) return;
+    var tr = table.querySelector('tr[data-row-idx="' + rowIdx + '"]');
+    if (!tr) return;
+    var tds = tr.querySelectorAll('td');
+    if (!tds.length) return;
+
+    // 找第一个匹配列的实际 td（tds[0] 是行号列，数据列 +1）
+    var firstColIdx = colIndices[0];
+    var td = tds[firstColIdx + 1];
+    if (!td) {
+        // 列索引可能越界，尝试用最小的有效索引
+        for (var k = 0; k < colIndices.length; k++) {
+            if (tds[colIndices[k] + 1]) { td = tds[colIndices[k] + 1]; break; }
+        }
+    }
+    if (!td) return;
+
+    var cellLeft = td.offsetLeft;
+    var cellRight = cellLeft + td.offsetWidth;
+    var viewLeft = scrollContainer.scrollLeft;
+    var viewW = scrollContainer.clientWidth;
+    var viewRight = viewLeft + viewW;
+
+    if (cellLeft < viewLeft) {
+        // 单元格在可视区域左侧 → 滚到该单元格左侧可见（留 20px 边距）
+        scrollContainer.scrollLeft = Math.max(0, cellLeft - 20);
+    } else if (cellRight > viewRight) {
+        // 单元格在可视区域右侧 → 滚到该单元格右侧可见（留 20px 边距）
+        scrollContainer.scrollLeft = cellRight - viewW + 20;
+    }
+    // 单元格已在可视区域内则不滚动
+}
+
+/** 高亮指定行中匹配的单元格（不是整行） */
+function _qHighlightCells(qid, rowIdx, colIndices) {
+    var qrWrap = document.getElementById('qr_' + qid);
+    if (!qrWrap) return;
+    var rows = qrWrap.querySelectorAll('tr[data-row-idx="' + rowIdx + '"]');
+    rows.forEach(function(r) {
+        var tds = r.querySelectorAll('td');
+        // ★ DOM 中 tds[0] 是行号列，数据列从 tds[1] 开始，所以 +1
+        colIndices.forEach(function(ci) {
+            if (tds[ci + 1]) tds[ci + 1].classList.add('search-highlight');
+        });
+    });
+}
+
+/** 清除所有高亮（行 + 单元格） */
+function _qClearHighlights(qid) {
+    var qrWrap = document.getElementById('qr_' + qid);
+    if (!qrWrap) return;
+    qrWrap.querySelectorAll('.search-highlight').forEach(function(r) {
+        r.classList.remove('search-highlight');
+    });
+}
+
+/** 关闭搜索栏 */
+function _qSearchClose(qid) {
+    var bar = document.querySelector('#qr_' + qid + ' > .query-search-bar');
+    if (bar) {
+        bar.classList.remove('active');
+        // 也可移除 DOM
+        setTimeout(function() { if (bar.parentNode) bar.remove(); }, 100);
+    }
+    _qClearHighlights(qid);
+    delete _qSearchStates[qid];
+}
+
+// ==================== 列宽拖动调整 ====================
+var _colResizeState = null;  // { th, startX, startW, table, nextTh, ... }
+var _colResizeRAF = null;    // requestAnimationFrame ID，用于节流
+var _colResizeDx = 0;        // 最新鼠标偏移量（mousemove 高速更新，RAF 消费）
+
+/** 为结果表格初始化列宽拖动手柄 */
+function _initResultColResize(containerEl, qid, tabIdx) {
+    if (!containerEl) return;
+    var table = containerEl.querySelector('table.exp-table');
+    if (!table) return;
+    var thead = table.querySelector('thead');
+    if (!thead) return;
+
+    // 避免重复初始化
+    if (thead.getAttribute('data-colresize') === '1') return;
+    thead.setAttribute('data-colresize', '1');
+
+    var ths = thead.querySelectorAll('tr:first-child th');
+    ths.forEach(function(th, ci) {
+        th.classList.add('col-resizable');
+        // 创建拖动手柄
+        var handle = document.createElement('div');
+        handle.className = 'col-resize-handle';
+        handle.setAttribute('data-ci', ci);
+        handle.addEventListener('mousedown', function(e) {
+            _colResizeStart(e, th, ci, qid, tabIdx, ths, table, thead);
+        });
+        th.appendChild(handle);
+    });
+}
+
+function _colResizeStart(e, th, ci, qid, tabIdx, allThs, table, thead) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    var startX = e.clientX;
+
+    var handleEl = e.target;
+    handleEl.classList.add('dragging');
+    th.classList.add('col-resize-active');
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    // ★ 关键：先保存 auto 布局下各列的真实宽度（在 fixed 之前获取，避免被 100% 缩放）
+    var origWidths = [];
+    allThs.forEach(function(t) {
+        origWidths.push(t.getBoundingClientRect().width);
+    });
+    var startW = origWidths[ci];
+    var nextTh = allThs[ci + 1] || null;
+    var nextStartW = nextTh ? origWidths[ci + 1] : 0;
+
+    // ★ 锁定 table 布局：设为 fixed 后，width: 100% 会强制缩放列宽，所以先设为 auto
+    var origTableLayout = table.style.tableLayout;
+    var origTableWidth = table.style.width;
+    var origTableMinWidth = table.style.minWidth;
+    table.style.tableLayout = 'fixed';
+    table.style.width = 'auto';        // 覆盖 CSS 的 width: 100% / max-content
+    table.style.minWidth = '0px';    // 覆盖 CSS 的 min-width: 100%，防止强制拉伸
+
+    // 给所有列固定为原始 auto 布局下的真实宽度
+    allThs.forEach(function(t, i) {
+        t.style.width = origWidths[i] + 'px';
+        t.style.minWidth = origWidths[i] + 'px';
+    });
+
+    _colResizeState = {
+        th: th, ci: ci, startX: startX, startW: startW,
+        nextTh: nextTh, nextStartW: nextStartW,
+        allThs: allThs, table: table, qid: qid,
+        tabIdx: tabIdx, handleEl: handleEl,
+        minW: 40,
+        origTableLayout: origTableLayout,
+        origTableWidth: origTableWidth
+    };
+    _colResizeDx = 0;
+}
+
+// 全局 mousemove：只存最新偏移量，由 RAF 统一渲染（避免高频重排）
+document.addEventListener('mousemove', function(_e) {
+    if (!_colResizeState) return;
+    _colResizeDx = _e.clientX - _colResizeState.startX;
+    if (!_colResizeRAF) {
+        _colResizeRAF = requestAnimationFrame(_doColResize);
+    }
+});
+
+function _doColResize() {
+    _colResizeRAF = null;
+    var st = _colResizeState;
+    if (!st) return;
+    var dx = _colResizeDx;
+    if (st.nextTh) {
+        // 两列总宽恒定，各自不低于 minW
+        var totalW = st.startW + st.nextStartW;
+        var newW = Math.max(st.minW, Math.min(totalW - st.minW, st.startW + dx));
+        st.th.style.width = newW + 'px';
+        st.th.style.minWidth = newW + 'px';
+        st.nextTh.style.width = (totalW - newW) + 'px';
+        st.nextTh.style.minWidth = (totalW - newW) + 'px';
+    } else {
+        var newW2 = Math.max(st.minW, st.startW + dx);
+        st.th.style.width = newW2 + 'px';
+        st.th.style.minWidth = newW2 + 'px';
+    }
+}
+
+document.addEventListener('mouseup', function(e) {
+    var st = _colResizeState;
+    if (!st) return;
+
+    // 取消未处理的 RAF
+    if (_colResizeRAF) { cancelAnimationFrame(_colResizeRAF); _colResizeRAF = null; }
+    // 应用最后一次宽度
+    _doColResize();
+
+    // ★ 保持 table-layout: fixed，防止恢复 auto 后浏览器重新计算列宽导致后面的字段错位
+    // （保留 origTableLayout 字段以备后续需要恢复时使用）
+
+    // 虚拟滚动刷新
+    if (st.qid) {
+        setTimeout(function() {
+            if (st.tabIdx !== undefined) {
+                if (typeof _vtRenderBodyM === 'function') _vtRenderBodyM(st.qid, st.tabIdx);
+            } else {
+                if (typeof _vtRenderBody === 'function') _vtRenderBody(st.qid);
+            }
+        }, 30);
+    }
+
+    // 清理
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    if (st.handleEl) st.handleEl.classList.remove('dragging');
+    if (st.th) st.th.classList.remove('col-resize-active');
+    _colResizeState = null;
+});
+
+// ★ 移除 SQL 注释（-- 行注释 和 /* */ 块注释），保留字符串字面量
+function _stripSqlComments(sql) {
+    if (!sql) return '';
+    var result = '', i = 0;
+    while (i < sql.length) {
+        var ch = sql[i];
+        if (ch === "'") { result += ch; i++; while (i < sql.length) { result += sql[i]; if (sql[i] === "'") { if (i+1<sql.length && sql[i+1]==="'") { i+=2; result += "'"; continue; } i++; break; } i++; } continue; }
+        if (ch === '"') { result += ch; i++; while (i<sql.length && sql[i]!=='"') { result += sql[i]; i++; } if (i<sql.length) { result += '"'; i++; } continue; }
+        if (ch === '`') { result += ch; i++; while (i<sql.length && sql[i]!=='`') { result += sql[i]; i++; } if (i<sql.length) { result += '`'; i++; } continue; }
+        if (ch === '[') { result += ch; i++; while (i<sql.length && sql[i]!==']') { result += sql[i]; i++; } if (i<sql.length) { result += ']'; i++; } continue; }
+        if (ch === '-' && i+1<sql.length && sql[i+1]==='-') { i += 2; while (i<sql.length && sql[i]!=='\n') i++; if (i<sql.length) { result += '\n'; i++; } continue; }
+        if (ch === '/' && i+1<sql.length && sql[i+1]==='*') { i += 2; while (i<sql.length && !(sql[i]==='*' && i+1<sql.length && sql[i+1]==='/')) i++; if (i<sql.length) i += 2; continue; }
+        result += ch; i++;
+    }
+    return result.replace(/\n{3,}/g, '\n\n').trim();
+}
+
+
+
+

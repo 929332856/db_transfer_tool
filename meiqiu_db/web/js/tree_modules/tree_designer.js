@@ -427,7 +427,7 @@ function _openQueryInTabImpl(q) {
         '<div class="query-layout" id="ql_'+qid+'">' +
         '<div class="query-toolbar" style="display:flex;align-items:center;"><button id="btn_exe_'+qid+'" class="btn btn-green" style="font-size:11px;padding:4px 14px;" onclick="execQueryTab(\''+qid+'\')">▶ 执行</button>' +
         '<button id="btn_fmt_'+qid+'" class="btn btn-sm btn-fmt" style="font-size:11px;padding:4px 10px;margin-left:4px;" onclick="_formatSqlTab(\''+qid+'\')" title="格式化 SQL (Ctrl+B)">🧹 美化</button>' +
-        '<span style="font-size:11px;color:#888;">Ctrl+Enter 执行 | Ctrl+S 保存 | Ctrl+B 美化 | Ctrl+F 查找</span>' +
+
         connLabel +
         '<div class="sql-find-bar" id="sql_find_bar_'+qid+'" style="display:none;">' +
             '<input type="text" id="sql_find_input_'+qid+'" placeholder="查找..." oninput="_applySqlHighlight(\''+qid+'\',null)" onkeydown="if(event.key===\'Enter\'){event.preventDefault();_sqlFindNext(\''+qid+'\');}if(event.key===\'Escape\'){event.preventDefault();_closeSqlFind(\''+qid+'\',null);}">' +
@@ -463,6 +463,10 @@ function _openQueryInTabImpl(q) {
                 if(e.ctrlKey&&(e.key==='s'||e.key==='S')) { e.preventDefault(); saveQueryTab(qid, cid, qdb, q.name); }
                 if(e.ctrlKey&&(e.key==='b'||e.key==='B')) { e.preventDefault(); _formatSqlTab(qid); }
                 if(e.ctrlKey&&(e.key==='f'||e.key==='F')) { e.preventDefault(); e.stopPropagation(); _openSqlFind(qid, ta); return; }
+                if(e.ctrlKey&&(e.key==='d'||e.key==='D')) { e.preventDefault(); _editorDupLine(ta); }
+                if(e.ctrlKey&&e.key==='/') { e.preventDefault(); _editorToggleComment(ta); }
+                if(e.ctrlKey&&e.shiftKey&&(e.key==='K'||e.key==='k')) { e.preventDefault(); _editorDeleteLine(ta); }
+                if(e.key==='Tab') { e.preventDefault(); if(e.shiftKey) _editorOutdent(ta); else _editorIndent(ta); }
                 if(e.key==='Escape') { var bar=document.getElementById('sql_find_bar_'+qid); if(bar && bar.style.display!=='none'){ e.preventDefault(); _closeSqlFind(qid, ta); } }
             });
             ta.addEventListener('mouseup', function(){ updateBtnLabel(); _syncLineGutter(qid, ta); _scrollToLine(ta, _getCursorLineNo(ta)); });
@@ -567,10 +571,10 @@ function _closeSqlFind(qid, ta) {
     var bar = document.getElementById('sql_find_bar_' + qid);
     var hl = document.getElementById('sql_hl_' + qid);
     if (bar) bar.style.display = 'none';
-    // ★ 关闭搜索：隐藏高亮层，恢复 textarea 正常显示
-    if (hl) { hl.style.display = 'none'; hl.style.zIndex = '-1'; }
-    if (ta) { ta.style.color = ''; ta.style.caretColor = ''; }
+    // ★ 关闭搜索但不隐藏高亮层：保持注释淡色显示
     _sqlFindState[qid] = null;
+    // 重新渲染高亮层（仅注释着色，无搜索高亮）
+    _applySqlHighlight(qid, ta);
     if (ta) { ta.focus(); }
 }
 
@@ -581,22 +585,33 @@ function _applySqlHighlight(qid, ta) {
     var input = document.getElementById('sql_find_input_' + qid);
     var countEl = document.getElementById('sql_find_count_' + qid);
     if (!ta || !hl) return;
-    // ★ 搜索未激活时：隐藏高亮层，恢复 textarea 正常文字颜色（确保选中高亮可见）
-    if (!bar || bar.style.display === 'none') {
+
+    var text = ta.value;
+    var kw = (input && bar && bar.style.display !== 'none') ? input.value : '';
+    var isSearch = bar && bar.style.display !== 'none' && kw;
+
+    // ★ 解析注释区间
+    var commentRanges = _findSqlCommentRanges(text);
+    var hasComments = commentRanges.length > 0;
+
+    // ★ 仅在有注释或搜索时启用高亮层；否则使用原生 textarea（保留选中高亮）
+    if (!isSearch && !hasComments) {
         hl.style.display = 'none';
         hl.style.zIndex = '-1';
         ta.style.color = '';
         ta.style.caretColor = '';
+        _sqlFindState[qid] = null;
         return;
     }
+
     hl.style.display = '';
     hl.style.zIndex = '1';
     ta.style.color = 'transparent';
     ta.style.caretColor = '#e0e0e0';
-    var text = ta.value;
-    var kw = (input && bar && bar.style.display !== 'none') ? input.value : '';
+
+    // 搜索匹配
     var matches = [];
-    if (kw) {
+    if (isSearch) {
         try {
             var re = new RegExp(_escapeRegex(kw), 'gi');
             var m;
@@ -605,46 +620,142 @@ function _applySqlHighlight(qid, ta) {
                 if (m[0].length === 0) re.lastIndex++;
             }
         } catch (e) {}
-    }
-    if (kw) {
         _sqlFindState[qid] = {kw: kw, matches: matches, idx: matches.length ? 0 : -1};
     } else {
         _sqlFindState[qid] = null;
     }
-    var html = '';
-    if (matches.length) {
-        var cur = _sqlFindState[qid] ? _sqlFindState[qid].idx : -1;
-        var pos = 0;
-        for (var i = 0; i < matches.length; i++) {
-            var mt = matches[i];
-            if (mt.start > pos) html += _escapeHtml(text.substring(pos, mt.start));
-            var cls = (i === cur) ? 'sql-hl sql-hl-cur' : 'sql-hl';
-            html += '<mark class="' + cls + '">' + _escapeHtml(text.substring(mt.start, mt.end)) + '</mark>';
-            pos = mt.end;
-        }
-        if (pos < text.length) html += _escapeHtml(text.substring(pos));
-        if (text.length === 0 || text.charAt(text.length-1) !== '\n') html += '\n';
-    } else {
-        html = _escapeHtml(text);
-        if (text.length === 0 || text.charAt(text.length-1) !== '\n') html += '\n';
+
+    // ★ 构建带注释+搜索高亮的 HTML
+    // 把所有特殊区间按位置排序
+    var segments = [];
+    for (var ci = 0; ci < commentRanges.length; ci++) {
+        segments.push({start: commentRanges[ci].start, end: commentRanges[ci].end, type: 'comment'});
     }
+    // 搜索匹配仅添加到非注释区域
+    if (isSearch) {
+        for (var mi = 0; mi < matches.length; mi++) {
+            var ms = matches[mi];
+            var inComment = false;
+            for (var cj = 0; cj < commentRanges.length; cj++) {
+                if (ms.start >= commentRanges[cj].start && ms.end <= commentRanges[cj].end) {
+                    inComment = true; break;
+                }
+            }
+            if (!inComment) segments.push({start: ms.start, end: ms.end, type: 'search', idx: mi});
+        }
+    }
+    segments.sort(function(a, b) { return a.start - b.start || (a.type === 'comment' ? -1 : 1); });
+
+    // 合并重叠（comment 优先）
+    var merged = [];
+    for (var ai = 0; ai < segments.length; ai++) {
+        var sg = segments[ai];
+        if (merged.length === 0 || sg.start >= merged[merged.length - 1].end) {
+            merged.push(sg);
+        } else {
+            var last = merged[merged.length - 1];
+            if (sg.type === 'comment') last.type = 'comment';
+            if (last.end < sg.end) last.end = sg.end;
+            if (sg.type === 'search' && last.type === 'search') last.idx = sg.idx;
+        }
+    }
+
+    // 生成 HTML
+    var html = '';
+    var pos = 0;
+    var cur = _sqlFindState[qid] ? _sqlFindState[qid].idx : -1;
+    for (var si = 0; si < merged.length; si++) {
+        var seg = merged[si];
+        if (seg.start > pos) html += _escapeHtml(text.substring(pos, seg.start));
+        if (seg.type === 'comment') {
+            html += '<span class="sql-comment">' + _escapeHtml(text.substring(seg.start, seg.end)) + '</span>';
+        } else {
+            var cls2 = (seg.idx === cur) ? 'sql-hl sql-hl-cur' : 'sql-hl';
+            html += '<mark class="' + cls2 + '">' + _escapeHtml(text.substring(seg.start, seg.end)) + '</mark>';
+        }
+        pos = seg.end;
+    }
+    if (pos < text.length) html += _escapeHtml(text.substring(pos));
+    if (text.length === 0 || text.charAt(text.length - 1) !== '\n') html += '\n';
+
     hl.innerHTML = html;
+
     if (countEl) {
-        if (kw) {
+        if (isSearch) {
             var cidx = _sqlFindState[qid] ? _sqlFindState[qid].idx : -1;
             countEl.textContent = (cidx >= 0 ? (cidx + 1) : 0) + '/' + matches.length;
         } else {
             countEl.textContent = '0/0';
         }
     }
+
     _positionHighlightOverlay(qid, ta);
-    if (kw && matches.length && _sqlFindState[qid] && _sqlFindState[qid].idx >= 0) {
+
+    if (isSearch && matches.length && _sqlFindState[qid] && _sqlFindState[qid].idx >= 0) {
         var m0 = matches[_sqlFindState[qid].idx];
-        try {
-            ta.selectionStart = m0.start;
-            ta.selectionEnd = m0.end;
-        } catch (e) {}
+        try { ta.selectionStart = m0.start; ta.selectionEnd = m0.end; } catch (e) {}
     }
+}
+
+/** 扫描 SQL 中的注释区间（跳过字符串字面量） */
+function _findSqlCommentRanges(text) {
+    var ranges = [];
+    var i = 0;
+    while (i < text.length) {
+        var ch = text[i];
+        // 单引号字符串
+        if (ch === "'") {
+            i++;
+            while (i < text.length) {
+                if (text[i] === "'") {
+                    if (i + 1 < text.length && text[i + 1] === "'") { i += 2; continue; }
+                    i++; break;
+                }
+                i++;
+            }
+            continue;
+        }
+        // 双引号标识符
+        if (ch === '"') {
+            i++;
+            while (i < text.length && text[i] !== '"') i++;
+            if (i < text.length) i++;
+            continue;
+        }
+        // 反引号标识符
+        if (ch === '`') {
+            i++;
+            while (i < text.length && text[i] !== '`') i++;
+            if (i < text.length) i++;
+            continue;
+        }
+        // 方括号标识符（MSSQL）
+        if (ch === '[') {
+            i++;
+            while (i < text.length && text[i] !== ']') i++;
+            if (i < text.length) i++;
+            continue;
+        }
+        // 行注释 --
+        if (ch === '-' && i + 1 < text.length && text[i + 1] === '-') {
+            var cs = i;
+            i += 2;
+            while (i < text.length && text[i] !== '\n') i++;
+            ranges.push({start: cs, end: i});
+            continue;
+        }
+        // 块注释 /* */
+        if (ch === '/' && i + 1 < text.length && text[i + 1] === '*') {
+            var cs2 = i;
+            i += 2;
+            while (i < text.length && !(text[i] === '*' && i + 1 < text.length && text[i + 1] === '/')) i++;
+            if (i < text.length) i += 2;
+            ranges.push({start: cs2, end: i});
+            continue;
+        }
+        i++;
+    }
+    return ranges;
 }
 
 function _sqlFindNext(qid) {
@@ -1114,6 +1225,99 @@ function detectTableFromSql(sql) {
     var m3 = s.match(/FROM\s+(?:`\w+`\.|"\w+"\.|\[\w+\]\.)?[`"'\[]?(\w+)[`"'\]]?(?:\s+(?:AS\s+)?\w+|\s+JOIN|\s+WHERE|\s+ORDER|\s+GROUP|\s+LIMIT|\s*[;,]|\s*$)/i);
     if (m3) return m3[1];
     return '';
+}
+
+// ==================== 编辑器快捷键辅助函数 ====================
+
+/** Ctrl+D: 复制当前行到下一行（保持原有缩进） */
+function _editorDupLine(ta) {
+    var val = ta.value;
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    // 确定操作行范围（支持多行选区复制所有选中行）
+    var lineStart = val.lastIndexOf('\n', start - 1) + 1;
+    var lineEnd = val.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = val.length;
+    var linesText = val.substring(lineStart, lineEnd);
+    // 在选区末尾后插入换行 + 复制内容
+    var insert = '\n' + linesText;
+    // ★ 用 execCommand('insertText') 替代 setRangeText，产生原生撤销记录，Ctrl+Z 可撤回
+    ta.focus();
+    ta.setSelectionRange(lineEnd, lineEnd);
+    document.execCommand('insertText', false, insert);
+}
+
+/** Ctrl+/ (Slash): 切换行注释 -- */
+function _editorToggleComment(ta) {
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    var val = ta.value;
+    // 确定选区的完整行范围
+    var lineStart = val.lastIndexOf('\n', start - 1) + 1;
+    var lineEnd = val.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = val.length;
+    var selText = val.substring(lineStart, lineEnd);
+    var lines = selText.split('\n');
+    // 判断所有行是否都已注释
+    var allCommented = lines.length > 0 && lines.every(function(l) { return /^\s*--/.test(l); });
+    var newText;
+    if (allCommented) {
+        // 取消注释：移除每行第一个 --
+        newText = lines.map(function(l) { return l.replace(/^(\s*)--\s?/, '$1'); }).join('\n');
+    } else {
+        // 添加注释：在每行最前面加 --
+        newText = lines.map(function(l) { return '--' + l; }).join('\n');
+    }
+    // ★ 用 execCommand('insertText') 替代 setRangeText，产生原生撤销记录
+    ta.focus();
+    ta.setSelectionRange(lineStart, lineEnd);
+    document.execCommand('insertText', false, newText);
+}
+
+/** Ctrl+Shift+K: 删除当前行（或多行选区对应的行） */
+function _editorDeleteLine(ta) {
+    var val = ta.value;
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    var lineStart = val.lastIndexOf('\n', start - 1) + 1;
+    var lineEnd = val.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = val.length;
+    // 删除整行含换行符
+    var delStart = lineStart > 0 ? lineStart - 1 : 0;     // 吞掉前一行的 \n
+    var delEnd = lineEnd < val.length ? lineEnd + 1 : lineEnd; // 吞掉本行末尾的 \n
+    // ★ 用 execCommand('insertText') 替代 setRangeText，产生原生撤销记录
+    ta.focus();
+    ta.setSelectionRange(delStart, delEnd);
+    document.execCommand('insertText', false, '');
+}
+
+/** Tab: 缩进选中行（插入4个空格） */
+function _editorIndent(ta) {
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    var val = ta.value;
+    var lineStart = val.lastIndexOf('\n', start - 1) + 1;
+    var lineEnd = val.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = val.length;
+    var selText = val.substring(lineStart, lineEnd);
+    var lines = selText.split('\n');
+    var newText = lines.map(function(l) { return '    ' + l; }).join('\n');
+    // ★ 用 execCommand('insertText') 替代 setRangeText，产生原生撤销记录
+    ta.focus();
+    ta.setSelectionRange(lineStart, lineEnd);
+    document.execCommand('insertText', false, newText);
+}
+
+/** Shift+Tab: 减少缩进（移除最多4个前导空格） */
+function _editorOutdent(ta) {
+    var start = ta.selectionStart, end = ta.selectionEnd;
+    var val = ta.value;
+    var lineStart = val.lastIndexOf('\n', start - 1) + 1;
+    var lineEnd = val.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = val.length;
+    var selText = val.substring(lineStart, lineEnd);
+    var lines = selText.split('\n');
+    var newText = lines.map(function(l) { return l.replace(/^ {1,4}/, ''); }).join('\n');
+    // ★ 用 execCommand('insertText') 替代 setRangeText，产生原生撤销记录
+    ta.focus();
+    ta.setSelectionRange(lineStart, lineEnd);
+    document.execCommand('insertText', false, newText);
 }
 
 // 查询执行取消标记（按 qid）

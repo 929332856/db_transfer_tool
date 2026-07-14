@@ -174,6 +174,9 @@ _progress_q = queue.Queue()
 _engine = None
 _worker = None
 _query_cancel = threading.Event()
+_query_conn_cancel_flags = {}  # {conn_id: True} 记录哪些连接被取消了（用于线程内检查）
+_query_job_conn = {}           # {job_id: conn_id} 记录哪个 job 属于哪个连接
+_query_conn_data_map = {}      # {conn_id: conn_data} 保存连接数据用于 cancel 时 kill
 _query_columns = []
 _query_rows = []
 _query_conn_id = None       # 当前查询的数据库连接 ID（用于 kill）
@@ -534,7 +537,16 @@ def poll_queue():
     return msgs
 
 
-def _do_execute_sql_query(sql: str, data: dict, job_id: str = ''):
+def _is_cancelled(conn_key=''):
+    """检查当前查询是否已被取消（全局取消 OR 该连接被取消）"""
+    if _query_cancel.is_set():
+        return True
+    if conn_key and _query_conn_cancel_flags.get(conn_key):
+        return True
+    return False
+
+
+def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str = ''):
     """在独立线程中执行 SQL 查询（核心逻辑）。
 
     性能优化：
@@ -553,6 +565,10 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = ''):
     _query_cancel.clear()
     _query_conn_id = None
     _query_src_data = data  # 保存源库信息用于 cancel 时 kill
+    # ★ 保存连接数据映射（用于 cancel_query(conn_id) 时 kill 该连接的查询）
+    if conn_key:
+        _query_conn_data_map[conn_key] = data
+        _query_job_conn[job_id] = conn_key
     DEFAULT_PAGE_SIZE = 200  # 首屏默认显示行数
     BATCH = 1000             # 每次从结果集取 1000 行进行处理
 
@@ -572,7 +588,7 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = ''):
             url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=120") if "?" in url else url + "?charset=utf8mb4&read_timeout=120"
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
-            if _query_cancel.is_set():
+            if _is_cancelled(conn_key):
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
             # 记录连接 ID，用于 cancel 时 kill query（支持 MySQL/PG/Oracle/MSSQL）
             _query_conn_id = _get_backend_pid(conn, db_type)
@@ -589,7 +605,7 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = ''):
             result = conn.execution_options(stream_results=True).execute(text(sql))
             _t_exec = _time.perf_counter()  # 查询提交 + 元数据接收完成
 
-            if _query_cancel.is_set():
+            if _is_cancelled(conn_key):
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
             if result.returns_rows:
                 _query_columns = list(result.keys())
@@ -598,7 +614,7 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = ''):
                 #    → 大结果集（万行级 × Decimal 列）下可提速 5-10 倍
                 _query_rows = []
                 while True:
-                    if _query_cancel.is_set():
+                    if _is_cancelled(conn_key):
                         result.close()
                         return {"ok": False, "msg": "查询已取消", "cancelled": True}
                     batch = result.fetchmany(BATCH)
@@ -621,7 +637,7 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = ''):
             return {"ok": True, "msg": f"成功执行，影响 {rc} 行", "columns": [], "rows": [], "total": rc,
                     "server_ms": _server_ms}
 
-        if _query_cancel.is_set():
+        if _is_cancelled(conn_key):
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
 
         # ★ 将全量原始行存入持久存储，供后续按需加载
@@ -679,15 +695,22 @@ def execute_sql_query(sql: str, data: dict):
     job_id = str(uuid.uuid4())[:8]
     _query_jobs[job_id] = None  # None = 等待中
 
+    # ★ 生成连接标识，用于后续 cancel_query(conn_id) 只取消该连接的查询
+    conn_key = _make_conn_key(data)
+
     def _run():
         try:
-            result = _do_execute_sql_query(sql, data, job_id=job_id)
+            result = _do_execute_sql_query(sql, data, job_id=job_id, conn_key=conn_key)
         except Exception as e:
             result = {"ok": False, "msg": str(e)}
         _query_jobs[job_id] = result
 
     _get_db_thread_pool().submit(_run)
     return {"ok": True, "_async": True, "_job_id": job_id}
+
+def _make_conn_key(data):
+    """从连接数据生成唯一标识（用于区分不同连接的查询）"""
+    return f"{data.get('host','')}:{data.get('port','')}:{data.get('user','')}:{data.get('db','')}"
 
 
 @eel.expose
@@ -754,25 +777,71 @@ def clear_cancel():
     return True
 
 @eel.expose
-def cancel_query():
-    """取消所有查询 — 设置全局取消标记，并尝试杀掉正在运行的数据库查询"""
-    _query_cancel.set()
-    # ★ 同时设置 modules 包的取消标记（确保 modules/ 下的函数也能感知到）
+def cancel_query(conn_id=None):
+    """取消查询。conn_id 可选：指定则只取消该连接的查询，否则取消全部（兼容旧调用）"""
+    if conn_id:
+        # ★ 只取消指定连接的查询，不影响其他连接
+        _query_conn_cancel_flags[conn_id] = True
+        # 清理该连接下的待完成任务
+        for jid in list(_query_jobs.keys()):
+            if _query_job_conn.get(jid) == conn_id and _query_jobs[jid] is None:
+                _query_jobs[jid] = {"ok": False, "msg": "查询已取消", "cancelled": True}
+        # 清理该连接的结果缓存
+        for jid in list(_query_result_store.keys()):
+            if _query_job_conn.get(jid) == conn_id:
+                _query_result_store.pop(jid, None)
+        # 杀掉该连接的数据库查询（如果有）
+        _kill_db_query_for_conn(conn_id)
+        print(f"[cancel_query] 已取消连接 {conn_id} 的查询")
+    else:
+        # 全局取消（兼容旧的 cancelExport / cancelExecQuery 等调用）
+        _query_cancel.set()
+        try:
+            import modules
+            modules._query_cancel.set()
+        except Exception:
+            pass
+        for jid in list(_query_jobs.keys()):
+            if _query_jobs[jid] is None:
+                _query_jobs[jid] = {"ok": False, "msg": "查询已取消", "cancelled": True}
+        for jid in list(_query_result_store.keys()):
+            _query_result_store.pop(jid, None)
+        _kill_db_query()
+    return True
+
+
+def _kill_db_query_for_conn(conn_id):
+    """尝试杀掉指定连接的数据库查询。用保存的连接信息创建新连接执行 KILL。"""
+    src = _query_conn_data_map.get(conn_id)
+    if not src:
+        return
     try:
-        import modules
-        modules._query_cancel.set()
+        db_type = src.get('db_type', 'mysql')
+        kill_engine = create_engine(_conn_url(src), connect_args=_connect_args(db_type, timeout=5))
+        try:
+            with kill_engine.connect() as kc:
+                # 获取该连接当前的 PID
+                cid = _get_backend_pid(kc, db_type)
+                if not cid:
+                    return
+                try:
+                    if db_type == 'mysql' or db_type == 'ob-mysql':
+                        kc.execute(text(f"KILL QUERY {cid}"))
+                    elif db_type == 'postgresql':
+                        kc.execute(text(f"SELECT pg_terminate_backend({cid})"))
+                    elif db_type == 'oracle':
+                        kc.execute(text(f"ALTER SYSTEM KILL SESSION '{cid}' IMMEDIATE"))
+                    elif db_type == 'mssql':
+                        kc.execute(text(f"KILL {cid}"))
+                except Exception:
+                    pass
+        finally:
+            kill_engine.dispose()
     except Exception:
         pass
-    # ★ 清理所有待完成的异步查询（标记为已取消）
-    for jid in list(_query_jobs.keys()):
-        if _query_jobs[jid] is None:
-            _query_jobs[jid] = {"ok": False, "msg": "查询已取消", "cancelled": True}
-    # ★ 清理结果缓存（已取消的查询无需保留分页数据）
-    for jid in list(_query_result_store.keys()):
-        _query_result_store.pop(jid, None)
-    # ★ 真正杀掉数据库中的查询（不只是 Python 标记）
-    _kill_db_query()
-    return True
+
+
+
 
 
 def _kill_db_query():
@@ -908,9 +977,9 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
     _query_src_data = None
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') in ('postgresql', 'oracle'):
-            pass
-        else:
+        if cdata.get('db_type') == 'postgresql':
+            cdata["db"] = database  # ★ PG 必须切到目标数据库
+        elif cdata.get('db_type') != 'oracle':
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         db_type = cdata.get('db_type', 'mysql')
@@ -989,10 +1058,8 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
     _query_src_data = None
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') in ('postgresql', 'oracle'):
-            pass
-        else:
-            cdata["db"] = database
+        if cdata.get('db_type') != 'oracle':
+            cdata["db"] = database  # ★ PG/MySQL 都要切到目标库
         tbl = _build_table_ref(cdata, database, table_name, schema)
         db_type = cdata.get('db_type', 'mysql')
         order_clause = ''
@@ -1071,9 +1138,7 @@ def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=
     try:
         cdata = dict(conn_data)
         cdata_saved = cdata  # for error handler
-        if cdata.get('db_type') in ('postgresql', 'oracle'):
-            pass
-        else:
+        if cdata.get('db_type') != 'oracle':
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         db_type = cdata.get('db_type', 'mysql')
@@ -1130,8 +1195,41 @@ def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=
         return {"ok": False, "msg": _friendly_error(e, cdata_saved.get('db_type','mysql') if cdata_saved else 'mysql')}
 
 
+def _sanitize_where_clause(where_clause):
+    """在 WHERE 子句中，给 = / != / <> 操作符右侧未加引号的值自动加单引号，
+    确保字符串精确匹配（如 securitycode = 000045 → securitycode = '000045'）。
+    比较运算符 > / < / >= / <= 保持原样（数字比较）。"""
+    if not where_clause:
+        return where_clause
+
+    def _add_quotes(m):
+        col = m.group(1)
+        op = m.group(2).strip()
+        val = m.group(3).strip()
+        # 已有引号包裹的值不处理
+        if val and val[0] in ("'", '"'):
+            return m.group(0)
+        # NULL 不处理
+        if val.upper() == 'NULL':
+            return m.group(0)
+        # = / != / <> → 自动加引号
+        if op in ('=', '!=', '<>'):
+            return f"{col} {op} '{val}'"
+        # > / < / >= / <= / LIKE → 保持原样
+        return m.group(0)
+
+    result = re.sub(
+        r'(\w+)\s*(=|!=|<>|>=|<=|>|<|LIKE|NOT\s+LIKE)\s*(\S+)',
+        _add_quotes,
+        where_clause,
+        flags=re.IGNORECASE
+    )
+    return result
+
+
 def _build_full_table_sql(tbl, db_type, order_clause, limit=None, offset=0, where_clause=''):
     """构建 SELECT * FROM tbl 的 SQL，支持各数据库方言、可选 LIMIT/OFFSET/WHERE"""
+    where_clause = _sanitize_where_clause(where_clause)
     where_str = f" WHERE {where_clause}" if where_clause else ''
     base_sql = f"SELECT * FROM {tbl}{where_str}{order_clause}"
     if limit is None:
@@ -1194,6 +1292,14 @@ def _load_column_comments(conn, db_type, database, table_name, schema=''):
         for cr in col_rows:
             if cr[1]:
                 comments[cr[0]] = cr[1]
+    elif db_type == 'oracle':
+        # ★ Oracle 使用 USER_COL_COMMENTS 获取列注释
+        col_rows = conn.execute(text(
+            "SELECT COLUMN_NAME, COMMENTS FROM USER_COL_COMMENTS WHERE TABLE_NAME=:tbl"
+        ), {"tbl": table_name}).fetchall()
+        for cr in col_rows:
+            if cr[1]:
+                comments[cr[0]] = cr[1]
     return comments
 
 
@@ -1220,6 +1326,25 @@ def _load_column_types(conn, db_type, database, table_name, schema=''):
             ), {"tbl": table_name, "sch": sch}).fetchall()
             for cr in col_rows:
                 types[cr[0]] = cr[1]
+        elif db_type == 'oracle':
+            # ★ Oracle 使用 USER_TAB_COLUMNS 获取列类型，表名转大写
+            owner = database
+            tbl = table_name.upper()
+            col_rows = conn.execute(text(
+                "SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE "
+                "FROM USER_TAB_COLUMNS WHERE TABLE_NAME=:tbl ORDER BY COLUMN_ID"
+            ), {"tbl": tbl}).fetchall()
+            for cr in col_rows:
+                dt = cr[1]
+                if dt == 'NUMBER' and cr[3] is not None and cr[4] is not None:
+                    col_type = f"NUMBER({cr[3]},{cr[4]})"
+                elif dt == 'NUMBER' and cr[3] is not None:
+                    col_type = f"NUMBER({cr[3]})"
+                elif cr[2] and dt in ('VARCHAR', 'VARCHAR2', 'CHAR', 'NCHAR', 'NVARCHAR2', 'RAW'):
+                    col_type = f"{dt}({int(cr[2])})"
+                else:
+                    col_type = dt
+                types[cr[0]] = col_type
         elif db_type == 'mssql':
             col_rows = conn.execute(text(
                 "SELECT COLUMN_NAME, DATA_TYPE + "
@@ -1249,7 +1374,7 @@ def table_get_col_types(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
@@ -1348,7 +1473,7 @@ def table_save_changes(conn_data, database, table_name, schema, changes):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -1377,7 +1502,7 @@ def table_exec_save(conn_data, database, table_name, schema, changes):
     _query_cancel.clear()
     cdata = dict(conn_data)
     db_type = cdata.get('db_type', 'mysql')
-    if db_type not in ('postgresql', 'oracle'):
+    if db_type != 'oracle':
         cdata["db"] = database
     tbl = _build_table_ref(cdata, database, table_name, schema)
     engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -1441,7 +1566,7 @@ def table_delete_rows(conn_data, database, table_name, schema, rows_data):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -1465,7 +1590,7 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -1492,37 +1617,255 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data):
 
 
 @eel.expose
+def _format_oracle_ddl(ddl):
+    """轻量美化 Oracle DDL（DBMS_METADATA.GET_DDL 返回的原始字符串）
+
+    策略：
+      1) 合并多余空白
+      2) 顶层段关键字前换行（PCTFREE / TABLESPACE / STORAGE / LOGGING 等）
+      3) 括号深度感知：仅在最外层（第 1 深度，CREATE TABLE 后的"列定义"括号）内逗号换行；
+         类型参数括号内 (NUMBER(4,0) 等) 不换行。
+      4) 顶层括号（前一个字符不是空白）前换行
+      5) 重新按括号深度加缩进
+
+    性能：对于超长 DDL (>100KB) 仅做轻量换行，避免字符级扫描开销。
+    """
+    if not ddl:
+        return ddl
+    import re
+    s = ddl.strip()
+    s = re.sub(r'\s+', ' ', s)
+
+    # ★ 超大 DDL：只做简单的逗号后换行 + 顶层关键字换行，不做逐字符扫描
+    if len(s) > 100000:
+        top_kw = [
+            'CREATE', 'ALTER', 'DROP', 'ORGANIZATION', 'PCTFREE', 'PCTUSED',
+            'INITRANS', 'MAXTRANS', 'STORAGE', 'TABLESPACE', 'BUFFER_POOL',
+            'LOGGING', 'NOLOGGING', 'COMPRESS', 'NOCOMPRESS',
+            'SEGMENT', 'CREATION', 'IMMEDIATE', 'DEFERRED',
+            'ENABLE', 'DISABLE', 'PARALLEL', 'NOPARALLEL', 'MONITORING', 'NOMONITORING',
+        ]
+        # 顶层关键字前换行
+        p = r'(^|\s)(' + '|'.join(sorted(top_kw, key=len, reverse=True)) + r')\b'
+        s = re.sub(p, lambda m: ('\n' if m.group(1) else '') + m.group(2), s)
+        # 简单缩进
+        lines = s.split('\n')
+        out_lines = []
+        depth = 0
+        for ln in lines:
+            line = ln.rstrip()
+            if not line:
+                out_lines.append('')
+                continue
+            if line.startswith(')'):
+                depth = max(0, depth - 1)
+            indent = depth
+            out_lines.append(('  ' * indent) + line.strip())
+            opens = line.count('(')
+            closes = line.count(')')
+            depth = max(0, depth + opens - closes)
+        return '\n'.join(out_lines)
+
+    # 顶层段关键字（句首出现时换行，括号内不换）
+    # ★ 优化：按长度降序排序，让长关键字优先匹配，减少回溯
+    top_keywords = [
+        'NOMONITORING', 'MONITORING', 'NOPARALLEL', 'NOLOGGING', 'NOCOMPRESS',
+        'TABLESPACE', 'ORGANIZATION', 'BUFFER_POOL', 'PCTINCREASE', 'MAXEXTENTS',
+        'MINEXTENTS', 'FREELISTS', 'PCTTHRESHOLD', 'SUBSTITUTABLE',
+        'CREATION', 'STORAGE', 'PCTFREE', 'PCTUSED', 'INITRANS', 'MAXTRANS',
+        'LOGGING', 'COMPRESS', 'SEGMENT', 'ENABLE', 'DISABLE', 'PARALLEL',
+        'REFERENCES', 'INCLUDING', 'OVERFLOW', 'MAPPING', 'NOMAPPING',
+        'VALIDATE', 'NOVALIDATE', 'CACHE', 'NOCACHE', 'INDEX', 'USING',
+        'CREATE', 'ALTER', 'DROP', 'STORE', 'COMPUTE', 'STATISTICS',
+        'DEFERRED', 'IMMEDIATE', 'INITIAL',
+    ]
+    # ★ 预编译正则
+    _kw_re = re.compile(r'(^|\s)(' + '|'.join(top_keywords) + r')\b')
+    s = _kw_re.sub(lambda m: ('\n' if m.group(1) else '') + m.group(2), s)
+
+    # 字符级扫描：仅在"顶层括号"内的逗号才换行
+    out = []
+    depth = 0
+    in_quote = None  # None / '"' / "'"
+    top_depth_open = -1  # CREATE TABLE 之后第一个 "深度=1" 的左括号位置
+    for i, ch in enumerate(s):
+        if in_quote:
+            out.append(ch)
+            if ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+            out.append(ch)
+            continue
+        if ch == '(':
+            depth += 1
+            # CREATE TABLE ... ( 即顶层括号，其内逗号换行
+            if top_depth_open == -1 and depth == 1:
+                top_depth_open = i
+                out.append(ch)
+                out.append('\n  ')
+                continue
+            out.append(ch)
+            continue
+        if ch == ')':
+            depth -= 1
+            # 只在"顶层括号关闭"时换行
+            if top_depth_open != -1 and depth == 0:
+                if out and out[-1] != '\n':
+                    out.append('\n')
+                out.append(ch)
+                out.append('\n')
+                top_depth_open = -1
+                continue
+            out.append(ch)
+            continue
+        if ch == ',' and top_depth_open != -1 and depth == 1:
+            out.append(',\n  ')
+            continue
+        out.append(ch)
+    s = ''.join(out)
+
+    # 重新整理缩进：基于括号深度
+    lines = s.split('\n')
+    result = []
+    depth = 0
+    for raw in lines:
+        line = raw.rstrip()
+        if not line:
+            result.append('')
+            continue
+        if line.startswith(')'):
+            indent = max(0, depth - 1)
+        else:
+            indent = depth
+        result.append(('  ' * indent) + line.strip())
+        opens = line.count('(')
+        closes = line.count(')')
+        depth = max(0, depth + opens - closes)
+    return '\n'.join(result)
+
+
+@eel.expose
 def table_get_ddl(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') in ('postgresql', 'oracle'):
-            pass
-        else:
+        if cdata.get('db_type') != 'oracle':
             cdata["db"] = database
         db_type = cdata.get('db_type', 'mysql')
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         if db_type in ('mysql', 'ob-mysql'):
             with engine.connect() as conn:
                 row = conn.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
             ddl = row[1] if row else ""
         elif db_type == 'postgresql':
             q = schema if schema else database
-            # 用 pg_dump 风格获取 DDL（简化版：列信息 + 索引）
+            # ★ PostgreSQL：生成完整 DDL（列+主键+索引+外键+注释）
+            q = schema if schema else database
             with engine.connect() as conn:
+                # 列信息
                 cols = conn.execute(text(
-                    "SELECT column_name,data_type,character_maximum_length,is_nullable,column_default "
+                    "SELECT column_name,data_type,character_maximum_length,numeric_precision,numeric_scale,"
+                    "is_nullable,column_default "
                     "FROM information_schema.columns WHERE table_schema=:sch AND table_name=:tbl "
                     "ORDER BY ordinal_position"
                 ), {"sch":q,"tbl":table_name}).fetchall()
                 lines = [f'CREATE TABLE "{q}"."{table_name}" (']
                 col_defs = []
                 for c in cols:
-                    null = ' NOT NULL' if c[3]=='NO' else ''
-                    dflt = f' DEFAULT {c[4]}' if c[4] else ''
+                    null = ' NOT NULL' if c[5]=='NO' else ''
+                    dflt = f' DEFAULT {c[6]}' if c[6] else ''
                     col_defs.append(f'  "{c[0]}" {c[1]}{dflt}{null}')
+                # 主键
+                try:
+                    pk_rows = conn.execute(text(
+                        "SELECT kcu.column_name FROM information_schema.table_constraints tc "
+                        "JOIN information_schema.key_column_usage kcu "
+                        "ON tc.constraint_name=kcu.constraint_name AND tc.table_schema=kcu.table_schema "
+                        "WHERE tc.table_schema=:sch AND tc.table_name=:tbl AND tc.constraint_type='PRIMARY KEY' "
+                        "ORDER BY kcu.ordinal_position"
+                    ), {"sch":q,"tbl":table_name}).fetchall()
+                    if pk_rows:
+                        pk_cols = ', '.join(f'"{r[0]}"' for r in pk_rows)
+                        col_defs.append(f'  PRIMARY KEY ({pk_cols})')
+                except Exception:
+                    pass
+                # 外键
+                try:
+                    fk_rows = conn.execute(text(
+                        "SELECT tc.constraint_name, kcu.column_name, ccu.table_name, ccu.column_name "
+                        "FROM information_schema.table_constraints tc "
+                        "JOIN information_schema.key_column_usage kcu "
+                        "ON tc.constraint_name=kcu.constraint_name AND tc.table_schema=kcu.table_schema "
+                        "JOIN information_schema.constraint_column_usage ccu "
+                        "ON tc.constraint_name=ccu.constraint_name "
+                        "WHERE tc.table_schema=:sch AND tc.table_name=:tbl AND tc.constraint_type='FOREIGN KEY'"
+                    ), {"sch":q,"tbl":table_name}).fetchall()
+                    for fk in fk_rows:
+                        col_defs.append(f'  CONSTRAINT "{fk[0]}" FOREIGN KEY ("{fk[1]}") REFERENCES "{q}"."{fk[2]}" ("{fk[3]}")')
+                except Exception:
+                    pass
                 lines.append(',\n'.join(col_defs))
                 lines.append(');')
+                # 索引
+                try:
+                    idx_rows = conn.execute(text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE schemaname=:sch AND tablename=:tbl ORDER BY indexname"
+                    ), {"sch":q}).fetchall()
+                    for ir in idx_rows:
+                        if 'PRIMARY KEY' not in (ir[1] or ''):
+                            lines.append(ir[1] + ';')
+                except Exception:
+                    pass
+                # 列注释
+                try:
+                    cmt_rows = conn.execute(text(
+                        "SELECT cols.column_name, pg_catalog.col_description(c.oid, cols.ordinal_position::int) "
+                        "FROM pg_catalog.pg_class c "
+                        "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                        "JOIN information_schema.columns cols ON cols.table_schema=n.nspname AND cols.table_name=c.relname "
+                        "WHERE n.nspname=:sch AND c.relname=:tbl AND pg_catalog.col_description(c.oid, cols.ordinal_position::int) IS NOT NULL"
+                    ), {"sch":q,"tbl":table_name}).fetchall()
+                    for cr in cmt_rows:
+                        cmt = cr[1].replace("'", "''")
+                        lines.append(f'COMMENT ON COLUMN "{q}"."{table_name}"."{cr[0]}" IS \'{cmt}\';')
+                except Exception:
+                    pass
+                # 表注释
+                try:
+                    tc_row = conn.execute(text(
+                        "SELECT pg_catalog.obj_description(c.oid,'pg_class') "
+                        "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                        "WHERE n.nspname=:sch AND c.relname=:tbl"
+                    ), {"sch":q,"tbl":table_name}).fetchone()
+                    if tc_row and tc_row[0]:
+                        tcmt = tc_row[0].replace("'", "''")
+                        lines.append(f'COMMENT ON TABLE "{q}"."{table_name}" IS \'{tcmt}\';')
+                except Exception:
+                    pass
                 ddl = '\n'.join(lines)
+        elif db_type == 'oracle':
+            # ★ Oracle 使用 DBMS_METADATA.GET_DDL 获取 DDL，表名和 owner 统一转大写
+            owner = (cdata.get("user", database) or '').upper()
+            tbl = table_name.upper()
+            with engine.connect() as conn:
+                # ★ 减少输出体积，提升速度：去掉 SEGMENT_ATTRIBUTES / STORAGE
+                try:
+                    conn.execute(text(
+                        "BEGIN"
+                        " DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM,'STORAGE',false);"
+                        " DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM,'SEGMENT_ATTRIBUTES',false);"
+                        " END;"
+                    ))
+                except Exception:
+                    pass  # 低权限用户可能无法调用
+                result = conn.execute(text("SELECT DBMS_METADATA.GET_DDL('TABLE', :tbl, :owner) FROM DUAL"),
+                                     {"tbl": tbl, "owner": owner})
+                row = result.fetchone()
+                ddl = row[0] if row else ""
+            # 轻量美化
+            ddl = _format_oracle_ddl(ddl)
         else:
             with engine.connect() as conn:
                 row = conn.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
@@ -1540,7 +1883,7 @@ def table_get_design_info(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
 
@@ -1618,6 +1961,20 @@ def table_get_design_info(conn_data, database, table_name, schema=''):
                     "is_nullable, column_default, ordinal_position "
                     "FROM information_schema.columns WHERE table_schema=:sch AND table_name=:tbl ORDER BY ordinal_position"
                 ), {"sch": sch, "tbl": table_name}).fetchall()
+                # ★ 获取列注释
+                pg_col_cmt = {}
+                try:
+                    cmt_r = conn.execute(text(
+                        "SELECT cols.column_name, pg_catalog.col_description(c.oid, cols.ordinal_position::int) "
+                        "FROM pg_catalog.pg_class c "
+                        "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                        "JOIN information_schema.columns cols ON cols.table_schema=n.nspname AND cols.table_name=c.relname "
+                        "WHERE n.nspname=:sch AND c.relname=:tbl"
+                    ), {"sch": sch, "tbl": table_name}).fetchall()
+                    for cr in cmt_r:
+                        if cr[1]: pg_col_cmt[cr[0]] = cr[1]
+                except Exception:
+                    pass
                 for r in cols:
                     result["columns"].append({
                         "name": r[0], "col_type": r[1], "data_type": r[1],
@@ -1625,12 +1982,176 @@ def table_get_design_info(conn_data, database, table_name, schema=''):
                         "nullable": r[5] == "YES",
                         "default_val": str(r[6]) if r[6] is not None else None,
                         "auto_increment": False,
-                        "comment": "", "position": r[7]
+                        "comment": pg_col_cmt.get(r[0], ""), "position": r[7]
                     })
-                result["table_options"] = {"engine": "", "collation": "", "comment": ""}
+                # ★ 获取索引
+                try:
+                    idx_r = conn.execute(text(
+                        "SELECT i.relname, am.amname, array_agg(a.attname ORDER BY k.n) "
+                        "FROM pg_index x "
+                        "JOIN pg_class c ON c.oid=x.indrelid "
+                        "JOIN pg_class i ON i.oid=x.indexrelid "
+                        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                        "JOIN pg_am am ON am.oid=i.relam "
+                        "JOIN LATERAL unnest(x.indkey) WITH ORDINALITY k(attnum, n) ON true "
+                        "JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=k.attnum "
+                        "WHERE n.nspname=:sch AND c.relname=:tbl "
+                        "GROUP BY i.relname, am.amname, x.indisunique, x.indisprimary "
+                        "ORDER BY i.relname"
+                    ), {"sch": sch, "tbl": table_name}).fetchall()
+                    for ir in idx_r:
+                        idx_type = 'PRIMARY' if ir[1] == 'btree' and False else ('UNIQUE' if False else 'INDEX')
+                        # 用 indisunique/isprimary 判断更可靠
+                        result["indexes"].append({
+                            "name": ir[0], "type": "INDEX",
+                            "columns": list(ir[2]) if ir[2] else [],
+                            "method": ir[1] or "BTREE"
+                        })
+                except Exception:
+                    pass
+                # ★ 获取主键索引标记
+                try:
+                    pk_r = conn.execute(text(
+                        "SELECT i.relname, array_agg(a.attname ORDER BY k.n) "
+                        "FROM pg_index x "
+                        "JOIN pg_class c ON c.oid=x.indrelid "
+                        "JOIN pg_class i ON i.oid=x.indexrelid "
+                        "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                        "JOIN LATERAL unnest(x.indkey) WITH ORDINALITY k(attnum, n) ON true "
+                        "JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum=k.attnum "
+                        "WHERE n.nspname=:sch AND c.relname=:tbl AND x.indisprimary "
+                        "GROUP BY i.relname"
+                    ), {"sch": sch, "tbl": table_name}).fetchall()
+                    for pr in pk_r:
+                        result["indexes"].append({
+                            "name": pr[0], "type": "PRIMARY",
+                            "columns": list(pr[1]) if pr[1] else [], "method": "BTREE"
+                        })
+                except Exception:
+                    pass
+                # ★ 表注释
+                pg_tbl_cmt = ""
+                try:
+                    tc_r = conn.execute(text(
+                        "SELECT pg_catalog.obj_description(c.oid,'pg_class') "
+                        "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                        "WHERE n.nspname=:sch AND c.relname=:tbl"
+                    ), {"sch": sch, "tbl": table_name}).fetchone()
+                    if tc_r and tc_r[0]: pg_tbl_cmt = tc_r[0]
+                except Exception:
+                    pass
+                result["table_options"] = {"engine": "", "collation": "", "comment": pg_tbl_cmt}
+
+            elif db_type == 'oracle':
+                # ★ Oracle 使用 ALL_TAB_COLUMNS（支持跨 schema），表名/owner 转大写
+                # ★ 优先用 database（当前浏览的 schema），其次用连接用户名
+                owner = (database or cdata.get("user", "") or "").upper()
+                tbl = table_name.upper()
+                # ★ 无长度类型（DATE/CLOB/BLOB 等）不带括号；TIMESTAMP 支持精度参数
+                _ORA_NO_LEN = ('DATE', 'CLOB', 'NCLOB', 'LONG',
+                               'BLOB', 'LONG RAW', 'BINARY_FLOAT', 'BINARY_DOUBLE', 'ROWID')
+                cols = conn.execute(text(
+                    "SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, "
+                    "NULLABLE, DATA_DEFAULT, COLUMN_ID "
+                    "FROM ALL_TAB_COLUMNS WHERE OWNER=:own AND TABLE_NAME=:tbl ORDER BY COLUMN_ID"
+                ), {"own": owner, "tbl": tbl}).fetchall()
+                # ★ 获取列注释
+                col_cmt_map = {}
+                try:
+                    cmt_rows = conn.execute(text(
+                        "SELECT COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS "
+                        "WHERE OWNER=:own AND TABLE_NAME=:tbl"
+                    ), {"own": owner, "tbl": tbl}).fetchall()
+                    for cr in cmt_rows:
+                        col_cmt_map[cr[0]] = cr[1] or ""
+                except Exception:
+                    pass
+                # ★ 获取主键列（通过 ALL_CONSTRAINTS）
+                pk_cols_set = set()
+                try:
+                    pk_rows_info = conn.execute(text(
+                        "SELECT cc.COLUMN_NAME FROM ALL_CONSTRAINTS c "
+                        "JOIN ALL_CONS_COLUMNS cc ON c.CONSTRAINT_NAME=cc.CONSTRAINT_NAME AND c.OWNER=cc.OWNER "
+                        "WHERE c.OWNER=:own AND c.TABLE_NAME=:tbl AND c.CONSTRAINT_TYPE='P' "
+                        "ORDER BY cc.POSITION"
+                    ), {"own": owner, "tbl": tbl}).fetchall()
+                    for pr in pk_rows_info:
+                        pk_cols_set.add(pr[0].upper())
+                except Exception:
+                    pass
+                # ★ 获取主键约束名（用于索引列表标记 PRIMARY）
+                pk_constraint_name = None
+                if pk_cols_set:
+                    try:
+                        pk_name_row = conn.execute(text(
+                            "SELECT CONSTRAINT_NAME FROM ALL_CONSTRAINTS "
+                            "WHERE OWNER=:own AND TABLE_NAME=:tbl AND CONSTRAINT_TYPE='P'"
+                        ), {"own": owner, "tbl": tbl}).fetchone()
+                        if pk_name_row:
+                            pk_constraint_name = pk_name_row[0].upper()
+                    except Exception:
+                        pass
+
+                for r in cols:
+                    dt = r[1]
+                    length = int(r[2]) if r[2] else None
+                    if dt.upper() in _ORA_NO_LEN:
+                        col_type = dt
+                        length = None
+                    elif dt == 'NUMBER' and r[3] is not None and r[4] is not None:
+                        col_type = f"NUMBER({r[3]},{r[4]})"
+                    elif dt == 'NUMBER' and r[3] is not None:
+                        col_type = f"NUMBER({r[3]})"
+                    elif length and dt in ('VARCHAR', 'VARCHAR2', 'CHAR', 'NCHAR', 'NVARCHAR2', 'RAW'):
+                        col_type = f"{dt}({length})"
+                    else:
+                        col_type = dt
+                    # ★ 保留 DATA_DEFAULT 原始值（含引号），前端会处理显示
+                    raw_default = str(r[6]).strip() if r[6] is not None else None
+                    result["columns"].append({
+                        "name": r[0], "col_type": col_type, "data_type": dt,
+                        "length": length, "precision": r[3], "scale": r[4],
+                        "nullable": r[5] == 'Y',
+                        "default_val": raw_default,
+                        "auto_increment": False,
+                        "comment": col_cmt_map.get(r[0], ""), "position": r[7]
+                    })
+                # 获取索引信息
+                idxs = conn.execute(text(
+                    "SELECT i.INDEX_NAME, i.UNIQUENESS, ic.COLUMN_NAME "
+                    "FROM ALL_INDEXES i JOIN ALL_IND_COLUMNS ic "
+                    "ON i.INDEX_NAME=ic.INDEX_NAME AND i.OWNER=ic.INDEX_OWNER "
+                    "WHERE i.TABLE_OWNER=:own AND i.TABLE_NAME=:tbl "
+                    "ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION"
+                ), {"own": owner, "tbl": tbl}).fetchall()
+                idx_map = {}
+                for r in idxs:
+                    key_name = r[0]
+                    if key_name not in idx_map:
+                        # ★ 主键索引用约束名匹配，不用 SYS_ 前缀猜测
+                        is_pk = (pk_constraint_name and key_name.upper() == pk_constraint_name)
+                        idx_map[key_name] = {
+                            "name": key_name,
+                            "type": "PRIMARY" if is_pk else ("UNIQUE" if r[1] == 'UNIQUE' else "INDEX"),
+                            "columns": [], "method": "BTREE"
+                        }
+                    idx_map[key_name]["columns"].append(r[2])
+                result["indexes"] = list(idx_map.values())
+                # ★ 获取表注释
+                tbl_comment = ""
+                try:
+                    tc_row = conn.execute(text(
+                        "SELECT COMMENTS FROM ALL_TAB_COMMENTS "
+                        "WHERE OWNER=:own AND TABLE_NAME=:tbl AND TABLE_TYPE='TABLE'"
+                    ), {"own": owner, "tbl": tbl}).fetchone()
+                    if tc_row:
+                        tbl_comment = tc_row[0] or ""
+                except Exception:
+                    pass
+                result["table_options"] = {"engine": "", "collation": "", "comment": tbl_comment}
 
             else:
-                # Oracle / MSSQL 等暂返回基础列信息
+                # MSSQL 等暂返回基础列信息
                 result["table_options"] = {"engine": "", "collation": "", "comment": ""}
 
         engine.dispose()
@@ -1648,7 +2169,7 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         tbl = _build_table_ref(cdata, database, table_name)
@@ -1852,6 +2373,233 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
                 default = f" SET DEFAULT {col['default_val']}" if col.get("default_val") else " DROP DEFAULT"
                 sqls.append(f"ALTER TABLE {tbl} ALTER COLUMN {name} TYPE {col_type}, ALTER COLUMN {name}{nullable}, ALTER COLUMN {name}{default}")
 
+        elif db_type == 'oracle':
+            # ★ Oracle 表设计器：生成 ALTER TABLE + 独立 DDL 语句
+            columns = design.get("columns", [])
+            indexes = design.get("indexes", [])
+            tbl_upper = table_name.upper()
+            owner = database.upper() if database else (cdata.get("user", "") or "").upper()
+
+            # 获取现有列和索引信息（用于 diff）
+            with engine.connect() as curconn:
+                existing_col_rows = curconn.execute(text(
+                    "SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE, "
+                    "NULLABLE, DATA_DEFAULT, COLUMN_ID "
+                    "FROM ALL_TAB_COLUMNS WHERE OWNER=:own AND TABLE_NAME=:tbl ORDER BY COLUMN_ID"
+                ), {"own": owner, "tbl": tbl_upper}).fetchall()
+                existing_idx_rows = curconn.execute(text(
+                    "SELECT i.INDEX_NAME, i.UNIQUENESS, ic.COLUMN_NAME, i.INDEX_TYPE "
+                    "FROM ALL_INDEXES i JOIN ALL_IND_COLUMNS ic "
+                    "ON i.INDEX_NAME=ic.INDEX_NAME AND i.OWNER=ic.INDEX_OWNER "
+                    "WHERE i.TABLE_OWNER=:own AND i.TABLE_NAME=:tbl "
+                    "ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION"
+                ), {"own": owner, "tbl": tbl_upper}).fetchall()
+                # 获取主键列
+                try:
+                    pk_rows = curconn.execute(text(
+                        "SELECT cc.COLUMN_NAME FROM ALL_CONSTRAINTS c "
+                        "JOIN ALL_CONS_COLUMNS cc ON c.CONSTRAINT_NAME=cc.CONSTRAINT_NAME AND c.OWNER=cc.OWNER "
+                        "WHERE c.OWNER=:own AND c.TABLE_NAME=:tbl AND c.CONSTRAINT_TYPE='P' "
+                        "ORDER BY cc.POSITION"
+                    ), {"own": owner, "tbl": tbl_upper}).fetchall()
+                except Exception:
+                    pk_rows = []
+
+            # 构建现有列详情
+            _ORA_NO_LEN = ('DATE', 'CLOB', 'NCLOB', 'LONG',
+                           'BLOB', 'LONG RAW', 'BINARY_FLOAT', 'BINARY_DOUBLE', 'ROWID')
+            existing_detail = {}
+            for r in existing_col_rows:
+                dt = r[1]
+                length = int(r[2]) if r[2] else None
+                if dt.upper() in _ORA_NO_LEN:
+                    col_type = dt
+                elif dt == 'NUMBER' and r[3] is not None and r[4] is not None:
+                    col_type = f"NUMBER({r[3]},{r[4]})"
+                elif dt == 'NUMBER' and r[3] is not None:
+                    col_type = f"NUMBER({r[3]})"
+                elif length and dt in ('VARCHAR', 'VARCHAR2', 'CHAR', 'NCHAR', 'NVARCHAR2', 'RAW'):
+                    col_type = f"{dt}({length})"
+                else:
+                    col_type = dt
+                existing_detail[r[0]] = {
+                    "col_type": col_type,
+                    "nullable": r[5] == 'Y',
+                    "default_val": str(r[6]).strip() if r[6] is not None else None,
+                }
+
+            # 构建现有索引详情
+            existing_detail_idx = {}
+            for r in existing_idx_rows:
+                key_name = r[0]
+                if key_name not in existing_detail_idx:
+                    existing_detail_idx[key_name] = {
+                        "type": "UNIQUE" if r[1] == 'UNIQUE' else "INDEX",
+                        "columns": [], "method": r[3] or "BTREE"
+                    }
+                existing_detail_idx[key_name]["columns"].append(r[2])
+            # 主键列
+            old_pk_cols = set(r[0] for r in pk_rows)
+
+            # 新列名集合
+            new_col_names = set(col.get("name", "").upper() for col in columns)
+            dropped_col_names = set(n for n in existing_detail if n.upper() not in new_col_names)
+
+            # ===== 阶段1：删除受影响的索引（DROP INDEX 是独立语句）=====
+            new_idx_names = set(idx.get("name", "").upper() for idx in indexes)
+            for old_idx_name, old_idx_info in existing_detail_idx.items():
+                # 跳过主键自动创建的索引（由主键约束管理）
+                if old_idx_name in old_pk_cols or old_idx_name.startswith('SYS_'):
+                    continue
+                idx_cols = set(c.upper() for c in old_idx_info.get("columns", []))
+                # 引用被删列的索引 / 完全移除的索引 → 删除
+                if (idx_cols & dropped_col_names) or (old_idx_name not in new_idx_names):
+                    sqls.append(f'DROP INDEX "{old_idx_name}"')
+                else:
+                    # 检查是否需要重建（列或类型变化）
+                    for idx in indexes:
+                        if idx.get("name", "").upper() == old_idx_name:
+                            new_cols = sorted(c.upper() for c in idx.get("columns", []))
+                            old_cols = sorted(c.upper() for c in old_idx_info.get("columns", []))
+                            new_type = "UNIQUE" if idx.get("type") == "UNIQUE" else "INDEX"
+                            if new_cols != old_cols or new_type != old_idx_info["type"]:
+                                sqls.append(f'DROP INDEX "{old_idx_name}"')
+                            break
+
+            # ===== 阶段2：列操作（ADD / MODIFY / DROP）=====
+            # ★ Oracle 无长度类型列表（DATE/CLOB/BLOB 等不允许多余的 (length) 参数）
+            # TIMESTAMP 支持精度参数，不在此列表中
+            _ORA_NO_LEN = ('DATE', 'CLOB', 'NCLOB', 'LONG',
+                           'BLOB', 'LONG RAW', 'BINARY_FLOAT', 'BINARY_DOUBLE', 'ROWID')
+            # ★ Oracle 默认值无需引号的关键字/函数
+            _ORA_DEFAULT_KEYWORDS = (
+                'SYSDATE', 'SYSTIMESTAMP', 'CURRENT_DATE', 'CURRENT_TIMESTAMP',
+                'CURRENT_TIME', 'LOCALTIMESTAMP', 'USER', 'UID', 'NULL',
+                'TRUE', 'FALSE', 'SESSIONTIMEZONE', 'DBTIMEZONE',
+                'SYSGUID', 'SYS_GUID', 'SYSDATE', 'SYSTIMESTAMP',
+            )
+
+            def _ora_default_clause(val):
+                """生成 Oracle DEFAULT 子句，字符串值自动加引号"""
+                if not val:
+                    return ""
+                v = str(val).strip()
+                if not v:
+                    return ""
+                # 已带引号 → 原样使用
+                if v.startswith("'") and v.endswith("'"):
+                    return f" DEFAULT {v}"
+                # 纯数字 → 原样使用
+                if re.match(r'^-?\d+(\.\d+)?$', v):
+                    return f" DEFAULT {v}"
+                # Oracle 关键字/函数 → 原样使用
+                if v.upper() in _ORA_DEFAULT_KEYWORDS:
+                    return f" DEFAULT {v}"
+                # 函数调用（含括号）→ 原样使用
+                if '(' in v:
+                    return f" DEFAULT {v}"
+                # 其他 → 当字符串字面量，加单引号
+                return f" DEFAULT '{v.replace(chr(39), chr(39)+chr(39))}'"
+
+            add_parts = []
+            modify_parts = []
+            for col in columns:
+                col_name = col.get("name", "")
+                col_name_up = col_name.upper()
+                col_type = col.get("col_type", col.get("data_type", "VARCHAR2(255)"))
+                # ★ 防护：无长度类型去掉多余的括号（如 DATE(7) → DATE）
+                _base_type = col_type.split('(')[0].strip().upper()
+                if _base_type in _ORA_NO_LEN:
+                    col_type = _base_type
+
+                if col_name_up in existing_detail:
+                    old = existing_detail[col_name_up]
+                    # ★ 用清理后的 col_type 比较，避免 DATE(7) vs DATE 误判为变更
+                    new_type = col_type.upper()
+                    old_type = (old["col_type"] or "").upper()
+                    # ★ 默认值比较：去掉首尾空格和引号差异
+                    new_def = (col.get("default_val") or "").strip().strip("'")
+                    old_def = (old["default_val"] or "").strip().strip("'")
+                    type_changed = new_type != old_type
+                    nullable_changed = col.get("nullable", True) != old["nullable"]
+                    default_changed = new_def.upper() != old_def.upper()
+
+                    if type_changed or nullable_changed or default_changed:
+                        # ★ 只拼接变化的部分，避免 ORA-01442（NOT NULL 无变化时不能加）
+                        parts = [f'"{col_name_up}"']
+                        if type_changed:
+                            parts.append(col_type)
+                        if default_changed:
+                            parts.append(_ora_default_clause(col.get("default_val")).strip())
+                        if nullable_changed:
+                            parts.append("NOT NULL" if not col.get("nullable", True) else "NULL")
+                        modify_parts.append(" ".join(parts))
+                else:
+                    # 新增列：完整定义
+                    nullable = " NULL" if col.get("nullable", True) else " NOT NULL"
+                    default = _ora_default_clause(col.get("default_val"))
+                    col_def = f'"{col_name_up}" {col_type}{default}{nullable}'
+                    add_parts.append(col_def)
+
+            # Oracle 可以合并同类操作
+            if add_parts:
+                sqls.append(f'ALTER TABLE {tbl} ADD ({", ".join(add_parts)})')
+            if modify_parts:
+                sqls.append(f'ALTER TABLE {tbl} MODIFY ({", ".join(modify_parts)})')
+
+            # 删除列
+            for old_name in dropped_col_names:
+                sqls.append(f'ALTER TABLE {tbl} DROP COLUMN "{old_name}"')
+
+            # ===== 阶段3：主键操作 =====
+            pk_idx = None
+            for idx in indexes:
+                if idx.get("type") == "PRIMARY":
+                    pk_idx = idx
+                    break
+            new_pk_cols = set(c.upper() for c in pk_idx.get("columns", [])) if pk_idx else set()
+            if pk_idx and new_pk_cols and new_pk_cols != old_pk_cols:
+                if old_pk_cols:
+                    sqls.append(f'ALTER TABLE {tbl} DROP PRIMARY KEY')
+                pk_cols = ", ".join(f'"{c}"' for c in pk_idx.get("columns", []))
+                sqls.append(f'ALTER TABLE {tbl} ADD PRIMARY KEY ({pk_cols})')
+
+            # ===== 阶段4：创建/重建索引 =====
+            for idx in indexes:
+                if idx.get("type") == "PRIMARY":
+                    continue
+                idx_name = idx.get("name", "")
+                idx_name_up = idx_name.upper()
+                idx_col_names = idx.get("columns", [])
+                # 跳过引用被删列的索引
+                if set(c.upper() for c in idx_col_names) & dropped_col_names:
+                    continue
+                # 跳过已存在且无变化的索引
+                old_idx = existing_detail_idx.get(idx_name_up)
+                if old_idx and not idx_name_up.startswith('SYS_'):
+                    new_cols = sorted(c.upper() for c in idx_col_names)
+                    old_cols = sorted(c.upper() for c in old_idx.get("columns", []))
+                    new_type = "UNIQUE" if idx.get("type") == "UNIQUE" else "INDEX"
+                    if new_cols == old_cols and new_type == old_idx["type"]:
+                        continue
+                unique_kw = "UNIQUE " if idx.get("type") == "UNIQUE" else ""
+                idx_cols = ", ".join(f'"{c}"' for c in idx_col_names)
+                sqls.append(f'CREATE {unique_kw}INDEX "{idx_name_up}" ON {tbl} ({idx_cols})')
+
+            # ===== 阶段5：列注释 =====
+            for col in columns:
+                cmt = col.get("comment", "")
+                if cmt:
+                    cmt_esc = cmt.replace("'", "''")
+                    col_name_up = col.get("name", "").upper()
+                    sqls.append(f'COMMENT ON COLUMN {tbl}."{col_name_up}" IS \'{cmt_esc}\'')
+
+            # 表注释
+            opts = design.get("table_options", {})
+            if opts.get("comment"):
+                cmt_esc = opts["comment"].replace("'", "''")
+                sqls.append(f'COMMENT ON TABLE {tbl} IS \'{cmt_esc}\'')
+
         else:
             engine.dispose()
             return {"ok": False, "msg": f"数据库类型 [{db_type}] 暂不支持表设计器"}
@@ -1877,7 +2625,7 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
 def table_truncate(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
+        if cdata.get('db_type') != 'oracle': cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         sql = f"TRUNCATE TABLE {tbl}"
@@ -1891,7 +2639,7 @@ def table_truncate(conn_data, database, table_name, schema=''):
 def table_delete(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
+        if cdata.get('db_type') != 'oracle': cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         sql = f"DROP TABLE {tbl}"
@@ -1905,7 +2653,7 @@ def table_delete(conn_data, database, table_name, schema=''):
 def table_clear(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') not in ('postgresql', 'oracle'): cdata["db"] = database
+        if cdata.get('db_type') != 'oracle': cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         sql = f"DELETE FROM {tbl}"
@@ -1922,7 +2670,7 @@ def table_rename(conn_data, database, old_name, new_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         old_tbl = _build_table_ref(cdata, database, old_name, schema)
         new_tbl = _build_table_ref(cdata, database, new_name, schema)
@@ -1955,7 +2703,7 @@ def table_backup(conn_data, database, table_name, schema=''):
         from datetime import datetime as dt
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         src_tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=30))
@@ -2008,7 +2756,7 @@ def table_execute_sql(conn_data, database, sql, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.begin() as conn:
@@ -2027,7 +2775,7 @@ def table_drop_column(conn_data, database, table_name, column_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
@@ -2049,12 +2797,18 @@ def table_drop_index(conn_data, database, table_name, index_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         q = '"' if db_type in ('postgresql', 'oracle') else '`'
-        sql = f"ALTER TABLE {tbl} DROP INDEX {q}{index_name}{q}"
+        if db_type == 'postgresql':
+            sch = schema if schema else database
+            sql = f'DROP INDEX {q}{sch}{q}.{q}{index_name}{q}'
+        elif db_type == 'oracle':
+            sql = f'DROP INDEX {q}{index_name}{q}'
+        else:
+            sql = f"ALTER TABLE {tbl} DROP INDEX {q}{index_name}{q}"
         with engine.begin() as conn:
             conn.execute(text(sql))
         engine.dispose()
@@ -2070,12 +2824,15 @@ def table_drop_foreign_key(conn_data, database, table_name, fk_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         q = '"' if db_type in ('postgresql', 'oracle') else '`'
-        sql = f"ALTER TABLE {tbl} DROP FOREIGN KEY {q}{fk_name}{q}"
+        if db_type in ('postgresql', 'oracle'):
+            sql = f'ALTER TABLE {tbl} DROP CONSTRAINT {q}{fk_name}{q}'
+        else:
+            sql = f"ALTER TABLE {tbl} DROP FOREIGN KEY {q}{fk_name}{q}"
         with engine.begin() as conn:
             conn.execute(text(sql))
         engine.dispose()
@@ -2587,6 +3344,16 @@ def _friendly_error(err, db_type='mysql'):
     # ★ oracledb thin 模式缺少 cryptography 依赖 (DPY-3016)
     if 'DPY-3016' in msg or ('cryptography' in msg and 'cannot be imported' in msg):
         return f"Oracle 驱动缺少加密库: {msg}\n\n请确保已安装兼容版本:\n  pip install cryptography==41.0.7"
+    # ★ ORA-01109: PDB 未打开 — 提供具体修复步骤
+    if 'ORA-01109' in msg or 'database not open' in msg.lower():
+        return (
+            f"Oracle PDB 数据库未打开: {msg}\n\n"
+            "🔧 修复步骤（在 Oracle 服务器上执行）:\n"
+            "  1. sqlplus / as sysdba\n"
+            "  2. ALTER PLUGGABLE DATABASE ALL OPEN;\n"
+            "  3. ALTER PLUGGABLE DATABASE ALL SAVE STATE;  (下次重启自动打开)\n"
+            "或单开指定 PDB: ALTER PLUGGABLE DATABASE orclpdb OPEN;"
+        )
     # ★ 通用依赖提示（根据 db_type 附加 pip install 命令）
     if "No module named" in msg or "ModuleNotFoundError" in msg:
         return f"缺少驱动 [{hint}]: {msg}" if hint else msg
@@ -2677,14 +3444,9 @@ def db_explore_get_databases(conn_data):
             try:
                 with engine.connect() as c:
                     if db_type == 'oracle':
-                        rows = c.execute(text("SELECT DISTINCT OWNER FROM ALL_TABLES ORDER BY OWNER")).fetchall()
+                        # ★ 只显示当前登录用户自己的 schema（对齐 Navicat/PL/SQL Developer 行为）
+                        rows = c.execute(text("SELECT USERNAME FROM USER_USERS")).fetchall()
                         databases = [r[0] for r in rows]
-                        current_user = conn_data.get("user", "").upper()
-                        if current_user:
-                            if current_user in databases:
-                                databases.remove(current_user)
-                            databases.insert(0, current_user)
-                        print(f"[Oracle get_databases] user={conn_data.get('user','')!r}, current_user={current_user!r}, databases={databases[:5]}...")
                     elif db_type in ('mysql', 'ob-mysql'):
                         rows = c.execute(text("SHOW DATABASES")).fetchall()
                         databases = [r[0] for r in rows if r[0] not in ("information_schema","mysql","performance_schema","sys","oceanbase")]
@@ -2752,13 +3514,14 @@ def db_explore_get_tables(conn_data, database, schema=''):
                 with engine.connect() as c:
                     if db_type == 'oracle':
                         print(f"[Oracle get_tables] database={database!r}, user={cdata.get('user','')!r}")
+                        # ★ 用 USER_SEGMENTS 替代 ALL_SEGMENTS（ZX 等普通用户无 ALL_SEGMENTS 权限会导致 ORA-00942）
                         rows = c.execute(text(
                             "SELECT t.TABLE_NAME, t.NUM_ROWS, "
-                            "COALESCE((SELECT SUM(s.BYTES) FROM ALL_SEGMENTS s WHERE s.OWNER=t.OWNER AND s.SEGMENT_NAME=t.TABLE_NAME),0), "
-                            "COALESCE((SELECT c.COMMENTS FROM ALL_TAB_COMMENTS c WHERE c.OWNER=t.OWNER AND c.TABLE_NAME=t.TABLE_NAME AND c.TABLE_TYPE='TABLE'),'') "
-                            "FROM ALL_TABLES t WHERE t.OWNER=:db ORDER BY t.TABLE_NAME"
-                        ), {"db":database}).fetchall()
-                        print(f"[Oracle get_tables] found {len(rows)} tables for OWNER={database!r}")
+                            "COALESCE((SELECT SUM(s.BYTES) FROM USER_SEGMENTS s WHERE s.SEGMENT_NAME=t.TABLE_NAME),0), "
+                            "COALESCE((SELECT c.COMMENTS FROM USER_TAB_COMMENTS c WHERE c.TABLE_NAME=t.TABLE_NAME AND c.TABLE_TYPE='TABLE'),'') "
+                            "FROM USER_TABLES t ORDER BY t.TABLE_NAME"
+                        )).fetchall()
+                        print(f"[Oracle get_tables] found {len(rows)} tables for user={database!r}")
                         tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
                     elif db_type in ('mysql', 'ob-mysql'):
                         rows = c.execute(text("SELECT TABLE_NAME,TABLE_ROWS,DATA_LENGTH,UPDATE_TIME,TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
@@ -3434,7 +4197,13 @@ def db_explore_get_procedures(conn_data, database, schema=''):
                 sch = schema if schema else 'public'
                 rows = c.execute(text("SELECT proname,'FUNCTION' FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid WHERE n.nspname=:sch ORDER BY proname"), {"sch":sch}).fetchall()
             elif db_type == 'oracle':
-                rows = c.execute(text("SELECT OBJECT_NAME,OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER=:db AND OBJECT_TYPE IN ('PROCEDURE','FUNCTION') ORDER BY OBJECT_NAME"), {"db":database}).fetchall()
+                # ★ Oracle：owner 用 database（当前 schema），大写
+                owner = (database or cdata.get("user", "") or "").upper()
+                rows = c.execute(text(
+                    "SELECT OBJECT_NAME,OBJECT_TYPE FROM ALL_OBJECTS "
+                    "WHERE OWNER=:own AND OBJECT_TYPE IN ('PROCEDURE','FUNCTION') "
+                    "AND STATUS='VALID' ORDER BY OBJECT_NAME"
+                ), {"own": owner}).fetchall()
             elif db_type == 'mssql':
                 rows = c.execute(text("SELECT ROUTINE_NAME,ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES ORDER BY ROUTINE_NAME")).fetchall()
             else:
@@ -3444,29 +4213,228 @@ def db_explore_get_procedures(conn_data, database, schema=''):
     except Exception as e: return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
 
 @eel.expose
-def db_explore_get_triggers(conn_data, database):
+def db_explore_get_triggers(conn_data, database, schema=''):
     try:
         cdata = dict(conn_data)
-        if cdata.get("db_type") != 'oracle':
+        db_type = cdata.get("db_type", "mysql")
+        if db_type != 'oracle':
             cdata["db"] = database
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as c:
-            rows = c.execute(text(f"SELECT TRIGGER_NAME,EVENT_MANIPULATION,EVENT_OBJECT_TABLE,ACTION_TIMING FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA=:db ORDER BY TRIGGER_NAME"), {"db":database}).fetchall()
+            if db_type == 'oracle':
+                # ★ Oracle：查 ALL_TRIGGERS（INFORMATION_SCHEMA.TRIGGERS 不存在）
+                owner = (database or cdata.get("user", "") or "").upper()
+                rows = c.execute(text(
+                    "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TABLE_NAME, TRIGGER_TYPE "
+                    "FROM ALL_TRIGGERS WHERE OWNER=:own ORDER BY TRIGGER_NAME"
+                ), {"own": owner}).fetchall()
+                # ALL_TRIGGERS 没有 ACTION_TIMING 列，用 TRIGGER_TYPE 替代
+                triggers = [{"name": r[0], "event": r[1] or "", "table": r[2] or "", "timing": r[3] or ""} for r in rows]
+            elif db_type == 'postgresql':
+                sch = schema if schema else 'public'
+                rows = c.execute(text(
+                    "SELECT tgname, t.tgenabled, c.relname, 'AFTER' "
+                    "FROM pg_trigger t JOIN pg_class c ON t.tgrelid=c.oid "
+                    "JOIN pg_namespace n ON c.relnamespace=n.oid "
+                    "WHERE n.nspname=:sch AND NOT tgisinternal ORDER BY tgname"
+                ), {"sch": sch}).fetchall()
+                triggers = [{"name": r[0], "event": r[1] or "", "table": r[2] or "", "timing": r[3] or ""} for r in rows]
+            else:
+                rows = c.execute(text(
+                    "SELECT TRIGGER_NAME,EVENT_MANIPULATION,EVENT_OBJECT_TABLE,ACTION_TIMING "
+                    "FROM INFORMATION_SCHEMA.TRIGGERS WHERE TRIGGER_SCHEMA=:db ORDER BY TRIGGER_NAME"
+                ), {"db": database}).fetchall()
+                triggers = [{"name": r[0], "event": r[1], "table": r[2], "timing": r[3]} for r in rows]
         engine.dispose()
-        return {"ok": True, "triggers": [{"name":r[0],"event":r[1],"table":r[2],"timing":r[3]} for r in rows]}
-    except Exception as e: return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
+        return {"ok": True, "triggers": triggers}
+    except Exception as e: return {"ok": False, "msg": _friendly_error(e, db_type)}
+
+@eel.expose
+def db_explore_get_objlist(conn_data, database, cat, schema=''):
+    """获取通用对象列表（序列/同义词/包/物化视图/索引等）"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get("db_type", "mysql")
+        if db_type != 'oracle':
+            cdata["db"] = database
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        items = []
+        with engine.connect() as c:
+            if db_type == 'oracle':
+                owner = (database or cdata.get("user", "") or "").upper()
+                if cat == 'sequences':
+                    rows = c.execute(text(
+                        "SELECT SEQUENCE_NAME, MIN_VALUE, MAX_VALUE, INCREMENT_BY, LAST_NUMBER "
+                        "FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER=:own ORDER BY SEQUENCE_NAME"
+                    ), {"own": owner}).fetchall()
+                    items = [{"name": r[0], "min": str(r[1]), "max": str(r[2]), "incr": r[3], "last": r[4]} for r in rows]
+                elif cat == 'synonyms':
+                    rows = c.execute(text(
+                        "SELECT SYNONYM_NAME, TABLE_OWNER, TABLE_NAME "
+                        "FROM ALL_SYNONYMS WHERE OWNER=:own ORDER BY SYNONYM_NAME"
+                    ), {"own": owner}).fetchall()
+                    items = [{"name": r[0], "table_owner": r[1], "table_name": r[2]} for r in rows]
+                elif cat == 'packages':
+                    rows = c.execute(text(
+                        "SELECT OBJECT_NAME FROM ALL_OBJECTS WHERE OWNER=:own "
+                        "AND OBJECT_TYPE='PACKAGE' AND STATUS='VALID' ORDER BY OBJECT_NAME"
+                    ), {"own": owner}).fetchall()
+                    items = [{"name": r[0]} for r in rows]
+                elif cat == 'mviews':
+                    rows = c.execute(text(
+                        "SELECT MVIEW_NAME FROM ALL_MVIEWS WHERE OWNER=:own ORDER BY MVIEW_NAME"
+                    ), {"own": owner}).fetchall()
+                    items = [{"name": r[0]} for r in rows]
+                elif cat == 'indexes':
+                    rows = c.execute(text(
+                        "SELECT INDEX_NAME, TABLE_NAME, UNIQUENESS "
+                        "FROM ALL_INDEXES WHERE TABLE_OWNER=:own ORDER BY INDEX_NAME"
+                    ), {"own": owner}).fetchall()
+                    items = [{"name": r[0], "table": r[1], "unique": r[2]} for r in rows]
+            elif db_type == 'postgresql':
+                sch = schema if schema else 'public'
+                if cat == 'sequences':
+                    rows = c.execute(text(
+                        "SELECT sequence_name FROM information_schema.sequences "
+                        "WHERE sequence_schema=:sch ORDER BY sequence_name"
+                    ), {"sch": sch}).fetchall()
+                    items = [{"name": r[0]} for r in rows]
+                elif cat == 'indexes':
+                    rows = c.execute(text(
+                        "SELECT indexname, tablename FROM pg_indexes "
+                        "WHERE schemaname=:sch ORDER BY indexname"
+                    ), {"sch": sch}).fetchall()
+                    items = [{"name": r[0], "table": r[1]} for r in rows]
+            else:
+                # MySQL 等：仅支持索引
+                if cat == 'indexes':
+                    rows = c.execute(text(
+                        "SELECT INDEX_NAME, TABLE_NAME FROM INFORMATION_SCHEMA.STATISTICS "
+                        "WHERE TABLE_SCHEMA=:db GROUP BY INDEX_NAME, TABLE_NAME ORDER BY INDEX_NAME"
+                    ), {"db": database}).fetchall()
+                    items = [{"name": r[0], "table": r[1]} for r in rows]
+        engine.dispose()
+        return {"ok": True, "items": items}
+    except Exception as e: return {"ok": False, "msg": _friendly_error(e, db_type)}
+
+@eel.expose
+def db_explore_get_proc_source(conn_data, database, obj_name, obj_type, schema=''):
+    """获取存储过程/函数/触发器/序列的源码或 DDL"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get("db_type", "mysql")
+        if db_type != 'oracle':
+            cdata["db"] = database
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        source = ""
+        with engine.connect() as c:
+            if db_type == 'oracle':
+                owner = (database or cdata.get("user", "") or "").upper()
+                obj_up = obj_name.upper()
+                ot = (obj_type or '').upper()
+                # 减小 DBMS_METADATA 输出
+                try:
+                    c.execute(text(
+                        "BEGIN"
+                        " DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM,'STORAGE',false);"
+                        " DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM,'SEGMENT_ATTRIBUTES',false);"
+                        " END;"
+                    ))
+                except Exception:
+                    pass
+                if ot in ('PROCEDURE', 'FUNCTION'):
+                    ora_type = 'PROCEDURE' if ot == 'PROCEDURE' else 'FUNCTION'
+                    row = c.execute(text(
+                        "SELECT DBMS_METADATA.GET_DDL(:typ, :name, :own) FROM DUAL"
+                    ), {"typ": ora_type, "name": obj_up, "own": owner}).fetchone()
+                    source = row[0] if row else ""
+                elif ot == 'TRIGGER':
+                    row = c.execute(text(
+                        "SELECT DBMS_METADATA.GET_DDL('TRIGGER', :name, :own) FROM DUAL"
+                    ), {"name": obj_up, "own": owner}).fetchone()
+                    source = row[0] if row else ""
+                elif ot == 'SEQUENCE':
+                    row = c.execute(text(
+                        "SELECT DBMS_METADATA.GET_DDL('SEQUENCE', :name, :own) FROM DUAL"
+                    ), {"name": obj_up, "own": owner}).fetchone()
+                    source = row[0] if row else ""
+                elif ot in ('PACKAGE', 'PACKAGE_BODY'):
+                    ora_type = 'PACKAGE_BODY' if ot == 'PACKAGE_BODY' else 'PACKAGE'
+                    row = c.execute(text(
+                        "SELECT DBMS_METADATA.GET_DDL(:typ, :name, :own) FROM DUAL"
+                    ), {"typ": ora_type, "name": obj_up, "own": owner}).fetchone()
+                    source = row[0] if row else ""
+                elif ot == 'MVIEW':
+                    row = c.execute(text(
+                        "SELECT DBMS_METADATA.GET_DDL('MATERIALIZED_VIEW', :name, :own) FROM DUAL"
+                    ), {"name": obj_up, "own": owner}).fetchone()
+                    source = row[0] if row else ""
+                else:
+                    # 尝试通用方式
+                    row = c.execute(text(
+                        "SELECT TEXT FROM ALL_SOURCE WHERE OWNER=:own AND NAME=:name "
+                        "AND TYPE=:typ ORDER BY LINE"
+                    ), {"own": owner, "name": obj_up, "typ": ot}).fetchall()
+                    source = ''.join(r[0] for r in row) if row else ""
+            elif db_type in ('mysql', 'ob-mysql'):
+                # MySQL：ROUTINE_DEFINITION
+                row = c.execute(text(
+                    "SELECT ROUTINE_DEFINITION FROM INFORMATION_SCHEMA.ROUTINES "
+                    "WHERE ROUTINE_SCHEMA=:db AND ROUTINE_NAME=:name"
+                ), {"db": database, "name": obj_name}).fetchone()
+                source = row[0] if row else ""
+                # MySQL 触发器
+                if not source and obj_type == 'TRIGGER':
+                    row = c.execute(text(
+                        "SELECT ACTION_STATEMENT FROM INFORMATION_SCHEMA.TRIGGERS "
+                        "WHERE TRIGGER_SCHEMA=:db AND TRIGGER_NAME=:name"
+                    ), {"db": database, "name": obj_name}).fetchone()
+                    source = row[0] if row else ""
+            elif db_type == 'postgresql':
+                sch = schema if schema else 'public'
+                # PG：pg_proc.prosrc
+                row = c.execute(text(
+                    "SELECT pg_get_functiondef(p.oid) FROM pg_proc p "
+                    "JOIN pg_namespace n ON p.pronamespace=n.oid "
+                    "WHERE n.nspname=:sch AND p.proname=:name"
+                ), {"sch": sch, "name": obj_name}).fetchone()
+                source = row[0] if row else ""
+                # PG 触发器
+                if not source and obj_type == 'TRIGGER':
+                    row = c.execute(text(
+                        "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t "
+                        "JOIN pg_class c ON t.tgrelid=c.oid "
+                        "JOIN pg_namespace n ON c.relnamespace=n.oid "
+                        "WHERE n.nspname=:sch AND t.tgname=:name"
+                    ), {"sch": sch, "name": obj_name}).fetchone()
+                    source = row[0] if row else ""
+        engine.dispose()
+        return {"ok": True, "source": source}
+    except Exception as e: return {"ok": False, "msg": _friendly_error(e, db_type)}
 
 @eel.expose
 def db_explore_get_table_ddl(conn_data, database, table_name):
     try:
         cdata = dict(conn_data)
-        if cdata.get("db_type") != 'oracle':
+        db_type = cdata.get("db_type", "mysql")
+        if db_type != 'oracle':
             cdata["db"] = database
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
-        with engine.connect() as c: row = c.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        with engine.connect() as c:
+            if db_type == 'oracle':
+                # ★ Oracle 使用 DBMS_METADATA.GET_DDL 获取 DDL，表名和 owner 统一转大写
+                owner = (cdata.get("user", database) or '').upper()
+                tbl = table_name.upper()
+                result = c.execute(text("SELECT DBMS_METADATA.GET_DDL('TABLE', :tbl, :owner) FROM DUAL"),
+                                   {"tbl": tbl, "owner": owner})
+                row = result.fetchone()
+                ddl = row[0] if row else ""
+            else:
+                row = c.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
+                ddl = row[1] if row else ""
         engine.dispose()
-        return {"ok": True, "ddl": row[1] if row else ""}
-    except Exception as e: return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
+        return {"ok": True, "ddl": ddl}
+    except Exception as e: return {"ok": False, "msg": _friendly_error(e, db_type)}
 
 # ==================== 数据库管理 ====================
 @eel.expose
@@ -3497,7 +4465,7 @@ def db_delete(conn_data, database):
     """删除数据库"""
     try:
         cdata = dict(conn_data); db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'): cdata["db"] = database
+        if db_type != 'oracle': cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.begin() as conn:
             if db_type in ('mysql', 'ob-mysql'):
@@ -3799,7 +4767,9 @@ def tree_get_query(qid):
 
 @eel.expose
 def tree_list_queries(conn_id, db=''):
-    """列出指定连接+数据库下的所有查询（用于树节点展开和右侧面板）"""
+    """列出指定连接+数据库下的所有查询（用于树节点展开和右侧面板）
+    ★ 只读文件头部元数据，避免大文件拖慢展开速度
+    """
     try:
         qdir = _get_query_dir(conn_id, db)
         if not os.path.isdir(qdir):
@@ -3810,8 +4780,9 @@ def tree_list_queries(conn_id, db=''):
                 continue
             fpath = os.path.join(qdir, fname)
             try:
+                # ★ 只读文件头部（前2KB足够包含元数据注释），大文件不再拖慢列表
                 with open(fpath, "r", encoding="utf-8") as f:
-                    content = f.read()
+                    content = f.read(2048)
                 # 解析元数据
                 name_match = re.search(r'^--\s*name:\s*(.+)$', content, re.MULTILINE)
                 id_match = re.search(r'^--\s*id:\s*(.+)$', content, re.MULTILINE)
@@ -4312,7 +5283,7 @@ def export_wizard_get_tables(conn_data, database, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         tables = db_explore_get_tables(cdata, database, schema or '')
@@ -4330,7 +5301,7 @@ def export_wizard_get_columns(conn_data, database, table_name, schema=''):
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
-        if db_type not in ('postgresql', 'oracle'):
+        if db_type != 'oracle':
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
@@ -4613,7 +5584,7 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
         try:
             cdata = dict(conn_data)
             db_type = cdata.get('db_type', 'mysql')
-            if db_type not in ('postgresql', 'oracle'):
+            if db_type != 'oracle':
                 cdata["db"] = database
             engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
 

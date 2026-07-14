@@ -335,12 +335,11 @@ function selectDatabase(cid, db, dbId, arrowId) {
     console.log('[selectDatabase] activeConnData.db_type='+(activeConnData?activeConnData.db_type:'null'));
     activeDatabase = db;
     activeCatId = null;
-    // ★ 切换到 home tab，不清空已有 tab
+    // 确保 home tab 存在，不强制切换（保留用户当前 tab）
     var homeContent = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
     var homeTab = objectTabs.find(function(t){return t.id==='obj_home';});
     if (!homeTab) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent,db:''}); }
     else { homeTab.content = homeContent; }
-    activeObjTab = 'obj_home';
     console.log('[selectDatabase] 调用 renderObjectPanel...');
     renderObjectPanel();
 

@@ -83,8 +83,8 @@ function connCtx(e, cid) {
 }
 
 function closeConnection(cid) {
-    // ★ 立即取消该连接下所有正在执行的查询（防止锁表）
-    try { if (typeof eel !== 'undefined' && eel.cancel_query) { eel.cancel_query()(); } } catch(e) { console.warn('cancel_query failed:', e); }
+    // ★ 不再全局取消查询 — 关闭连接只是折叠树节点 UI，SQL 查询继续正常运行
+    //    如需取消特定连接的查询，可调用 eel.cancel_query(cid)() 单独操作
     var children = document.getElementById('mc_c_' + cid);
     var arrow = document.getElementById('ma_c_' + cid);
     if (children) {

@@ -321,7 +321,15 @@ function expandCat(cat, cid, db, dbKey, pad, schema) {
                     var onClick = (cat==='tables') ? ' onclick="treeTableClick(event,this)"' : '';
                     var ctx = (cat==='tables') ? ' oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : '';
                     var dragAttr = (cat==='tables') ? ' draggable="true" class="my-conn-row drag-table-item tree-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ondragend="onTableDragEnd(event)"' : ' class="my-conn-row"';
-                    return '<div'+dragAttr+dataAttrs+' style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;'+(cat!=='tables'?'padding-top:5px;padding-bottom:5px;':'')+'" ondblclick="addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"'+onClick+ctx+'><span class="my-conn-icon">'+catIcon+'</span><span class="tree-table-name">'+escapeHtml(n)+'</span></div>';
+                    // ★ 非表对象：双击查看源码（存储过程/函数/触发器/序列/包/物化视图）
+                    var dblClick = 'addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')';
+                    if (cat === 'procedures') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'PROCEDURE\')';
+                    else if (cat === 'functions') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'FUNCTION\')';
+                    else if (cat === 'triggers') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'TRIGGER\')';
+                    else if (cat === 'sequences') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'SEQUENCE\')';
+                    else if (cat === 'packages') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'PACKAGE\')';
+                    else if (cat === 'mviews') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'MVIEW\')';
+                    return '<div'+dragAttr+dataAttrs+' style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;'+(cat!=='tables'?'padding-top:5px;padding-bottom:5px;':'')+'" ondblclick="'+dblClick+'"'+onClick+ctx+'><span class="my-conn-icon">'+catIcon+'</span><span class="tree-table-name">'+escapeHtml(n)+'</span></div>';
                 }).join('');
                 children.innerHTML = h || '<div style="padding-left:'+itemPad+'px;color:#999;font-size:11px;">（无数据）</div>';
             }, sch);
@@ -359,7 +367,15 @@ function refreshCatItem(cat, cid, db, schema, dbKey, pad) {
             var onClick = (cat==='tables') ? ' onclick="treeTableClick(event,this)"' : '';
             var ctx = (cat==='tables') ? ' oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : '';
             var dragAttr = (cat==='tables') ? ' draggable="true" class="my-conn-row drag-table-item tree-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ondragend="onTableDragEnd(event)"' : ' class="my-conn-row"';
-            return '<div'+dragAttr+dataAttrs+' style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;'+(cat!=='tables'?'padding-top:5px;padding-bottom:5px;':'')+'" ondblclick="addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"'+onClick+ctx+'><span class="my-conn-icon">'+catIcon+'</span><span class="tree-table-name">'+escapeHtml(n)+'</span></div>';
+            // ★ 非表对象：双击查看源码
+            var dblClick = 'addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')';
+            if (cat === 'procedures') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'PROCEDURE\')';
+            else if (cat === 'functions') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'FUNCTION\')';
+            else if (cat === 'triggers') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'TRIGGER\')';
+            else if (cat === 'sequences') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'SEQUENCE\')';
+            else if (cat === 'packages') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'PACKAGE\')';
+            else if (cat === 'mviews') dblClick = 'viewObjectSource(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\'MVIEW\')';
+            return '<div'+dragAttr+dataAttrs+' style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;'+(cat!=='tables'?'padding-top:5px;padding-bottom:5px;':'')+'" ondblclick="'+dblClick+'"'+onClick+ctx+'><span class="my-conn-icon">'+catIcon+'</span><span class="tree-table-name">'+escapeHtml(n)+'</span></div>';
         }).join('');
         children.innerHTML = h || '<div style="padding-left:'+itemPad+'px;color:#999;font-size:11px;">（无数据）</div>';
         // 同步刷新右侧对象面板（仅表分类）
@@ -581,6 +597,45 @@ var _NT_MYSQL_TYPES = ['INT', 'BIGINT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'FLO
     'VARCHAR', 'CHAR', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT', 'TINYTEXT',
     'DATE', 'TIME', 'DATETIME', 'TIMESTAMP', 'YEAR',
     'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'TINYBLOB', 'JSON', 'ENUM', 'SET', 'BOOLEAN'];
+
+// ==================== 查看对象源码（存储过程/函数/触发器/序列/包/物化视图）====================
+/** 双击存储过程/触发器/序列等对象 → 新建 Tab 显示源码 */
+function viewObjectSource(objName, db, schema, cid, objType) {
+    var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
+    if (!conn || !conn.host) { showWarnDialog('提示', '未找到连接信息'); return; }
+    var sch = schema || '';
+    var tabId = 'src_' + objType + '_' + objName;
+    var typeLabel = {PROCEDURE:'存储过程',FUNCTION:'函数',TRIGGER:'触发器',SEQUENCE:'序列',PACKAGE:'包',MVIEW:'物化视图'}[objType] || '对象';
+    addOrUpdateTab(tabId, objName, 'ddl', '<div style="padding:20px;color:#999;">⏳ 加载'+typeLabel+'源码...</div>', db, cid);
+
+    try {
+        eel.db_explore_get_proc_source(conn, db, objName, objType, sch)(function(r) {
+            if (!r || !r.ok) {
+                addOrUpdateTab(tabId, objName, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ ' + escapeHtml(r ? r.msg : '加载失败') + '</div>', db, cid);
+                return;
+            }
+            var source = r.source || '';
+            var html =
+                '<div style="display:flex;flex-direction:column;height:100%;">' +
+                '<div style="padding:6px 10px;border-bottom:1px solid #333;display:flex;align-items:center;gap:8px;flex-shrink:0;">' +
+                    '<span style="color:#5dade2;font-size:13px;">📄 ' + escapeHtml(typeLabel) + '：' + escapeHtml(objName) + '</span>' +
+                    '<button class="btn btn-sm btn-blue" style="margin-left:auto;" onclick="copyObjectSource(\''+escapeAttr(tabId)+'\')">📋 复制</button>' +
+                '</div>' +
+                '<div style="flex:1;overflow:auto;padding:0;">' +
+                    '<pre id="src_pre_'+escapeAttr(tabId)+'" style="background:#0d1117;margin:0;padding:12px;font-family:Consolas,monospace;font-size:12px;color:#e0e0e0;white-space:pre-wrap;word-break:break-all;line-height:1.5;">' + escapeHtml(source) + '</pre>' +
+                '</div>' +
+                '</div>';
+            addOrUpdateTab(tabId, objName, 'ddl', html, db, cid);
+        });
+    } catch(e) {
+        addOrUpdateTab(tabId, objName, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>', db, cid);
+    }
+}
+
+function copyObjectSource(tabId) {
+    var pre = document.getElementById('src_pre_' + tabId);
+    if (pre) { copyToClipboard(pre.textContent); showOkDialog('成功', '源码已复制到剪贴板'); }
+}
 
 // PostgreSQL 数据类型
 var _NT_PG_TYPES = ['INTEGER', 'SERIAL', 'BIGINT', 'BIGSERIAL', 'SMALLINT', 'DECIMAL', 'NUMERIC',

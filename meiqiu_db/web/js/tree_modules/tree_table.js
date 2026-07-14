@@ -88,9 +88,16 @@ function _evalCond(cond, row, colMap) {
         } else if (rv.toLowerCase() === 'null') {
             switch (op) { case '=': return lv === null; case '!=': case '<>': return lv !== null; default: return true; }
         } else {
-            rv = Number(rv); if (isNaN(rv)) return true;
-            lv = lv === null || lv === undefined ? 0 : Number(lv); if (isNaN(lv)) lv = 0;
-            switch (op) { case '=': return lv === rv; case '!=': case '<>': return lv !== rv; case '>': return lv > rv; case '<': return lv < rv; case '>=': return lv >= rv; case '<=': return lv <= rv; default: return true; }
+            // 无引号时：= / != / <> 用字符串精确匹配，比较运算符用数字比较
+            if (op === '=' || op === '!=' || op === '<>') {
+                lv = lv === null || lv === undefined ? '' : String(lv);
+                rv = String(rv);
+                switch (op) { case '=': return lv === rv; case '!=': case '<>': return lv !== rv; default: return true; }
+            } else {
+                rv = Number(rv); if (isNaN(rv)) return true;
+                lv = lv === null || lv === undefined ? 0 : Number(lv); if (isNaN(lv)) lv = 0;
+                switch (op) { case '>': return lv > rv; case '<': return lv < rv; case '>=': return lv >= rv; case '<=': return lv <= rv; default: return true; }
+            }
         }
     }
     return true; // 无法解析，不筛选
@@ -1280,6 +1287,9 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             if (!pager) return;
             updatePagerInfo();
             _initCellOverflowTooltip(tid);
+            // ★ 初始化列宽拖动手柄
+            var wrap3 = document.getElementById(tid);
+            if (wrap3 && typeof _initResultColResize === 'function') _initResultColResize(wrap3, null);
         }, 0);
 
 
@@ -1303,7 +1313,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 var wrap2 = document.getElementById(tid);
                 if (wrap2) {
                     var thead = wrap2.querySelector('thead');
-                    if (thead) thead.innerHTML = buildTh();
+                    if (thead) { thead.innerHTML = buildTh(); if (typeof _initResultColResize === 'function') _initResultColResize(wrap2, null); }
                 }
                 // 显示加载状态
                 var infoEl = document.getElementById(tid + '_pager_info');
@@ -1338,7 +1348,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                     // 更新表头
                     if (wrap2) {
                         var thead2 = wrap2.querySelector('thead');
-                        if (thead2) thead2.innerHTML = buildTh();
+                        if (thead2) { thead2.innerHTML = buildTh(); if (typeof _initResultColResize === 'function') _initResultColResize(wrap2, null); }
                     }
                     // ★ 不覆盖 infoEl，updatePagerInfo() 会根据 has_more 正确显示"前 50+ 条"
                 });

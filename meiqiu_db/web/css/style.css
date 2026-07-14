@@ -187,6 +187,11 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
     color: #fff;
     box-shadow: 0 0 0 4px rgba(255, 152, 0, 0.25);
 }
+/* SQL 编辑器注释高亮：淡灰色斜体 */
+.sql-highlight .sql-comment {
+    color: #6a9a6a;
+    font-style: italic;
+}
 /* SQL 编辑器 - 查找栏 */
 .sql-find-bar {
     position: absolute;
@@ -1175,6 +1180,7 @@ html.light-theme .query-splitter:hover, html.light-theme .query-splitter.active 
 html.light-theme .sql-ln-gutter { background: #f0f2f5; border-right-color: #d0d7e0; color: #a0aec0; }
 html.light-theme .sql-ln-gutter .ln-row:hover { background: #e0e6ed; color: #555; }
 html.light-theme .sql-ln-gutter .ln-row.ln-active { background: rgba(93, 173, 226, 0.15); color: #2a7db8; }
+html.light-theme .sql-highlight .sql-comment { color: #8a9a8a; font-style: italic; }
 /* ========== 浅色主题 - 对象列表/表 ========== */
 html.light-theme .exp-table tbody tr:hover { background: #e8eaed; }
 html.light-theme .exp-table tbody tr.row-selected { background: rgba(93,173,226,0.22) !important; }
