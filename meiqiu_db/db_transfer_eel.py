@@ -3001,26 +3001,28 @@ def _load_tree():
         if not content.strip():
             print("[tree] _load_tree: 文件为空，尝试恢复")
             recovered = _recover_from_backup()
-            data = recovered if recovered else {"folders": [], "connections": {}, "saved_queries": []}
-            _tree_cache_data, _tree_cache_mtime = data, cur_mtime
-            return data
+            if recovered:
+                _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
+                return recovered
+            # ★ 空文件且无备份，不缓存，下次重新读
+            return {"folders": [], "connections": {}, "saved_queries": []}
         data = json.loads(content)
         conn_count = len(data.get("connections", {}))
         print(f"[tree] _load_tree: 解析成功，connections={conn_count}, folders={len(data.get('folders',[]))}, queries={len(data.get('saved_queries',[]))}")
         if not _validate_tree(data):
             print("[tree] _load_tree: 数据格式不正确，尝试恢复")
             recovered = _recover_from_backup()
-            data = recovered if recovered else {"folders": [], "connections": {}, "saved_queries": []}
-            _tree_cache_data, _tree_cache_mtime = data, cur_mtime
-            return data
+            if recovered:
+                _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
+                return recovered
+            return {"folders": [], "connections": {}, "saved_queries": []}
         # 【关键】结构合法但内容为空（空壳），尝试恢复
         if _is_empty_shell(data):
             print("[tree] _load_tree: 空壳数据，尝试恢复")
             recovered = _recover_from_backup()
             if recovered:
-                data = recovered
-                _tree_cache_data, _tree_cache_mtime = data, cur_mtime
-                return data
+                _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
+                return recovered
         # 正常加载
         # ★ 迁移旧 saved_queries 到文件系统（仅首次加载时执行）
         if data.get("saved_queries"):
@@ -3032,22 +3034,24 @@ def _load_tree():
     except json.JSONDecodeError as e:
         print(f"[tree] _load_tree JSON解析失败: {e}")
         recovered = _recover_from_backup()
-        data = recovered if recovered else {"folders": [], "connections": {}, "saved_queries": []}
-        _tree_cache_data, _tree_cache_mtime = data, cur_mtime
-        return data
+        if recovered:
+            _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
+            return recovered
+        # ★ JSON 解析失败不缓存空数据，下次重新读文件（文件可能正在写入中）
+        return {"folders": [], "connections": {}, "saved_queries": []}
     except FileNotFoundError:
         print(f"[tree] _load_tree: 文件不存在 TREE_FILE={TREE_FILE}")
         recovered = _recover_from_backup()
-        data = recovered if recovered else {"folders": [], "connections": {}, "saved_queries": []}
-        _tree_cache_data, _tree_cache_mtime = data, cur_mtime
-        return data
+        if recovered:
+            _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
+            return recovered
+        return {"folders": [], "connections": {}, "saved_queries": []}
     except Exception as e:
         print(f"[tree] _load_tree 异常: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        data = {"folders": [], "connections": {}, "saved_queries": []}
-        _tree_cache_data, _tree_cache_mtime = data, cur_mtime
-        return data
+        # ★ 异常时不缓存，下次重试
+        return {"folders": [], "connections": {}, "saved_queries": []}
 
 def _save_tree(data):
     try:
