@@ -6459,24 +6459,24 @@ def dashboard_get_metrics(conn_data: dict):
 
                     kpis = [
                         {"key":"threads_connected", "label":"当前连接数", "value":threads_connected,
-                         "unit":"/ "+max_connections, "sub":f"运行中: {threads_running}", "level":"good" if threads_connected<max_connections*0.8 else "warn"},
+                         "unit":"/ "+str(max_connections), "sub":f"运行中: {threads_running}", "level":"good" if threads_connected<max_connections*0.8 else "warn"},
                         {"key":"innodb_hit", "label":"InnoDB 命中率", "value":innodb_hit_pct,
                          "unit":"%", "sub":f"磁盘读: {innodb_buf_disk}", "level":"good" if innodb_hit_pct>=99 else ("warn" if innodb_hit_pct>=95 else "bad")},
                         {"key":"slow_queries", "label":"慢查询数", "value":slow_queries,
-                         "unit":"次", "sub":f"阈值 {long_query_time}s " + ("✅已开" if slow_query_log_on else "❌未开"),
+                         "unit":"次", "sub":"阈值 {}s {}".format(long_query_time, "✅已开" if slow_query_log_on else "❌未开"),
                          "level":"good" if slow_queries<100 else "warn"},
                         {"key":"qps", "label":"累计 Questions", "value":questions,
-                         "unit":"次", "sub":f"累计 {questions:,}", "level":""},
+                         "unit":"次", "sub":"累计 {:,}".format(questions), "level":""},
                         {"key":"com_select", "label":"累计 SELECT", "value":com_select,
-                         "unit":"次", "sub":f"INSERT: {com_insert}  UPDATE: {com_update}  DELETE: {com_delete}",
+                         "unit":"次", "sub":"INSERT: {}  UPDATE: {}  DELETE: {}".format(com_insert, com_update, com_delete),
                          "level":""},
                         {"key":"tps_estimate", "label":"累计 Com_commit", "value":com_commit,
-                         "unit":"次", "sub":f"连接累计: {connections_total}", "level":""},
+                         "unit":"次", "sub":"连接累计: {}".format(connections_total), "level":""},
                         {"key":"tmp_disk_pct", "label":"临时表磁盘率", "value":tmp_disk_pct,
-                         "unit":"%", "sub":f"临时表: {created_tmp_tables} (磁盘: {created_tmp_disk})",
+                         "unit":"%", "sub":"临时表: {} (磁盘: {})".format(created_tmp_tables, created_tmp_disk),
                          "level":"good" if tmp_disk_pct<10 else "warn"},
                         {"key":"row_lock_waits", "label":"行锁等待次数", "value":innodb_row_lock_waits,
-                         "unit":"次", "sub":f"等待时长: {innodb_row_lock_time}ms", "level":"good" if innodb_row_lock_waits<100 else "warn"},
+                         "unit":"次", "sub":"等待时长: {}ms".format(innodb_row_lock_time), "level":"good" if innodb_row_lock_waits<100 else "warn"},
                     ]
 
                     # ★ 5. 时间序列累计值（前端按时间间隔 diff 算出每秒值）

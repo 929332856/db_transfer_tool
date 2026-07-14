@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="stylesheet" href="css/style.css">
-    <!-- ★ 同步读取 localStorage 主题，防止页面渲染闪烁 -->
+    <!-- ★ 同步读取 localStorage 主题，必须在 CSS 加载前执行防止闪烁 -->
     <script>if(localStorage.getItem('mqdb_theme')==='light')document.documentElement.classList.add('light-theme')</script>
+    <link rel="stylesheet" href="css/style.css">
     <script type="text/javascript" src="/eel.js"></script>
     <script type="text/javascript">
         if (typeof eel === 'undefined') {
