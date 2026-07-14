@@ -2055,6 +2055,11 @@ function toggleDbChildren(dbId, arrowId) {
     if (el.classList.contains('open')) {
         el.classList.remove('open');
         if (ar) { ar.textContent = '▸'; }
+        // ★ 折叠时清除数据库行高亮，恢复图标为关闭状态
+        var dbRow = el.previousElementSibling;
+        if (dbRow) { dbRow.classList.remove('tree-highlight'); }
+        var iconEl = dbRow ? dbRow.querySelector('.db-icon') : null;
+        if (iconEl) { iconEl.classList.remove('active'); iconEl.classList.add('closed'); }
     } else {
         el.classList.add('open');
         if (ar) { ar.textContent = '▾'; ar.style.visibility = 'visible'; }
@@ -2068,6 +2073,11 @@ function toggleConnChildren(cid) {
     if (children.classList.contains('open')) {
         children.classList.remove('open');
         if (arrow) { arrow.textContent = '▸'; }
+        // ★ 折叠时清除连接行高亮，恢复图标为关闭状态
+        var connRow = arrow ? arrow.parentElement : null;
+        if (connRow) { connRow.classList.remove('tree-highlight'); }
+        var iconEl = connRow ? connRow.querySelector('.db-icon') : null;
+        if (iconEl) { iconEl.classList.remove('active'); iconEl.classList.add('closed'); }
     } else {
         children.classList.add('open');
         if (arrow) { arrow.textContent = '▾'; arrow.style.visibility = 'visible'; }
