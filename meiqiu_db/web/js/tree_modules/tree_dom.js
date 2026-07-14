@@ -30,7 +30,11 @@ function updateConnNode(cid, c) {
     var nameEl = node.querySelector('.my-conn-name');
     var hostEl = node.querySelector('.my-conn-host');
     var iconEl = node.querySelector('.my-conn-icon.db-icon');
-    if (nameEl) nameEl.textContent = c.name || '';
+    var rowEl = node.querySelector('.my-conn-row');
+    if (nameEl) {
+        nameEl.innerHTML = escapeHtml(c.name || '') +
+            (c.color ? '<span class="conn-color-dot" style="background:'+escapeHtml(c.color)+'"></span>' : '');
+    }
     if (hostEl) hostEl.textContent = (c.host || '') + ':' + (c.port || '3306');
     if (iconEl) {
         iconEl.innerHTML = getConnIcon(c.db_type || 'mysql');
@@ -41,6 +45,11 @@ function updateConnNode(cid, c) {
         } else {
             iconEl.classList.remove('active'); iconEl.classList.add('closed');
         }
+    }
+    // ★ 刷新连接行背景色
+    if (rowEl) {
+        rowEl.style.background = (c.color && /^#[0-9a-fA-F]{6}$/.test(c.color)) ?
+            'rgba('+parseInt(c.color.slice(1,3),16)+','+parseInt(c.color.slice(3,5),16)+','+parseInt(c.color.slice(5,7),16)+',0.18)' : '';
     }
 }
 

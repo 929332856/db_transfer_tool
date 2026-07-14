@@ -2844,6 +2844,8 @@ def table_drop_foreign_key(conn_data, database, table_name, fk_name, schema=''):
 
 # ==================== 树形栏目持久化（含自动备份恢复） ====================
 _tree_lock = threading.RLock()  # 可重入锁，防止并发写竞争导致数据丢失（tree_delete_folder 有递归调用）
+_tree_cache_data = None  # ★ _load_tree 内存缓存
+_tree_cache_mtime = 0    # ★ 缓存对应的文件修改时间
 if getattr(sys, 'frozen', False):
     # 打包exe环境：exe在dist/目录，直接读取同目录下的文件
     TREE_FILE = os.path.join(BASE_DIR, "navicat_tree.json")
@@ -2985,7 +2987,12 @@ except Exception as e:
     print(f"[tree] 初始化: 异常 {e}")
 
 def _load_tree():
+    """加载树数据，带内存缓存（文件 mtime 变化时自动刷新）"""
+    global _tree_cache_data, _tree_cache_mtime
     try:
+        cur_mtime = os.path.getmtime(TREE_FILE) if os.path.exists(TREE_FILE) else 0
+        if _tree_cache_data is not None and _tree_cache_mtime == cur_mtime:
+            return _tree_cache_data
         print(f"[tree] _load_tree: reading TREE_FILE={TREE_FILE}")
         print(f"[tree] _load_tree: file exists={os.path.exists(TREE_FILE)}")
         with open(TREE_FILE, "r", encoding="utf-8") as f:
@@ -2994,48 +3001,53 @@ def _load_tree():
         if not content.strip():
             print("[tree] _load_tree: 文件为空，尝试恢复")
             recovered = _recover_from_backup()
-            if recovered:
-                return recovered
-            return {"folders": [], "connections": {}, "saved_queries": []}
+            data = recovered if recovered else {"folders": [], "connections": {}, "saved_queries": []}
+            _tree_cache_data, _tree_cache_mtime = data, cur_mtime
+            return data
         data = json.loads(content)
         conn_count = len(data.get("connections", {}))
         print(f"[tree] _load_tree: 解析成功，connections={conn_count}, folders={len(data.get('folders',[]))}, queries={len(data.get('saved_queries',[]))}")
         if not _validate_tree(data):
             print("[tree] _load_tree: 数据格式不正确，尝试恢复")
             recovered = _recover_from_backup()
-            if recovered:
-                return recovered
-            return {"folders": [], "connections": {}, "saved_queries": []}
+            data = recovered if recovered else {"folders": [], "connections": {}, "saved_queries": []}
+            _tree_cache_data, _tree_cache_mtime = data, cur_mtime
+            return data
         # 【关键】结构合法但内容为空（空壳），尝试恢复
         if _is_empty_shell(data):
             print("[tree] _load_tree: 空壳数据，尝试恢复")
             recovered = _recover_from_backup()
             if recovered:
-                return recovered
+                data = recovered
+                _tree_cache_data, _tree_cache_mtime = data, cur_mtime
+                return data
         # 正常加载
         # ★ 迁移旧 saved_queries 到文件系统（仅首次加载时执行）
         if data.get("saved_queries"):
             _migrate_old_queries(tree=data)
             # 重新加载（迁移后 saved_queries 已被清除）
             return _load_tree()
+        _tree_cache_data, _tree_cache_mtime = data, cur_mtime
         return data
     except json.JSONDecodeError as e:
         print(f"[tree] _load_tree JSON解析失败: {e}")
         recovered = _recover_from_backup()
-        if recovered:
-            return recovered
-        return {"folders": [], "connections": {}, "saved_queries": []}
+        data = recovered if recovered else {"folders": [], "connections": {}, "saved_queries": []}
+        _tree_cache_data, _tree_cache_mtime = data, cur_mtime
+        return data
     except FileNotFoundError:
         print(f"[tree] _load_tree: 文件不存在 TREE_FILE={TREE_FILE}")
         recovered = _recover_from_backup()
-        if recovered:
-            return recovered
-        return {"folders": [], "connections": {}, "saved_queries": []}
+        data = recovered if recovered else {"folders": [], "connections": {}, "saved_queries": []}
+        _tree_cache_data, _tree_cache_mtime = data, cur_mtime
+        return data
     except Exception as e:
         print(f"[tree] _load_tree 异常: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        return {"folders": [], "connections": {}, "saved_queries": []}
+        data = {"folders": [], "connections": {}, "saved_queries": []}
+        _tree_cache_data, _tree_cache_mtime = data, cur_mtime
+        return data
 
 def _save_tree(data):
     try:
@@ -3066,6 +3078,10 @@ def _save_tree(data):
         else:
             os.rename(tmp_file, TREE_FILE)
         print(f"[tree] _save_tree: 保存成功，connections={len(data.get('connections',{}))}, queries={len(data.get('saved_queries',[]))}")
+        # ★ 保存成功后刷新缓存
+        global _tree_cache_data, _tree_cache_mtime
+        _tree_cache_data = data
+        _tree_cache_mtime = os.path.getmtime(TREE_FILE)
         return True
     except Exception as e:
         print(f"[tree] _save_tree 异常: {e}")
@@ -6485,219 +6501,231 @@ def _format_memory(size_bytes):
 @eel.expose
 def get_database_info(conn_data, database):
     """获取数据库级别的详情（大小、对象数量等）
-    支持: mysql / ob-mysql / oracle / postgresql / redis"""
+    支持: mysql / ob-mysql / oracle / postgresql / redis
+    ★ 异步执行，避免 INFO_SCHEMA 查询阻塞 Eel 主线程
+    """
     try:
         db_type = conn_data.get("db_type", "mysql")
 
         if db_type == 'redis':
-            import redis as rds
-            try:
-                r = rds.Redis(
-                    host=conn_data['host'], port=int(conn_data.get('port', '6379')),
-                    password=conn_data.get('pwd') or None,
-                    db=int(database) if database else 0,
-                    socket_connect_timeout=5, socket_timeout=10,
-                    decode_responses=True, encoding='utf-8', encoding_errors='replace',
-                    protocol=2
-                )
-            except TypeError:
-                r = rds.Redis(
-                    host=conn_data['host'], port=int(conn_data.get('port', '6379')),
-                    password=conn_data.get('pwd') or None,
-                    db=int(database) if database else 0,
-                    socket_connect_timeout=5, socket_timeout=10,
-                    decode_responses=True, encoding='utf-8', encoding_errors='replace'
-                )
-            dbsize = r.dbsize()
-            info_result = r.info('keyspace')
-            db_key = f"db{database}"
-            keyspace_info = info_result.get(db_key, {}) if isinstance(info_result, dict) else {}
-            return {"ok": True, "info": {
-                "name": f"DB{database}",
-                "type": "Redis DB",
-                "key_count": dbsize,
-                "expires": keyspace_info.get('expires', 0) if isinstance(keyspace_info, dict) else 0,
-                "avg_ttl": keyspace_info.get('avg_ttl', 0) if isinstance(keyspace_info, dict) else 0,
-                "db_index": int(database),
-            }}
+            def _redis_info():
+                import redis as rds
+                try:
+                    r = rds.Redis(
+                        host=conn_data['host'], port=int(conn_data.get('port', '6379')),
+                        password=conn_data.get('pwd') or None,
+                        db=int(database) if database else 0,
+                        socket_connect_timeout=5, socket_timeout=10,
+                        decode_responses=True, encoding='utf-8', encoding_errors='replace',
+                        protocol=2
+                    )
+                except TypeError:
+                    r = rds.Redis(
+                        host=conn_data['host'], port=int(conn_data.get('port', '6379')),
+                        password=conn_data.get('pwd') or None,
+                        db=int(database) if database else 0,
+                        socket_connect_timeout=5, socket_timeout=10,
+                        decode_responses=True, encoding='utf-8', encoding_errors='replace'
+                    )
+                dbsize = r.dbsize()
+                info_result = r.info('keyspace')
+                db_key = f"db{database}"
+                keyspace_info = info_result.get(db_key, {}) if isinstance(info_result, dict) else {}
+                return {"ok": True, "info": {
+                    "name": f"DB{database}",
+                    "type": "Redis DB",
+                    "key_count": dbsize,
+                    "expires": keyspace_info.get('expires', 0) if isinstance(keyspace_info, dict) else 0,
+                    "avg_ttl": keyspace_info.get('avg_ttl', 0) if isinstance(keyspace_info, dict) else 0,
+                    "db_index": int(database),
+                }}
+            return _with_db_timeout(_redis_info, timeout=15)
 
         cdata = dict(conn_data)
         if db_type != 'oracle':
             cdata["db"] = database
-        engine = create_engine(
-            _conn_url(cdata),
-            connect_args=_connect_args(db_type, timeout=10)
-        )
 
-        info = {"name": database, "type": db_type.upper() if db_type == 'ob-mysql' else db_type.title()}
-        with engine.connect() as c:
-            if db_type == 'mysql':
-                charset_row = c.execute(text(
-                    "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
-                    "FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME=:db"
-                ), {"db": database}).fetchone()
-                info["charset"] = charset_row[0] if charset_row else ""
-                info["collation"] = charset_row[1] if charset_row else ""
+        def _get_db_info():
+            engine = create_engine(
+                _conn_url(cdata),
+                connect_args=_connect_args(db_type, timeout=10)
+            )
+            try:
+                info = {"name": database, "type": db_type.upper() if db_type == 'ob-mysql' else db_type.title()}
+                with engine.connect() as c:
+                    if db_type == 'mysql':
+                        charset_row = c.execute(text(
+                            "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
+                            "FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME=:db"
+                        ), {"db": database}).fetchone()
+                        info["charset"] = charset_row[0] if charset_row else ""
+                        info["collation"] = charset_row[1] if charset_row else ""
 
-                tables_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
-                    "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE'"
-                ), {"db": database}).fetchone()[0]
-                views_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
-                    "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='VIEW'"
-                ), {"db": database}).fetchone()[0]
-                proc_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES "
-                    "WHERE ROUTINE_SCHEMA=:db"
-                ), {"db": database}).fetchone()[0]
-                size_row = c.execute(text(
-                    "SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) "
-                    "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db"
-                ), {"db": database}).fetchone()
-                info["tables_count"] = tables_cnt or 0
-                info["views_count"] = views_cnt or 0
-                info["routines_count"] = proc_cnt or 0
-                info["size_str"] = _format_size(size_row[0] if size_row else 0)
-
-            elif db_type == 'ob-mysql':
-                charset_row = c.execute(text(
-                    "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
-                    "FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME=:db"
-                ), {"db": database}).fetchone()
-                info["charset"] = charset_row[0] if charset_row else ""
-                info["collation"] = charset_row[1] if charset_row else ""
-
-                tables_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
-                    "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE'"
-                ), {"db": database}).fetchone()[0]
-                views_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
-                    "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='VIEW'"
-                ), {"db": database}).fetchone()[0]
-                proc_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES "
-                    "WHERE ROUTINE_SCHEMA=:db"
-                ), {"db": database}).fetchone()[0]
-
-                # ★ OceanBase INFORMATION_SCHEMA.TABLES 的 DATA_LENGTH/INDEX_LENGTH 固定为0
-                # 使用 OB 内部表 oceanbase.__all_virtual_table 获取真实数据大小
-                size_bytes = 0
-                try:
-                    size_row = c.execute(text(
-                        "SELECT COALESCE(SUM(data_size), 0) "
-                        "FROM oceanbase.__all_virtual_table "
-                        "WHERE table_type IN (0, 3)"
-                    )).fetchone()
-                    size_bytes = size_row[0] if size_row else 0
-                except Exception:
-                    # 降级：尝试 CDB_OB_TABLE_LOCATIONS（部分 OB 版本需 DBA 权限）
-                    try:
+                        tables_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                            "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE'"
+                        ), {"db": database}).fetchone()[0]
+                        views_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                            "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='VIEW'"
+                        ), {"db": database}).fetchone()[0]
+                        proc_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES "
+                            "WHERE ROUTINE_SCHEMA=:db"
+                        ), {"db": database}).fetchone()[0]
                         size_row = c.execute(text(
-                            "SELECT COALESCE(SUM(data_size + required_size), 0) "
-                            "FROM oceanbase.CDB_OB_TABLE_LOCATIONS"
-                        )).fetchone()
-                        size_bytes = size_row[0] if size_row else 0
-                    except Exception:
-                        # 最终降级：INFORMATION_SCHEMA（可能为0）
+                            "SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) "
+                            "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db"
+                        ), {"db": database}).fetchone()
+                        info["tables_count"] = tables_cnt or 0
+                        info["views_count"] = views_cnt or 0
+                        info["routines_count"] = proc_cnt or 0
+                        info["size_str"] = _format_size(size_row[0] if size_row else 0)
+
+                    elif db_type == 'ob-mysql':
+                        charset_row = c.execute(text(
+                            "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
+                            "FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME=:db"
+                        ), {"db": database}).fetchone()
+                        info["charset"] = charset_row[0] if charset_row else ""
+                        info["collation"] = charset_row[1] if charset_row else ""
+
+                        tables_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                            "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE'"
+                        ), {"db": database}).fetchone()[0]
+                        views_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                            "WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='VIEW'"
+                        ), {"db": database}).fetchone()[0]
+                        proc_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES "
+                            "WHERE ROUTINE_SCHEMA=:db"
+                        ), {"db": database}).fetchone()[0]
+
+                        # ★ OceanBase INFORMATION_SCHEMA.TABLES 的 DATA_LENGTH/INDEX_LENGTH 固定为0
+                        # 使用 OB 内部表 oceanbase.__all_virtual_table 获取真实数据大小
+                        size_bytes = 0
                         try:
                             size_row = c.execute(text(
-                                "SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) "
-                                "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db"
-                            ), {"db": database}).fetchone()
+                                "SELECT COALESCE(SUM(data_size), 0) "
+                                "FROM oceanbase.__all_virtual_table "
+                                "WHERE table_type IN (0, 3)"
+                            )).fetchone()
                             size_bytes = size_row[0] if size_row else 0
                         except Exception:
-                            size_bytes = 0
+                            # 降级：尝试 CDB_OB_TABLE_LOCATIONS（部分 OB 版本需 DBA 权限）
+                            try:
+                                size_row = c.execute(text(
+                                    "SELECT COALESCE(SUM(data_size + required_size), 0) "
+                                    "FROM oceanbase.CDB_OB_TABLE_LOCATIONS"
+                                )).fetchone()
+                                size_bytes = size_row[0] if size_row else 0
+                            except Exception:
+                                # 最终降级：INFORMATION_SCHEMA（可能为0）
+                                try:
+                                    size_row = c.execute(text(
+                                        "SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) "
+                                        "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db"
+                                    ), {"db": database}).fetchone()
+                                    size_bytes = size_row[0] if size_row else 0
+                                except Exception:
+                                    size_bytes = 0
 
-                info["tables_count"] = tables_cnt or 0
-                info["views_count"] = views_cnt or 0
-                info["routines_count"] = proc_cnt or 0
-                info["size_str"] = _format_size(size_bytes)
+                        info["tables_count"] = tables_cnt or 0
+                        info["views_count"] = views_cnt or 0
+                        info["routines_count"] = proc_cnt or 0
+                        info["size_str"] = _format_size(size_bytes)
 
-            elif db_type == 'postgresql':
-                charset_row = c.execute(text("SHOW server_encoding")).fetchone()
-                info["charset"] = charset_row[0] if charset_row else ""
-                info["collation"] = ""
+                    elif db_type == 'postgresql':
+                        charset_row = c.execute(text("SHOW server_encoding")).fetchone()
+                        info["charset"] = charset_row[0] if charset_row else ""
+                        info["collation"] = ""
 
-                tables_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM pg_catalog.pg_class c "
-                    "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
-                    "WHERE c.relkind='r' AND n.nspname NOT IN ('pg_catalog','information_schema')"
-                )).fetchone()[0]
-                views_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM pg_catalog.pg_class c "
-                    "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
-                    "WHERE c.relkind='v' AND n.nspname NOT IN ('pg_catalog','information_schema')"
-                )).fetchone()[0]
-                proc_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM pg_proc p "
-                    "JOIN pg_namespace n ON n.oid=p.pronamespace "
-                    "WHERE n.nspname NOT IN ('pg_catalog','information_schema')"
-                )).fetchone()[0]
-                size_row = c.execute(text(
-                    "SELECT pg_database_size(:db)"
-                ), {"db": database}).fetchone()
-                info["tables_count"] = tables_cnt or 0
-                info["views_count"] = views_cnt or 0
-                info["routines_count"] = proc_cnt or 0
-                info["size_str"] = _format_size(size_row[0] if size_row else 0)
+                        tables_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM pg_catalog.pg_class c "
+                            "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                            "WHERE c.relkind='r' AND n.nspname NOT IN ('pg_catalog','information_schema')"
+                        )).fetchone()[0]
+                        views_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM pg_catalog.pg_class c "
+                            "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                            "WHERE c.relkind='v' AND n.nspname NOT IN ('pg_catalog','information_schema')"
+                        )).fetchone()[0]
+                        proc_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM pg_proc p "
+                            "JOIN pg_namespace n ON n.oid=p.pronamespace "
+                            "WHERE n.nspname NOT IN ('pg_catalog','information_schema')"
+                        )).fetchone()[0]
+                        size_row = c.execute(text(
+                            "SELECT pg_database_size(:db)"
+                        ), {"db": database}).fetchone()
+                        info["tables_count"] = tables_cnt or 0
+                        info["views_count"] = views_cnt or 0
+                        info["routines_count"] = proc_cnt or 0
+                        info["size_str"] = _format_size(size_row[0] if size_row else 0)
 
-            elif db_type == 'oracle':
-                info["charset"] = c.execute(text(
-                    "SELECT value FROM nls_database_parameters "
-                    "WHERE parameter='NLS_CHARACTERSET'"
-                )).fetchone()[0]
-                info["collation"] = c.execute(text(
-                    "SELECT value FROM nls_database_parameters WHERE parameter='NLS_SORT'"
-                )).fetchone()[0]
+                    elif db_type == 'oracle':
+                        info["charset"] = c.execute(text(
+                            "SELECT value FROM nls_database_parameters "
+                            "WHERE parameter='NLS_CHARACTERSET'"
+                        )).fetchone()[0]
+                        info["collation"] = c.execute(text(
+                            "SELECT value FROM nls_database_parameters WHERE parameter='NLS_SORT'"
+                        )).fetchone()[0]
 
-                tables_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER=:db"
-                ), {"db": database}).fetchone()[0]
-                views_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM ALL_VIEWS WHERE OWNER=:db"
-                ), {"db": database}).fetchone()[0]
-                proc_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM ALL_OBJECTS "
-                    "WHERE OWNER=:db AND OBJECT_TYPE IN ('PROCEDURE','FUNCTION')"
-                ), {"db": database}).fetchone()[0]
-                size_row = c.execute(text(
-                    "SELECT COALESCE(SUM(BYTES),0) FROM DBA_SEGMENTS WHERE OWNER=:db"
-                ), {"db": database}).fetchone()
-                info["tables_count"] = tables_cnt or 0
-                info["views_count"] = views_cnt or 0
-                info["routines_count"] = proc_cnt or 0
-                info["size_str"] = _format_size(size_row[0] if size_row else 0)
+                        tables_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER=:db"
+                        ), {"db": database}).fetchone()[0]
+                        views_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM ALL_VIEWS WHERE OWNER=:db"
+                        ), {"db": database}).fetchone()[0]
+                        proc_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM ALL_OBJECTS "
+                            "WHERE OWNER=:db AND OBJECT_TYPE IN ('PROCEDURE','FUNCTION')"
+                        ), {"db": database}).fetchone()[0]
+                        size_row = c.execute(text(
+                            "SELECT COALESCE(SUM(BYTES),0) FROM DBA_SEGMENTS WHERE OWNER=:db"
+                        ), {"db": database}).fetchone()
+                        info["tables_count"] = tables_cnt or 0
+                        info["views_count"] = views_cnt or 0
+                        info["routines_count"] = proc_cnt or 0
+                        info["size_str"] = _format_size(size_row[0] if size_row else 0)
 
-            elif db_type == 'mssql':
-                info["collation"] = c.execute(text(
-                    "SELECT collation_name FROM sys.databases WHERE name=:db"
-                ), {"db": database}).fetchone()
-                info["collation"] = info["collation"][0] if info["collation"] else ""
-                info["charset"] = ""
-                tables_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM sys.tables"
-                )).fetchone()[0]
-                views_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM sys.views"
-                )).fetchone()[0]
-                proc_cnt = c.execute(text(
-                    "SELECT COUNT(*) FROM sys.procedures"
-                )).fetchone()[0]
-                try:
-                    size_row = c.execute(text(
-                        "SELECT SUM(size)*8*1024 FROM sys.database_files WHERE type=0"
-                    )).fetchone()
-                except:
-                    size_row = None
-                info["tables_count"] = tables_cnt or 0
-                info["views_count"] = views_cnt or 0
-                info["routines_count"] = proc_cnt or 0
-                info["size_str"] = _format_size(size_row[0] if size_row else 0)
+                    elif db_type == 'mssql':
+                        info["collation"] = c.execute(text(
+                            "SELECT collation_name FROM sys.databases WHERE name=:db"
+                        ), {"db": database}).fetchone()
+                        info["collation"] = info["collation"][0] if info["collation"] else ""
+                        info["charset"] = ""
+                        tables_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM sys.tables"
+                        )).fetchone()[0]
+                        views_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM sys.views"
+                        )).fetchone()[0]
+                        proc_cnt = c.execute(text(
+                            "SELECT COUNT(*) FROM sys.procedures"
+                        )).fetchone()[0]
+                        try:
+                            size_row = c.execute(text(
+                                "SELECT SUM(size)*8*1024 FROM sys.database_files WHERE type=0"
+                            )).fetchone()
+                        except:
+                            size_row = None
+                        info["tables_count"] = tables_cnt or 0
+                        info["views_count"] = views_cnt or 0
+                        info["routines_count"] = proc_cnt or 0
+                        info["size_str"] = _format_size(size_row[0] if size_row else 0)
 
-        engine.dispose()
-        return {"ok": True, "info": info}
+                engine.dispose()
+                return {"ok": True, "info": info}
+            except Exception as e:
+                engine.dispose()
+                return {"ok": False, "msg": _friendly_error(e, db_type)}
+
+        return _with_db_timeout(_get_db_info, timeout=15)
+
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
 

@@ -72,11 +72,22 @@ function renderConn(c, indent) {
     var cid = c.id;
     var pad = indent + 12;
     var icon = getConnIcon(c.db_type||'mysql');
-    return '<div class="tree-node" data-cid="'+cid+'"><div class="my-conn-row conn-row drag-conn-item" draggable="true" style="padding-left:'+pad+'px" onclick="showConnInfo(\''+cid+'\')" ondblclick="expandConn(\''+cid+'\','+pad+')" oncontextmenu="connCtx(event,\''+cid+'\')" ondragstart="onConnDragStart(event,\''+cid+'\')" ondragend="onConnDragEnd(event,\''+cid+'\')">' +
+    // ★ 环境颜色：行背景 + 名称后色点
+    var colorStyle = _connColorStyle(c.color);
+    var colorDot = c.color ? '<span class="conn-color-dot" style="background:'+escapeHtml(c.color)+'"></span>' : '';
+    return '<div class="tree-node" data-cid="'+cid+'"><div class="my-conn-row conn-row drag-conn-item conn-color-tint" draggable="true" style="padding-left:'+pad+'px;'+colorStyle+'" onclick="showConnInfo(\''+cid+'\')" ondblclick="expandConn(\''+cid+'\','+pad+')" oncontextmenu="connCtx(event,\''+cid+'\')" ondragstart="onConnDragStart(event,\''+cid+'\')" ondragend="onConnDragEnd(event,\''+cid+'\')">' +
         '<span class="arrow" id="ma_c_'+cid+'" onclick="event.stopPropagation();toggleConnChildren(\''+cid+'\')" style="visibility:hidden">▸</span>' +
-        '<span class="my-conn-icon db-icon closed">'+icon+'</span><span class="my-conn-name">'+escapeHtml(c.name)+'</span>' +
+        '<span class="my-conn-icon db-icon closed">'+icon+'</span><span class="my-conn-name">'+escapeHtml(c.name)+colorDot+'</span>' +
         '<span class="my-conn-host">'+escapeHtml(c.host+':'+c.port)+'</span></div>' +
         '<div class="tree-children" id="mc_c_'+cid+'"></div></div>';
+}
+
+/** 把 hex 颜色转成"行背景 + 文本不透明"的样式（深色主题 18% 透明，浅色主题 12%） */
+function _connColorStyle(hex) {
+    if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) return '';
+    var r = parseInt(hex.slice(1,3), 16), g = parseInt(hex.slice(3,5), 16), b = parseInt(hex.slice(5,7), 16);
+    // 用 CSS color-mix 混合让透明度随主题自适应
+    return 'background:rgba('+r+','+g+','+b+',0.18);';
 }
 
 function expandConn(cid, pad) {

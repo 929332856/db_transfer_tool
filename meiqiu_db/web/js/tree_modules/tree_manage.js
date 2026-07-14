@@ -274,6 +274,30 @@ function showConnDialog(pid, editCid) {
     h += '<div class="form-row"><label>用户名</label><input id="cf_user" value="'+escapeHtml(cd.user||'')+'"></div>';
     h += '<div class="form-row"><label>密码</label><input type="password" id="cf_pwd" value="'+escapeHtml(cd.pwd||'')+'"></div>';
     h += '<div class="form-row"><label>数据库</label><input id="cf_db" value="'+escapeHtml(cd.db||'')+'"></div>';
+    // ★ 环境颜色标识（6个预设 + 无色 + 自定义吸管）
+    var curColor = cd.color || '';
+    var presetColors = [
+        {key:'green',  val:'#22c55e', label:'生产'},
+        {key:'yellow', val:'#eab308', label:'预发'},
+        {key:'orange', val:'#f97316', label:'测试'},
+        {key:'red',    val:'#ef4444', label:'紧急'},
+        {key:'blue',   val:'#3b82f6', label:'本地'},
+        {key:'purple', val:'#a855f7', label:'其他'}
+    ];
+    h += '<div class="form-row"><label>颜色</label><div class="color-selector" id="cf_color_picker">';
+    // 无色（虚线圆圈）
+    h += '<span class="color-dot color-none'+(curColor===''?' selected':'')+'" data-val="" title="无色" onclick="selectConnColor(this,\'\')"></span>';
+    // 6个预设
+    presetColors.forEach(function(c){
+        var sel = (curColor && curColor.toLowerCase() === c.val.toLowerCase()) ? ' selected' : '';
+        h += '<span class="color-dot color-'+c.key+sel+'" data-val="'+c.val+'" title="'+c.label+'" onclick="selectConnColor(this,\''+c.val+'\')"></span>';
+    });
+    // 自定义吸管
+    h += '<span class="color-dot color-picker'+(curColor && !presetColors.some(function(p){return p.val.toLowerCase()===curColor.toLowerCase();})?' selected':'')+'" title="自定义颜色" onclick="document.getElementById(\'cf_color_custom\').click()">';
+    h += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 22l4-1 11-11-3-3L3 18v4z"/><path d="M14 5l3 3"/></svg></span>';
+    h += '<input type="color" id="cf_color_custom" value="'+escapeHtml(curColor||'#22c55e')+'" style="display:none" onchange="selectConnColor(null, this.value); var dot=document.querySelector(\'.color-picker\'); if(dot){dot.classList.add(\'selected\');}">';
+    h += '</div></div>';
+    h += '<input type="hidden" id="cf_color" value="'+escapeHtml(curColor)+'">';
     var savedOraMode = cd.ora_mode || 'service_name';
     h += '<div class="form-row ora-mode-row" id="cf_ora_row" style="'+(curType==='oracle'?'':'display:none;')+'"><label>连接方式</label><div style="display:flex;gap:16px;align-items:center;"><label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size:12px;"><input type="radio" name="ora_mode_radio" value="sid" '+(savedOraMode==='sid'?'checked':'')+' onchange="document.getElementById(\'cf_ora_mode\').value=this.value" style="width:14px;height:14px;"> SID</label><label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size:12px;"><input type="radio" name="ora_mode_radio" value="service_name" '+(savedOraMode==='service_name'?'checked':'')+' onchange="document.getElementById(\'cf_ora_mode\').value=this.value" style="width:14px;height:14px;"> 服务名</label></div></div>';
     h += '<input type="hidden" id="cf_ora_mode" value="'+savedOraMode+'">';
@@ -281,6 +305,13 @@ function showConnDialog(pid, editCid) {
     h += '<div style="text-align:center;margin-top:12px;"><button class="btn btn-gray" style="margin-right:8px;" onclick="hideConnDlg()">取消</button><button class="btn btn-green" onclick="connSave(\''+(pid||'')+'\',\''+(editCid||'')+'\')">保存</button></div></div>';
     document.getElementById('conn_modal_box').innerHTML = h;
     document.getElementById('conn_modal_overlay').classList.add('show');
+}
+
+/** 颜色选择器交互 */
+function selectConnColor(el, val) {
+    document.querySelectorAll('#cf_color_picker .color-dot').forEach(function(d){ d.classList.remove('selected'); });
+    if (el) el.classList.add('selected');
+    document.getElementById('cf_color').value = val || '';
 }
 function hideConnDlg() { document.getElementById('conn_modal_overlay').classList.remove('show'); }
 var _connTesting = false;
@@ -325,7 +356,7 @@ function connSave(pid, editCid) {
     }
 }
 function readConnForm() {
-    return {name:(document.getElementById('cf_name')||{}).value||'',db_type:(document.getElementById('cf_type')||{}).value||'mysql',host:(document.getElementById('cf_host')||{}).value||'',port:(document.getElementById('cf_port')||{}).value||'3306',user:(document.getElementById('cf_user')||{}).value||'',pwd:(document.getElementById('cf_pwd')||{}).value||'',db:(document.getElementById('cf_db')||{}).value||'',ora_mode:(document.getElementById('cf_ora_mode')||{}).value||'service_name'};
+    return {name:(document.getElementById('cf_name')||{}).value||'',db_type:(document.getElementById('cf_type')||{}).value||'mysql',host:(document.getElementById('cf_host')||{}).value||'',port:(document.getElementById('cf_port')||{}).value||'3306',user:(document.getElementById('cf_user')||{}).value||'',pwd:(document.getElementById('cf_pwd')||{}).value||'',db:(document.getElementById('cf_db')||{}).value||'',ora_mode:(document.getElementById('cf_ora_mode')||{}).value||'service_name',color:(document.getElementById('cf_color')||{}).value||''};
 }
 
 // ==================== 导出向导 ====================

@@ -159,10 +159,10 @@ function showDbInfo(cid, db) {
         '<div id="db_detail_info"><div class="info-loading">⏳ 获取数据库详情...</div></div>' +
         '</div>';
 
-    // ★ 异步获取数据库详情
+    // ★ 异步获取数据库详情（后端走 _with_db_timeout 线程池，不阻塞 Eel 主线程）
     try {
         if (typeof eel !== 'undefined' && typeof eel.get_database_info === 'function') {
-            eel.get_database_info(conn, db)(function(r) {
+            _eelAutoAsync(eel.get_database_info(conn, db), function(r) {
                 var infoEl = document.getElementById('db_detail_info');
                 if (!infoEl) return;
                 if (!r || !r.ok) {
