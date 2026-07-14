@@ -309,9 +309,11 @@ function showConnDialog(pid, editCid) {
 
 /** 颜色选择器交互 */
 function selectConnColor(el, val) {
-    document.querySelectorAll('#cf_color_picker .color-dot').forEach(function(d){ d.classList.remove('selected'); });
+    var dots = document.querySelectorAll('#cf_color_picker .color-dot');
+    for (var i = 0; i < dots.length; i++) { dots[i].classList.remove('selected'); }
     if (el) el.classList.add('selected');
-    document.getElementById('cf_color').value = val || '';
+    var colorInput = document.getElementById('cf_color');
+    if (colorInput) colorInput.value = val || '';
 }
 function hideConnDlg() { document.getElementById('conn_modal_overlay').classList.remove('show'); }
 var _connTesting = false;
@@ -331,7 +333,9 @@ function connTest() {
     });
 }
 function connSave(pid, editCid) {
+    try {
     var c = readConnForm();
+    console.log('[connSave] pid='+pid+', editCid='+editCid+', color='+c.color);
     if (!c.name||!c.host||!c.user) { showWarnDialog('提示','请填写名称、主机、用户名'); return; }
     if (editCid) {
         eel.tree_update_connection(editCid,c)(function(r){
@@ -354,9 +358,11 @@ function connSave(pid, editCid) {
             }
         });
     }
+    } catch(e) { console.error('[connSave] 异常:', e); }
 }
 function readConnForm() {
-    return {name:(document.getElementById('cf_name')||{}).value||'',db_type:(document.getElementById('cf_type')||{}).value||'mysql',host:(document.getElementById('cf_host')||{}).value||'',port:(document.getElementById('cf_port')||{}).value||'3306',user:(document.getElementById('cf_user')||{}).value||'',pwd:(document.getElementById('cf_pwd')||{}).value||'',db:(document.getElementById('cf_db')||{}).value||'',ora_mode:(document.getElementById('cf_ora_mode')||{}).value||'service_name',color:(document.getElementById('cf_color')||{}).value||''};
+    var cfColor = document.getElementById('cf_color');
+    return {name:(document.getElementById('cf_name')||{}).value||'',db_type:(document.getElementById('cf_type')||{}).value||'mysql',host:(document.getElementById('cf_host')||{}).value||'',port:(document.getElementById('cf_port')||{}).value||'3306',user:(document.getElementById('cf_user')||{}).value||'',pwd:(document.getElementById('cf_pwd')||{}).value||'',db:(document.getElementById('cf_db')||{}).value||'',ora_mode:(document.getElementById('cf_ora_mode')||{}).value||'service_name',color:cfColor?cfColor.value:''};
 }
 
 // ==================== 导出向导 ====================
