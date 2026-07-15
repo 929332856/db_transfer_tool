@@ -933,7 +933,7 @@ def _with_db_timeout(func, *args, timeout=15, **kwargs):
     看门狗线程确保任务不会永久卡住。
     """
     import uuid
-    job_id = str(uuid.uuid4())[:8]
+    job_id = str(uuid.uuid4())  # 完整 UUID 避免冲突
     _query_jobs[job_id] = None  # None = 等待中
 
     def _run():

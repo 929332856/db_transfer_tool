@@ -189,8 +189,8 @@ def register_routes(app):
                 for k, v in request.args.items():
                     if k not in data:
                         data[k] = v
-                # 创建 job
-                job_id = str(uuid.uuid4())[:8]
+                # 创建 job（用完整 UUID 避免冲突）
+                job_id = str(uuid.uuid4())
                 app = current_app._get_current_object()
                 jobs = app.config['ASYNC_JOBS']
                 with app.config['ASYNC_LOCK']:
