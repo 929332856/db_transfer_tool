@@ -26,7 +26,7 @@ def create_app():
 
     # ★ 健康检查
     @app.route('/api/ping')
-    def ping():
+    def health_check():
         return jsonify({"ok": True, "msg": "pong"})
 
     # ★ 异步任务管理（替代 Eel 的 _query_jobs + poll_query_result）

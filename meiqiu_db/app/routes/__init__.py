@@ -118,20 +118,27 @@ def _import_main_module():
 
 
 def register_routes(app):
-    """自动注册所有 @eel.expose 函数为 Flask 路由"""
+    """自动注册所有 @eel.expose 函数为 Flask 路由（从 Eel 内部注册表读取）"""
+    import eel
     main_module = _import_main_module()
 
+    # ★ Eel 将所有 @eel.expose 函数存在 _exposed_functions 中
+    exposed_names = set(eel._exposed_functions.keys()) if hasattr(eel, '_exposed_functions') else set()
+
+    if not exposed_names:
+        # 回退：扫描模块函数
+        for name in dir(main_module):
+            obj = getattr(main_module, name, None)
+            if callable(obj) and not name.startswith('_'):
+                exposed_names.add(name)
+
     exposed_funcs = {}
-    # 扫描模块中的所有函数
-    for name in dir(main_module):
+    for name in exposed_names:
         obj = getattr(main_module, name, None)
-        if not callable(obj):
-            continue
-        # 检查是否有 eel.expose 标记
-        if hasattr(obj, '_eel_exposed') or (hasattr(obj, '__wrapped__') and hasattr(obj.__wrapped__, '_eel_exposed')):
+        if callable(obj):
             exposed_funcs[name] = obj
 
-    print(f"[routes] 发现 {len(exposed_funcs)} 个 eel 暴露函数")
+    print(f"[routes] 发现 {len(exposed_funcs)} 个函数")
 
     registered = 0
     for func_name, func in exposed_funcs.items():
@@ -147,7 +154,11 @@ def register_routes(app):
                 return _h
             handler = make_async_h(func, func_name)
 
-        app.add_url_rule(route_path, func_name, handler, methods=['GET', 'POST'])
-        registered += 1
+        try:
+            app.add_url_rule(route_path, func_name, handler, methods=['GET', 'POST'])
+            registered += 1
+        except AssertionError:
+            # 跳过与现有路由冲突的函数（如 ping）
+            pass
 
     print(f"[routes] 已注册 {registered} 个路由")
