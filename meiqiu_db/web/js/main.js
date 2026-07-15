@@ -783,6 +783,7 @@ document.addEventListener('keydown', function(e) {
 var _sqConnData = null;    // 连接参数 {host, port, user, pwd, db_type}
 var _sqConnName = '';      // 连接名称
 var _sqConnected = false;  // 是否已连接
+var _sqConnToken = 0;      // ★ 每次连接递增，旧连接的回调自动失效
 var _sqSource = 'ps';      // 数据来源：'ps'=performance_schema聚合 / 'log'=slow_log原始日志
 var _sqSortKey = null;     // 当前排序列名
 var _sqSortDir = 'desc';   // 当前排序方向：'asc' | 'desc'
@@ -863,6 +864,11 @@ function slowQueryConnect() {
     _sqConnName = data._name || '';
     _sqConnected = false;
 
+    // ★ 每次连接递增 token，旧连接的回调自动失效（防止旧连接结果覆盖新连接状态）
+    _sqConnToken++;
+    var myToken = _sqConnToken;
+    var myCid = cid;  // 闭包记住本次连接的 cid
+
     var statusEl = $('sq_test_status');
     statusEl.style.color = '#f39c12';
     statusEl.textContent = '连接中...';
@@ -871,6 +877,10 @@ function slowQueryConnect() {
 
     // ★ 改用 tree_test_conn（支持多数据库类型 + 异步线程池，不阻塞 Eel）
     _eelAutoAsync(eel.tree_test_conn(data), function(res) {
+        // ★ 已被更新的连接替代，跳过旧结果
+        if (myToken !== _sqConnToken) return;
+        // ★ 连接切换了（用户改了 dropdown），也不更新当前 UI
+        if (myCid !== $('sq_conn_sel').value) return;
         if (res && res.ok) {
             _sqConnected = true;
             statusEl.style.color = '#2ecc71';
@@ -881,6 +891,7 @@ function slowQueryConnect() {
 
             // 检查慢查询状态
             eel.slow_query_check_enabled(data)(function(s) {
+                if (myToken !== _sqConnToken) return;  // ★ token 检查
                 updateSqStatusBadge(s);
             });
             // 重置排序并自动刷新慢SQL列表
@@ -904,6 +915,8 @@ function slowQueryConnect() {
         }
     }, 20000, function() {
         // 超时回调
+        if (myToken !== _sqConnToken) return;
+        if (myCid !== $('sq_conn_sel').value) return;
         _sqConnected = false;
         statusEl.style.color = '#e74c3c';
         statusEl.textContent = '⏱ 连接超时（20秒）';
@@ -927,6 +940,8 @@ function slowQueryTestConn() {
     statusEl.textContent = '测试中...';
     // ★ 改用 tree_test_conn（支持多数据库类型 + 异步）
     _eelAutoAsync(eel.tree_test_conn(data), function(res) {
+        // ★ 检查 dropdown 是否还是当前连接（防止旧测试覆盖新测试结果）
+        if (cid !== $('sq_conn_sel').value) return;
         if (res && res.ok) {
             statusEl.style.color = '#2ecc71';
             statusEl.textContent = '✅ ' + res.msg;
@@ -935,6 +950,7 @@ function slowQueryTestConn() {
             statusEl.textContent = '❌ ' + (res ? res.msg : '失败');
         }
     }, 20000, function() {
+        if (cid !== $('sq_conn_sel').value) return;
         statusEl.style.color = '#e74c3c';
         statusEl.textContent = '⏱ 连接超时（20秒）';
     });

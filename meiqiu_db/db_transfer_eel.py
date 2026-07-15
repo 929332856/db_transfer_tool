@@ -3246,6 +3246,17 @@ def debug_python_info():
 
 @eel.expose
 def tree_test_conn(conn_data):
+    # ★ 兼容两种格式：{user,host,port,pwd} 和 {src_user,src_host,src_port,src_pwd}
+    if 'user' not in conn_data and 'src_user' in conn_data:
+        conn_data = {
+            'user': conn_data.get('src_user', ''),
+            'pwd':  conn_data.get('src_pwd', ''),
+            'host': conn_data.get('src_host', ''),
+            'port': conn_data.get('src_port', '3306'),
+            'db':   conn_data.get('src_db', ''),
+            'db_type': conn_data.get('db_type', 'mysql'),
+            'ora_mode': conn_data.get('src_ora_mode', 'service_name'),
+        }
     db_type = conn_data.get("db_type", "mysql")
     try:
         if db_type == 'redis':
