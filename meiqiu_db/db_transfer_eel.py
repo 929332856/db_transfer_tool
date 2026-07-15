@@ -6866,6 +6866,17 @@ def _force_cleanup_and_exit():
         # 1b: 按名称杀启动后新增的浏览器进程（兜底：PID 树可能因 PyInstaller 而断裂）
         _kill_new_browser_processes()
 
+        # ★ 1b2: 额外按名称杀所有可能残留的浏览器子进程
+        for bname in ['chrome.exe', 'msedge.exe', 'chromium.exe']:
+            try:
+                subprocess.run(
+                    ['taskkill', '/F', '/IM', bname],
+                    capture_output=True, timeout=3,
+                    creationflags=0x08000000
+                )
+            except Exception:
+                pass
+
         # 1c: taskkill /F /T 杀当前进程整棵树
         try:
             subprocess.run(
@@ -6956,7 +6967,30 @@ if __name__ == "__main__":
     # ★ atexit 兜底：即使 finally 没执行（如 SIGKILL 被杀），也尽力清理
     import atexit
     atexit.register(_force_cleanup_and_exit)
+
+    # ★ 使用 chrome-app 模式（独立窗口，更像桌面应用）
+    # ★ close_callback：浏览器窗口关闭时立即触发清理，防止进程残留
+    def _on_close(page, sockets):
+        print("[main] 窗口关闭，开始清理...")
+        _force_cleanup_and_exit()
+
     try:
-        eel.start("index.html", size=(1280, 860), port=0, cmdline_args=[])
+        eel.start(
+            "index.html",
+            size=(1280, 860),
+            port=0,
+            mode='chrome-app',
+            close_callback=_on_close,
+            cmdline_args=[
+                '--disable-extensions',
+                '--disable-plugins',
+                '--disable-background-networking',
+                '--no-first-run',
+                '--no-default-browser-check',
+                '--disable-sync',
+                '--disable-translate',
+                '--disable-features=TranslateUI',
+            ]
+        )
     finally:
         _force_cleanup_and_exit()
