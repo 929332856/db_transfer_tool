@@ -16,31 +16,38 @@ sys.path.insert(0, BASE_DIR)
 
 
 def async_route(timeout=15):
-    """装饰器：将函数包装为异步执行（线程池 + job_id 轮询）"""
+    """装饰器：将函数包装为异步执行（线程池 + job_id 轮询）
+    函数在请求上下文中被调用，结果在线程中计算
+    """
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
             import uuid
             from flask import current_app
+            # 先执行 f 获取结果（在请求上下文），如果 f 只是参数解析器则调用它
+            # 然后在线程中执行真正的业务逻辑
             job_id = str(uuid.uuid4())[:8]
-            jobs = current_app.config['ASYNC_JOBS']
-            with current_app.config['ASYNC_LOCK']:
+            app = current_app._get_current_object()
+            jobs = app.config['ASYNC_JOBS']
+            with app.config['ASYNC_LOCK']:
                 jobs[job_id] = None
 
             def _run():
-                try:
-                    result = f(*args, **kwargs)
-                except Exception as e:
-                    result = {"ok": False, "msg": str(e)}
-                with current_app.config['ASYNC_LOCK']:
-                    if job_id in jobs and jobs[job_id] is None:
-                        jobs[job_id] = result
+                with app.app_context():
+                    try:
+                        result = f(*args, **kwargs)
+                    except Exception as e:
+                        result = {"ok": False, "msg": str(e)}
+                    with app.config['ASYNC_LOCK']:
+                        if job_id in jobs and jobs[job_id] is None:
+                            jobs[job_id] = result
 
             def _watchdog():
                 time.sleep(timeout + 5)
-                with current_app.config['ASYNC_LOCK']:
-                    if job_id in jobs and jobs[job_id] is None:
-                        jobs[job_id] = {"ok": False, "msg": f"操作超时（{timeout}秒）"}
+                with app.app_context():
+                    with app.config['ASYNC_LOCK']:
+                        if job_id in jobs and jobs[job_id] is None:
+                            jobs[job_id] = {"ok": False, "msg": f"操作超时（{timeout}秒）"}
 
             threading.Thread(target=_run, daemon=True).start()
             threading.Thread(target=_watchdog, daemon=True).start()
@@ -63,6 +70,34 @@ ASYNC_FUNCTIONS = {
 }
 
 
+def _resolve_args(func, data):
+    """解析参数并调用函数，返回结果（可在任意线程中调用）"""
+    import inspect
+    sig = inspect.signature(func)
+    param_names = list(sig.parameters.keys())
+
+    if not param_names:
+        return func()
+    elif len(param_names) == 1:
+        try:
+            return func(data)
+        except TypeError:
+            try:
+                return func(**data)
+            except TypeError:
+                return func()
+    else:
+        try:
+            return func(**data)
+        except TypeError:
+            if len(param_names) == 2:
+                p2 = param_names[1]
+                side_val = data.get(p2, data.get('side', ''))
+                return func(data, side_val)
+            else:
+                return func(data)
+
+
 def _make_route_handler(func, func_name):
     """为 eel 函数创建 Flask 路由处理器（智能参数匹配）"""
     import inspect
@@ -78,32 +113,7 @@ def _make_route_handler(func, func_name):
                 if k not in data:
                     data[k] = v
 
-            # ★ 多策略调用：依次尝试匹配函数签名
-            if not param_names:
-                # 无参函数
-                result = func()
-            elif len(param_names) == 1:
-                # 单参数函数：尝试 func(data) 或 func(**data)
-                try:
-                    result = func(data)
-                except TypeError:
-                    try:
-                        result = func(**data)
-                    except TypeError:
-                        result = func()
-            else:
-                # 多参数函数：尝试 func(**data)，失败则 func(data)
-                try:
-                    result = func(**data)
-                except TypeError:
-                    # 可能是 (data, side) 模式
-                    if len(param_names) == 2:
-                        p2 = param_names[1]
-                        side_val = data.get(p2, data.get('side', ''))
-                        result = func(data, side_val)
-                    else:
-                        result = func(data)
-
+            result = _resolve_args(func, data)
             return jsonify(result)
         except Exception as e:
             return jsonify({"ok": False, "msg": str(e)})
@@ -143,22 +153,52 @@ def register_routes(app):
     registered = 0
     for func_name, func in exposed_funcs.items():
         route_path = f'/api/{func_name}'
-        handler = _make_route_handler(func, func_name)
 
-        # 异步函数用 async_route 包装
         if func_name in ASYNC_FUNCTIONS:
-            def make_async_h(fn, name):
-                @async_route(timeout=15)
-                def _h():
-                    return _make_route_handler(fn, name)()
-                return _h
-            handler = make_async_h(func, func_name)
+            # ★ 异步函数：wrapper 内解析参数并提交线程任务
+            fn = func  # 捕获引用
+            @wraps(fn)
+            def async_handler():
+                import uuid
+                from flask import current_app
+                # 在请求上下文中解析参数
+                data = request.get_json(force=True, silent=True) or {}
+                for k, v in request.args.items():
+                    if k not in data:
+                        data[k] = v
+                # 创建 job
+                job_id = str(uuid.uuid4())[:8]
+                app = current_app._get_current_object()
+                jobs = app.config['ASYNC_JOBS']
+                with app.config['ASYNC_LOCK']:
+                    jobs[job_id] = None
+                # 线程中执行（不访问 request）
+                def _run():
+                    with app.app_context():
+                        try:
+                            result = _resolve_args(fn, data)
+                        except Exception as e:
+                            result = {"ok": False, "msg": str(e)}
+                        with app.config['ASYNC_LOCK']:
+                            if job_id in jobs and jobs[job_id] is None:
+                                jobs[job_id] = result
+                def _watchdog():
+                    time.sleep(20)  # timeout+5
+                    with app.app_context():
+                        with app.config['ASYNC_LOCK']:
+                            if job_id in jobs and jobs[job_id] is None:
+                                jobs[job_id] = {"ok": False, "msg": "操作超时（15秒）"}
+                threading.Thread(target=_run, daemon=True).start()
+                threading.Thread(target=_watchdog, daemon=True).start()
+                return jsonify({"ok": True, "_async": True, "_job_id": job_id})
+            handler = async_handler
+        else:
+            handler = _make_route_handler(func, func_name)
 
         try:
             app.add_url_rule(route_path, func_name, handler, methods=['GET', 'POST'])
             registered += 1
         except AssertionError:
-            # 跳过与现有路由冲突的函数（如 ping）
             pass
 
     print(f"[routes] 已注册 {registered} 个路由")
