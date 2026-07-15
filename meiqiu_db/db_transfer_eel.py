@@ -2885,16 +2885,6 @@ if getattr(sys, 'frozen', False):
 else:
     # 源码运行环境：从dist/目录读取
     TREE_FILE = os.path.join(BASE_DIR, "dist", "navicat_tree.json")
-TREE_BACKUP_DIR = os.path.join(BASE_DIR, ".tree_backups")
-MAX_BACKUPS = 5  # 最多保留 5 份备份
-
-
-# 确保目录存在
-try:
-    os.makedirs(TREE_BACKUP_DIR, exist_ok=True)
-except Exception:
-    pass
-
 def _validate_tree(data):
     """校验树数据结构完整性（仅检查结构，不检查内容）"""
     if not isinstance(data, dict):
@@ -2921,101 +2911,17 @@ def _is_empty_shell(data):
     """检查是否是结构合法但内容为空的'空壳'数据"""
     return _validate_tree(data) and not _tree_has_content(data)
 
-def _backup_tree():
-    """备份当前的 navicat_tree.json（如果文件有有效数据）"""
-    try:
-        if not os.path.exists(TREE_FILE) or os.path.getsize(TREE_FILE) == 0:
-            return
-        with open(TREE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not _validate_tree(data):
-            return
-        # 检查是否有实际内容值得备份
-        if not _tree_has_content(data):
-            return
-        # 生成备份文件名
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = os.path.join(TREE_BACKUP_DIR, f"navicat_tree_{timestamp}.json")
-        with open(backup_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        # 清理旧备份：只保留最新的 MAX_BACKUPS 份
-        backups = sorted(
-            [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_") and b.endswith(".json")],
-            reverse=True
-        )
-        for old_bak in backups[MAX_BACKUPS:]:
-            try:
-                os.remove(os.path.join(TREE_BACKUP_DIR, old_bak))
-            except Exception:
-                pass
-    except Exception:
-        pass  # 备份失败不影响主流程
 
-_LAST_AUTO_BACKUP = 0  # 上次自动备份的时间戳
 
-def _maybe_auto_backup():
-    """每隔一定时间自动备份（仅在 _load_tree 时调用）"""
-    global _LAST_AUTO_BACKUP
-    now = time.time()
-    if now - _LAST_AUTO_BACKUP < 3600:  # 1小时
-        return
-    try:
-        _backup_tree()
-        _LAST_AUTO_BACKUP = now
-    except Exception:
-        pass
-
-def _recover_from_backup():
-    """尝试从 .tree_backups/ 备份恢复数据"""
-    try:
-        if os.path.exists(TREE_BACKUP_DIR):
-            backups = sorted(
-                [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_") and b.endswith(".json")],
-                reverse=True
-            )
-            for bak_file in backups:
-                bak_path = os.path.join(TREE_BACKUP_DIR, bak_file)
-                try:
-                    with open(bak_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    if _validate_tree(data) and _tree_has_content(data):
-                        # 恢复成功：用备份覆盖主文件
-                        with open(TREE_FILE, "w", encoding="utf-8") as f:
-                            json.dump(data, f, ensure_ascii=False, indent=2)
-                        print("[tree] 已从备份恢复数据:", bak_file)
-                        return data
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return None
-
-# 初始化：文件不存在就创建；存在但为空/损坏则尝试恢复
+# 初始化：文件不存在就创建
 try:
     print(f"[tree] 初始化: frozen={getattr(sys, 'frozen', False)}, TREE_FILE={TREE_FILE}")
     if not os.path.exists(TREE_FILE):
-        print("[tree] 初始化: TREE_FILE 不存在，尝试从备份恢复")
-        recovered = _recover_from_backup()
-        if not recovered:
-            print("[tree] 初始化: 无可用备份，创建空文件")
-            with open(TREE_FILE, "w", encoding="utf-8") as f:
-                json.dump({"folders": [], "connections": {}, "saved_queries": []}, f, ensure_ascii=False, indent=2)
-        else:
-            print("[tree] 初始化: 从备份恢复成功")
+        print("[tree] 初始化: TREE_FILE 不存在，创建空文件")
+        with open(TREE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"folders": [], "connections": {}, "saved_queries": []}, f, ensure_ascii=False, indent=2)
     else:
-        file_size = os.path.getsize(TREE_FILE)
-        print(f"[tree] 初始化: 文件已存在，size={file_size} bytes")
-        # 文件存在但内容为空或只有空壳数据 → 尝试恢复
-        try:
-            if file_size < 200:
-                print("[tree] 初始化: 文件<200字节，检查是否空壳")
-                with open(TREE_FILE, "r", encoding="utf-8") as f:
-                    init_data = json.load(f)
-                if _is_empty_shell(init_data):
-                    print("[tree] 初始化: 空壳数据，尝试从备份恢复")
-                    recovered = _recover_from_backup()
-        except Exception as e:
-            print(f"[tree] 初始化: 检查文件时异常 {e}")
+        print(f"[tree] 初始化: 文件已存在，size={os.path.getsize(TREE_FILE)} bytes")
 except Exception as e:
     print(f"[tree] 初始化: 异常 {e}")
 
@@ -3032,58 +2938,30 @@ def _load_tree():
             content = f.read()
         print(f"[tree] _load_tree: file size={len(content)} bytes")
         if not content.strip():
-            print("[tree] _load_tree: 文件为空，尝试恢复")
-            recovered = _recover_from_backup()
-            if recovered:
-                _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
-                return recovered
-            # ★ 空文件且无备份，不缓存，下次重新读
+            print("[tree] _load_tree: 文件为空")
             return {"folders": [], "connections": {}, "saved_queries": []}
         data = json.loads(content)
         conn_count = len(data.get("connections", {}))
         print(f"[tree] _load_tree: 解析成功，connections={conn_count}, folders={len(data.get('folders',[]))}, queries={len(data.get('saved_queries',[]))}")
         if not _validate_tree(data):
-            print("[tree] _load_tree: 数据格式不正确，尝试恢复")
-            recovered = _recover_from_backup()
-            if recovered:
-                _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
-                return recovered
+            print("[tree] _load_tree: 数据格式不正确")
             return {"folders": [], "connections": {}, "saved_queries": []}
-        # 【关键】结构合法但内容为空（空壳），尝试恢复
-        if _is_empty_shell(data):
-            print("[tree] _load_tree: 空壳数据，尝试恢复")
-            recovered = _recover_from_backup()
-            if recovered:
-                _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
-                return recovered
-        # 正常加载
         # ★ 迁移旧 saved_queries 到文件系统（仅首次加载时执行）
         if data.get("saved_queries"):
             _migrate_old_queries(tree=data)
-            # 重新加载（迁移后 saved_queries 已被清除）
             return _load_tree()
         _tree_cache_data, _tree_cache_mtime = data, cur_mtime
         return data
     except json.JSONDecodeError as e:
         print(f"[tree] _load_tree JSON解析失败: {e}")
-        recovered = _recover_from_backup()
-        if recovered:
-            _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
-            return recovered
-        # ★ JSON 解析失败不缓存空数据，下次重新读文件（文件可能正在写入中）
         return {"folders": [], "connections": {}, "saved_queries": []}
     except FileNotFoundError:
         print(f"[tree] _load_tree: 文件不存在 TREE_FILE={TREE_FILE}")
-        recovered = _recover_from_backup()
-        if recovered:
-            _tree_cache_data, _tree_cache_mtime = recovered, cur_mtime
-            return recovered
         return {"folders": [], "connections": {}, "saved_queries": []}
     except Exception as e:
         print(f"[tree] _load_tree 异常: {type(e).__name__}: {e}")
         import traceback
         traceback.print_exc()
-        # ★ 异常时不缓存，下次重试
         return {"folders": [], "connections": {}, "saved_queries": []}
 
 def _save_tree(data):
@@ -3103,8 +2981,6 @@ def _save_tree(data):
                     return False
             except Exception:
                 pass  # 当前文件读不了就算了，让写入继续
-        # 保存前先备份
-        _backup_tree()
         # 原子写入：先写临时文件，再替换（防止写入中途崩溃损坏数据）
         tmp_file = TREE_FILE + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
@@ -3146,8 +3022,6 @@ def tree_diag():
         "tree_file": TREE_FILE,
         "tree_file_exists": os.path.exists(TREE_FILE),
         "tree_file_size": os.path.getsize(TREE_FILE) if os.path.exists(TREE_FILE) else -1,
-        "backup_dir": TREE_BACKUP_DIR,
-        "backup_dir_exists": os.path.exists(TREE_BACKUP_DIR),
     }
     if info["tree_file_exists"] and info["tree_file_size"] > 0:
         try:
@@ -3155,7 +3029,6 @@ def tree_diag():
                 data = json.load(f)
             info["connections_count"] = len(data.get("connections", {}))
             info["folders_count"] = len(data.get("folders", []))
-            # 查询已迁移到文件系统，统计 queries/ 目录下的文件数
             q_count = 0
             qdir = QUERIES_DIR
             if os.path.isdir(qdir):
@@ -3166,13 +3039,6 @@ def tree_diag():
             info["has_content"] = _tree_has_content(data)
         except Exception as e:
             info["parse_error"] = f"{type(e).__name__}: {e}"
-    info["backups"] = []
-    try:
-        if os.path.exists(TREE_BACKUP_DIR):
-            backups = sorted([b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_")], reverse=True)[:5]
-            info["backups"] = backups
-    except Exception:
-        pass
     return info
 
 @eel.expose
@@ -3236,47 +3102,6 @@ def settings_get_paths():
     }
 
 @eel.expose
-def tree_backup_now():
-    """手动触发备份"""
-    try:
-        _backup_tree()
-        return {"ok": True, "msg": "备份完成"}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
-@eel.expose
-def tree_get_backups():
-    """获取备份文件列表"""
-    try:
-        if not os.path.exists(TREE_BACKUP_DIR):
-            return {"ok": True, "backups": []}
-        backups = sorted(
-            [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_") and b.endswith(".json")],
-            reverse=True
-        )
-        result = []
-        for b in backups:
-            path = os.path.join(TREE_BACKUP_DIR, b)
-            try:
-                size = os.path.getsize(path)
-                ts_str = b.replace("navicat_tree_", "").replace(".json", "")
-                result.append({"name": b, "size": size, "ts": ts_str})
-            except Exception:
-                pass
-        return {"ok": True, "backups": result}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
-@eel.expose
-def tree_force_recover():
-    """强制从备份或 dist/ 恢复数据，返回恢复结果"""
-    try:
-        recovered = _recover_from_backup()
-        if recovered:
-            conn_count = len(recovered.get("connections", {}))
-            return {"ok": True, "msg": f"已恢复 {conn_count} 个连接", "connections": conn_count}
-        return {"ok": False, "msg": "未找到可恢复的备份文件", "connections": 0}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
-@eel.expose
 def tree_check_integrity():
     """检查 navicat_tree.json 完整性，返回诊断信息"""
     result = {"file_exists": os.path.exists(TREE_FILE), "issues": []}
@@ -3295,12 +3120,6 @@ def tree_check_integrity():
                 result["issues"].append("空壳数据：文件存在但无连接/文件夹/查询")
             if not _validate_tree(data):
                 result["issues"].append("数据结构校验失败")
-            # 检查是否有备份可用
-            has_backup = False
-            if os.path.exists(TREE_BACKUP_DIR):
-                backups = [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_") and b.endswith(".json")]
-                has_backup = len(backups) > 0
-            result["has_backup"] = has_backup
         else:
             result["file_size"] = 0
             result["issues"].append("navicat_tree.json 不存在")

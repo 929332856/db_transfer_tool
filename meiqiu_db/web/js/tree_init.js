@@ -24,7 +24,7 @@
                     'tree_rename_folder', 'tree_delete_folder', 'tree_add_connection',
                     'tree_update_connection', 'tree_delete_connection', 'tree_move_connection',
                     'tree_save_query', 'tree_get_query', 'tree_delete_query', 'tree_test_conn',
-                    'tree_get_backups', 'tree_force_recover', 'tree_check_integrity',
+                    'tree_check_integrity',
                     'db_explore_get_databases', 'db_explore_get_schemas', 'db_explore_get_tables',
                     'db_explore_get_views', 'db_explore_get_procedures', 'db_explore_get_triggers',
                     'db_explore_get_table_ddl', 'db_explore_get_objlist', 'db_explore_get_proc_source',
