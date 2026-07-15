@@ -1428,6 +1428,8 @@ function switchSqSubtab(name) {
         var statsBar = document.querySelector('.slow-stats-bar');
         if (statsBar) statsBar.style.display = 'none';
         $('dash_view').style.display = '';
+        // ★ 切回仪表盘时：先强制重绘一次（DOM 重新布局后 clientWidth 才准确），再拉取数据
+        requestAnimationFrame(function() { _redrawDashCharts(); });
         // 启动仪表盘
         if (_sqConnected) {
             dashboardRefresh();
@@ -1443,6 +1445,16 @@ function switchSqSubtab(name) {
         // 停止自动刷新
         if (_dashTimer) { clearInterval(_dashTimer); _dashTimer = null; }
     }
+}
+
+/** 仅重绘 4 个图表（不重新拉取数据），用于 tab 切回时恢复 canvas 尺寸 */
+function _redrawDashCharts() {
+    if (!_dashHistory) return;
+    _drawLineChart('dash_chart_qps', [_dashHistory.qps], ['QPS'], ['#5dade2'], 'num');
+    _drawLineChart('dash_chart_conn', [_dashHistory.new_conn], ['新建连接'], ['#2ecc71'], 'num');
+    _drawLineChart('dash_chart_net', [_dashHistory.net_in, _dashHistory.net_out], ['入','出'], ['#5dade2','#a855f7'], 'kb');
+    _drawLineChart('dash_chart_cmd', [_dashHistory.cmd_select, _dashHistory.cmd_insert, _dashHistory.cmd_update, _dashHistory.cmd_delete],
+        ['SELECT','INSERT','UPDATE','DELETE'], ['#5dade2','#2ecc71','#f39c12','#e74c3c'], 'num');
 }
 
 /** 仪表盘自动刷新间隔 */
@@ -1568,6 +1580,8 @@ function _drawLineChart(canvasId, series, labels, colors, unit) {
     if (!canvas) return;
     // 适配设备像素比，避免模糊
     var dpr = window.devicePixelRatio || 1;
+    // ★ 防御：如果容器还没布局好（clientWidth=0），不绘制避免拉伸
+    if (canvas.parentElement.clientWidth < 50) return;
     var cssW = canvas.parentElement.clientWidth - 28;  // 减去 padding
     var cssH = 200;
     canvas.style.width = cssW + 'px';
