@@ -26,10 +26,9 @@ try:
     import oracledb
     try:
         oracledb.init_oracle_client()
-        print("[oracledb] ✅ 已启用 Thick 模式（Oracle Client C 驱动）")
+        print("[oracledb] Thick mode enabled (Oracle Client C driver)")
     except Exception:
-        # Oracle Client 未安装或配置不正确，使用默认 Thin 模式
-        print("[oracledb] ⚠️ Thick 模式不可用，使用 Thin 模式（安装 Oracle Instant Client 可提速）")
+        print("[oracledb] Thick mode unavailable, using Thin mode")
         pass
 except ImportError:
     pass

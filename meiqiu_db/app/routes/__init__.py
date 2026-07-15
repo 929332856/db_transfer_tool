@@ -59,46 +59,45 @@ ASYNC_FUNCTIONS = {
 
 
 def _make_route_handler(func, func_name):
-    """为 eel 函数创建 Flask 路由处理器"""
+    """为 eel 函数创建 Flask 路由处理器（自动参数匹配）"""
     import inspect
     sig = inspect.signature(func)
+    param_names = list(sig.parameters.keys())
 
     def handler():
         try:
-            # 尝试从 JSON body 或 query params 获取参数
-            if request.is_json:
-                data = request.get_json(force=True)
-            else:
-                data = {}
-            # 尝试从 request.args 补充参数
+            # 获取 JSON body
+            data = request.get_json(force=True, silent=True) or {}
+            # 合并 query params
             for k, v in request.args.items():
                 if k not in data:
                     data[k] = v
 
-            # 构造参数列表（匹配函数签名）
-            args = []
-            kwargs = {}
-            for name, param in sig.parameters.items():
-                if name == 'self':
-                    continue
-                if name in data:
-                    kwargs[name] = data[name]
-                elif param.default is not inspect.Parameter.empty:
-                    kwargs[name] = param.default
-                else:
-                    kwargs[name] = data  # 第一个位置参数可能是整个 dict
-
-            # 简化：如果只有一个参数且不是关键字，传整个 data
-            params = list(sig.parameters.keys())
-            if len(params) == 1 and params[0] not in kwargs:
+            # 参数匹配策略
+            if len(param_names) == 1:
+                # 单参数函数：整个 data dict 传入
                 result = func(data)
-            elif len(params) == 2 and params[0] not in kwargs and params[1] not in kwargs:
-                # 可能是 (data, side) 模式
-                result = func(data, kwargs.get(params[1], ''))
+            elif len(param_names) == 2:
+                # 双参数函数：尝试 data + 第二个参数
+                p2 = param_names[1]
+                if p2 in data:
+                    result = func(data, data[p2])
+                else:
+                    result = func(data, '')
             else:
-                try:
-                    result = func(**kwargs)
-                except TypeError:
+                # 多参数函数：按参数名匹配
+                kwargs = {}
+                for name in param_names:
+                    if name in data:
+                        kwargs[name] = data[name]
+                    elif name == 'self':
+                        continue
+                if kwargs:
+                    try:
+                        result = func(**kwargs)
+                    except TypeError:
+                        result = func(data)
+                else:
                     result = func(data)
 
             return jsonify(result)
