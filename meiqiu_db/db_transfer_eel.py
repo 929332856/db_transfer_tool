@@ -6953,10 +6953,30 @@ if __name__ == "__main__":
     # 导入 DataGrip 导入模块（注册 eel 暴露函数）
     import modules.datagrip_import
     eel.init(web_dir)
-    # ★ 启动时记录已存在的浏览器进程，退出时只杀新增的，防止误杀用户其他浏览器
+
+    # ★ Flask 适配层：自动检测 web/js/eel_adapter.js 存在时，优先用 Flask+PyWebView
+    adapter_path = os.path.join(web_dir, "js", "eel_adapter.js")
+    use_flask = os.path.exists(adapter_path)
+    if use_flask:
+        # Flask + PyWebView 模式（多线程、无浏览器残留）
+        try:
+            from app import create_app
+            from main import start_webview, find_free_port
+            port = find_free_port()
+            app = create_app()
+            flask_thread = threading.Thread(
+                target=lambda: app.run(host='127.0.0.1', port=port, threaded=True, debug=False, use_reloader=False),
+                daemon=True
+            )
+            flask_thread.start()
+            start_webview(port)
+            return
+        except Exception as _e:
+            print(f"[main] Flask 启动失败，回退到 Eel: {_e}")
+
+    # 回退到 Eel 模式
     if sys.platform == 'win32':
         _record_existing_browser_pids()
-    # ★ atexit 兜底：即使 finally 没执行（如 SIGKILL 被杀），也尽力清理
     import atexit
     atexit.register(_force_cleanup_and_exit)
 
