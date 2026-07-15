@@ -7,11 +7,9 @@ MQDB 主入口（Flask + PyWebView）
 import sys, os, threading, socket, time
 
 if getattr(sys, 'frozen', False):
-    # PyInstaller 打包：exe 所在目录放用户数据，_MEIPASS 放源码
     BASE_DIR = os.path.dirname(sys.executable)
     SRC_DIR = sys._MEIPASS
     os.chdir(BASE_DIR)
-    sys.path.insert(0, SRC_DIR)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     SRC_DIR = BASE_DIR
@@ -19,10 +17,28 @@ else:
 
 sys.path.insert(0, SRC_DIR)
 
-# ★ 显式 import 让 PyInstaller 分析依赖链时包含这些模块
-import db_transfer_eel          # noqa: F401
-import modules                  # noqa: F401
-import modules.datagrip_import  # noqa: F401
+# ★ PyInstaller frozen 模式下，db_transfer_eel 被编译进 PYZ archive，
+# 需要用 importlib 从 _MEIPASS 中直接加载源码
+def _load_main_module():
+    import importlib.util
+    # 先尝试正常 import（开发模式）
+    try:
+        import db_transfer_eel
+        return db_transfer_eel
+    except ImportError:
+        pass
+    # frozen 模式：从 _MEIPASS 中加载
+    for name in ('db_transfer_eel.py', 'db_transfer_eel.pyc'):
+        fpath = os.path.join(SRC_DIR, name)
+        if os.path.exists(fpath):
+            spec = importlib.util.spec_from_file_location('db_transfer_eel', fpath)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules['db_transfer_eel'] = mod
+            spec.loader.exec_module(mod)
+            return mod
+    raise ImportError(f"无法加载 db_transfer_eel 模块 (SRC_DIR={SRC_DIR})")
+
+_db_transfer_eel = _load_main_module()
 
 from app import create_app
 

@@ -37,6 +37,8 @@ all_hidden = (eel_subs + sa_subs + py_subs + bt_subs + pg_subs + or_subs + ms_su
 all_extra_datas = [
     ('web', 'web'),
     ('app', 'app'),
+    ('db_transfer_eel.py', '.'),      # ★ 主业务模块（.py 源码）
+    ('modules', 'modules'),            # ★ 子模块目录
 ] + eel_datas + sa_datas + py_datas + bt_datas + pg_datas + or_datas + ms_datas + redis_datas
 
 if Path('db_profiles.json').exists():

@@ -695,7 +695,7 @@ _query_result_store = {}
 @eel.expose
 def execute_sql_query(sql: str, data: dict):
     """执行 SQL 查询（异步模式：立即返回 job_id，不阻塞 Eel 主线程）
-    
+
     JS 侧收到 _async=True 后，应轮询 poll_query_result(job_id) 获取结果。
     这样做彻底解决 future.result() 阻塞 bottle 单线程服务器问题，
     让执行 SQL 期间仍能打开数据库连接、切换查询 Tab 等。
@@ -927,7 +927,7 @@ def _get_db_thread_pool():
 
 def _with_db_timeout(func, *args, timeout=15, **kwargs):
     """在独立 OS 线程中执行数据库操作（异步非阻塞模式）。
-    
+
     立即返回 job_id，实际工作在独立线程中执行。
     JS 侧轮询 poll_query_result 获取结果。
     看门狗线程确保任务不会永久卡住。
@@ -3490,7 +3490,7 @@ def redis_get_databases(conn_data):
         except Exception:
             db_count = 16
         db_count = min(db_count, 16)  # 最多扫描16个
-        
+
         databases = []
         for db_idx in range(db_count):
             key_count = 0
@@ -3520,7 +3520,7 @@ def redis_get_databases(conn_data):
                 except Exception:
                     pass
             databases.append({"db": db_idx, "keys": key_count})
-        
+
         return {"ok": True, "databases": databases}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
@@ -3536,7 +3536,7 @@ def redis_get_keys(conn_data, pattern='*', limit=100, db=None):
         # 强制写入 exe/脚本目录下的 redis_debug.log 文件
         try:
             import os, sys, time
-            
+
             # 确定目标目录
             if getattr(sys, 'frozen', False):
                 # 打包exe环境：exe所在目录
@@ -3546,24 +3546,24 @@ def redis_get_keys(conn_data, pattern='*', limit=100, db=None):
                 # Python脚本环境：脚本所在目录
                 base_dir = os.path.dirname(os.path.abspath(__file__))
                 print(f"[Redis] Python环境，脚本目录: {base_dir}")
-            
+
             log_file = os.path.join(base_dir, "redis_debug.log")
             print(f"[Redis] 日志文件目标路径: {log_file}")
-            
+
             # 确保目录存在
             os.makedirs(base_dir, exist_ok=True)
-            
+
             # 写入日志（追加模式）
             with open(log_file, "a", encoding="utf-8") as f:
                 timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
                 f.write(f"{timestamp} [Redis] {msg}\n")
                 f.flush()  # 立即刷新，确保数据写入磁盘
-            
+
             # 存储日志路径到全局变量
             if '__redis_log_path' not in globals():
                 globals()['__redis_log_path'] = log_file
                 print(f"[Redis] 日志文件已创建: {log_file}")
-            
+
         except Exception as e:
             print(f"[Redis] 严重错误: 无法写入日志文件 {log_file}: {e}")
             # 尝试备用方案：写入临时目录
@@ -3576,13 +3576,13 @@ def redis_get_keys(conn_data, pattern='*', limit=100, db=None):
                 print(f"[Redis] 已写入临时文件: {temp_log}")
             except Exception as e2:
                 print(f"[Redis] 备用日志写入也失败: {e2}")
-    
+
     # 首次调用时显示日志文件位置
     if not hasattr(_log_redis, '_initialized'):
         _log_redis._initialized = True
         if '__redis_log_path' in globals():
             print(f"[Redis] 日志文件位置: {globals()['__redis_log_path']}")
-    
+
     try:
         import time
         start_time = time.time()
@@ -3595,13 +3595,13 @@ def redis_get_keys(conn_data, pattern='*', limit=100, db=None):
         except Exception as ping_err:
             _log_redis(f"连接测试失败: {ping_err}")
             return {"ok": False, "msg": f"Redis连接失败: {ping_err}"}
-        
+
         keys = []
         cursor = 0
         max_iterations = 10  # 最多迭代10次，防止无限循环
         iteration = 0
         max_scantime = 8.0  # SCAN操作最多8秒，超时则返回已获取的keys
-        
+
         # 使用 SCAN 命令增量获取 keys，避免 KEYS 命令阻塞
         _log_redis("开始 SCAN 迭代")
         while iteration < max_iterations:
@@ -3610,7 +3610,7 @@ def redis_get_keys(conn_data, pattern='*', limit=100, db=None):
                 cursor, batch = r.scan(cursor=cursor, match=pattern, count=300)  # 每次扫描300个key
                 keys.extend(batch)
                 _log_redis(f"迭代 {iteration}: cursor={cursor}, 本次获取 {len(batch)} keys, 累计 {len(keys)} keys")
-                
+
                 # 达到限制或扫描完成
                 if len(keys) >= limit or cursor == 0:
                     if cursor == 0:
@@ -3618,28 +3618,28 @@ def redis_get_keys(conn_data, pattern='*', limit=100, db=None):
                     else:
                         _log_redis(f"达到限制 {limit} keys")
                     break
-                
+
                 # 检查是否超时
                 if time.time() - start_time > max_scantime:
                     _log_redis(f"SCAN 超时（{max_scantime}秒），返回已获取的keys")
                     break
-                    
+
             except Exception as scan_err:
                 _log_redis(f"SCAN 出错: {scan_err}")
                 # 如果扫描出错，返回已获取的keys
                 break
-        
+
         scan_time = time.time() - start_time
         _log_redis(f"SCAN 完成，耗时 {scan_time:.2f} 秒，共获取 {len(keys)} keys")
-        
+
         # 如果实际获取的键超过限制，截断
         has_more = len(keys) > limit
         if has_more:
             keys = keys[:limit]
-        
+
         # 所有 key 统一放入一个"键"文件夹，不做按前缀分组
         result = [{"group": "键", "keys": [_smart_decode(k) for k in keys]}]
-        
+
         # 获取总键数（可能较慢，但提供近似值）
         try:
             total = r.dbsize()
@@ -3647,14 +3647,14 @@ def redis_get_keys(conn_data, pattern='*', limit=100, db=None):
         except Exception as dbsize_err:
             _log_redis(f"dbsize() 失败: {dbsize_err}")
             total = len(keys)  # 失败时使用当前获取的数量作为近似值
-        
+
         total_time = time.time() - start_time
         _log_redis(f"函数总耗时 {total_time:.2f} 秒，返回 {len(result)} 个分组")
         return_result = {"ok": True, "groups": result, "total": total}
         _log_redis(f"返回数据结构: ok={return_result['ok']}, groups数量={len(result)}, total={total}")
         # 调试：打印返回值摘要
         print(f"[DEBUG] Redis函数准备返回: ok=True, total={total}, groups={len(result)}")
-        
+
         # 详细调试：检查返回值是否可序列化
         try:
             import json
@@ -3680,15 +3680,15 @@ def redis_get_keys(conn_data, pattern='*', limit=100, db=None):
                                             json.dumps(k)
                                         except Exception as key_err:
                                             _log_redis(f"key {j} ('{k[:50]}...') 无法序列化: {key_err}, 类型: {type(k)}")
-        
+
         # 记录返回值摘要到日志
         _log_redis(f"准备返回: total={total}, groups={len(result)}, keys示例={sum(len(g['keys']) for g in result)}")
-        
+
         # Eel调试信息
         print(f"[EEL-DEBUG] 返回值类型: {type(return_result)}")
         print(f"[EEL-DEBUG] 返回值键: {list(return_result.keys())}")
         print(f"[EEL-DEBUG] groups数量: {len(return_result.get('groups', []))}")
-        
+
         return return_result
     except Exception as e:
         _log_redis(f"异常: {e}")
@@ -6970,7 +6970,7 @@ if __name__ == "__main__":
             )
             flask_thread.start()
             start_webview(port)
-            return
+            sys.exit(0)
         except Exception as _e:
             print(f"[main] Flask 启动失败，回退到 Eel: {_e}")
 

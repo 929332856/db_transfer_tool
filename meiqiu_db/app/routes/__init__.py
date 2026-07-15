@@ -113,14 +113,7 @@ def _make_route_handler(func, func_name):
 
 
 def _import_main_module():
-    """延迟导入 db_transfer_eel（兼容 PyInstaller frozen 环境）"""
-    # PyInstaller frozen 模式：sys.MEIPASS 下有编译后的 .pyc
-    if getattr(sys, 'frozen', False):
-        # PyInstaller 会把模块编译进 PYZ archive，直接 import 即可
-        import db_transfer_eel
-        return db_transfer_eel
-
-    # 开发模式：直接 import
+    """获取 db_transfer_eel 模块（由 main.py 预加载到 sys.modules）"""
     import db_transfer_eel
     return db_transfer_eel
 
