@@ -112,9 +112,22 @@ def _make_route_handler(func, func_name):
     return handler
 
 
+def _import_main_module():
+    """延迟导入 db_transfer_eel（兼容 PyInstaller frozen 环境）"""
+    # PyInstaller frozen 模式：sys.MEIPASS 下有编译后的 .pyc
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 会把模块编译进 PYZ archive，直接 import 即可
+        import db_transfer_eel
+        return db_transfer_eel
+
+    # 开发模式：直接 import
+    import db_transfer_eel
+    return db_transfer_eel
+
+
 def register_routes(app):
     """自动注册所有 @eel.expose 函数为 Flask 路由"""
-    import db_transfer_eel as main_module
+    main_module = _import_main_module()
 
     exposed_funcs = {}
     # 扫描模块中的所有函数
@@ -135,8 +148,6 @@ def register_routes(app):
 
         # 异步函数用 async_route 包装
         if func_name in ASYNC_FUNCTIONS:
-            handler = async_route(timeout=15)(handler.__wrapped__ if hasattr(handler, '__wrapped__') else handler)
-            # 重新创建 handler
             def make_async_h(fn, name):
                 @async_route(timeout=15)
                 def _h():

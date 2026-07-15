@@ -19,6 +19,11 @@ else:
 
 sys.path.insert(0, SRC_DIR)
 
+# ★ 显式 import 让 PyInstaller 分析依赖链时包含这些模块
+import db_transfer_eel          # noqa: F401
+import modules                  # noqa: F401
+import modules.datagrip_import  # noqa: F401
+
 from app import create_app
 
 
