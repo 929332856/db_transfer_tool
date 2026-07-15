@@ -13,6 +13,10 @@ or_subs = collect_submodules('oracledb')
 ms_subs = collect_submodules('pymssql')
 redis_subs = collect_submodules('redis')
 cr_subs = collect_submodules('cryptography')  # oracle thin 模式依赖
+flask_subs = collect_submodules('flask')
+wt_subs = collect_submodules('waitress')
+wv_subs = collect_submodules('webview')
+fc_subs = collect_submodules('flask_cors')
 
 # 收集各包的数据文件（元组列表，用于 datas）
 eel_datas = collect_data_files('eel')
@@ -24,7 +28,8 @@ or_datas = collect_data_files('oracledb')
 ms_datas = collect_data_files('pymssql')
 redis_datas = collect_data_files('redis')
 
-all_hidden = eel_subs + sa_subs + py_subs + bt_subs + pg_subs + or_subs + ms_subs + redis_subs + cr_subs
+all_hidden = (eel_subs + sa_subs + py_subs + bt_subs + pg_subs + or_subs + ms_subs +
+              redis_subs + cr_subs + flask_subs + wt_subs + wv_subs + fc_subs)
 all_extra_datas = [
     ('web', 'web'),
 ] + eel_datas + sa_datas + py_datas + bt_datas + pg_datas + or_datas + ms_datas + redis_datas
@@ -37,7 +42,7 @@ elif Path('navicat_tree.json').exists():
     all_extra_datas.append(('navicat_tree.json', '.'))
 
 a = Analysis(
-    ['db_transfer_eel.py'],
+    ['main.py'],  # ★ 入口改为 main.py（Flask + PyWebView）
     pathex=[],
     binaries=[],
     datas=all_extra_datas,
