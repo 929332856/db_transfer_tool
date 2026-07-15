@@ -40,22 +40,17 @@
             return function() {
                 var args = Array.prototype.slice.call(arguments);
                 return function(callback) {
-                    // 构建请求
-                    var body = null;
-                    if (args.length === 1 && typeof args[0] === 'object' && !Array.isArray(args[0])) {
-                        body = args[0];
-                    } else if (args.length > 0) {
-                        // 多个参数包装成 dict
-                        body = {};
-                        for (var i = 0; i < args.length; i++) {
-                            body['arg' + i] = args[i];
-                        }
+                    // ★ 构建请求：多个参数 → 完整位置参数
+                    // 总是用 arg0,arg1,arg2 格式（最通用）
+                    var body = {};
+                    for (var i = 0; i < args.length; i++) {
+                        body['arg' + i] = args[i];
                     }
 
                     fetch('/api/' + prop, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
-                        body: body ? JSON.stringify(body) : '{}'
+                        body: JSON.stringify(body)
                     })
                     .then(function(r){ return r.json(); })
                     .then(function(result) {
