@@ -6833,6 +6833,14 @@ def _force_cleanup_and_exit():
     pid = os.getpid()
     import subprocess
 
+    # ★ 0: 先关闭线程池（让正在执行的 DB 线程尽快结束，避免进程等待退出）
+    global _db_thread_pool
+    if _db_thread_pool is not None:
+        try:
+            _db_thread_pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
     # ① Windows 清理
     if sys.platform == 'win32':
         # 1a: 按 PID 树递归杀子进程（PowerShell 获取正确父子关系）
@@ -6940,6 +6948,9 @@ if __name__ == "__main__":
     # ★ 启动时记录已存在的浏览器进程，退出时只杀新增的，防止误杀用户其他浏览器
     if sys.platform == 'win32':
         _record_existing_browser_pids()
+    # ★ atexit 兜底：即使 finally 没执行（如 SIGKILL 被杀），也尽力清理
+    import atexit
+    atexit.register(_force_cleanup_and_exit)
     try:
         eel.start("index.html", size=(1280, 860), port=0, cmdline_args=[])
     finally:
