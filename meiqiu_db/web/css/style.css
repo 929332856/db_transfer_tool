@@ -657,7 +657,12 @@ td.cell-with-icon:hover .text-expand-icon {
 .modal-box { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 28px; text-align: center; min-width: 360px; max-width: 520px; box-shadow: 0 8px 32px rgba(0,0,0,.5); }
 .modal-icon { font-size: 28px; margin-bottom: 2px; }
 .modal-title { font-size: 14px; font-weight: bold; margin-bottom: 4px; }
-.modal-msg { font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 14px; word-break: break-word; }
+.modal-msg {
+    font-size: 12px; color: var(--text-secondary); line-height: 1.5;
+    margin-bottom: 14px; word-break: break-word; word-wrap: break-word;
+    white-space: pre-wrap; user-select: text; cursor: text;
+    max-height: 320px; overflow-y: auto;
+}
 .modal-btns { display: flex; justify-content: center; gap: 8px; }
 
 /* 连接编辑弹窗表格 */

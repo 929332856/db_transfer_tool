@@ -18,7 +18,15 @@ function showModal(icon, title, msg, iconColor, btns) {
     $('modal_icon').textContent = icon;
     $('modal_title').textContent = title;
     $('modal_title').style.color = iconColor;
-    $('modal_msg').innerHTML = msg;
+    // ★ 用 textContent 而不是 innerHTML，确保文字可完整选中复制
+    var msgEl = $('modal_msg');
+    msgEl.textContent = '';
+    // 支持多行：按 \n 拆分成多个段落
+    var lines = String(msg).split('\n');
+    lines.forEach(function(line, idx) {
+        if (idx > 0) msgEl.appendChild(document.createElement('br'));
+        msgEl.appendChild(document.createTextNode(line));
+    });
     $('modal_btns').innerHTML = btns;
     $('modal_overlay').classList.add('show');
 }
