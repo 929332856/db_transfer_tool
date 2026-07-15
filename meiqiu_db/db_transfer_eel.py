@@ -931,8 +931,7 @@ def _with_db_timeout(func, *args, timeout=15, **kwargs):
     
     不阻塞 Eel 主线程：提交到线程池后立即返回 job_id，
     由 JS 侧轮询 poll_query_result 获取结果。
-    从根本上解决 future.result() 阻塞 bottle 单线程服务器的问题，
-    让执行慢查询期间仍能测试连接、展开数据库列表等。
+    ★ 用独立看门狗线程实现硬超时：超时后自动写入超时结果
     """
     import uuid
     job_id = str(uuid.uuid4())[:8]
@@ -943,11 +942,17 @@ def _with_db_timeout(func, *args, timeout=15, **kwargs):
             result = func(*args, **kwargs)
         except Exception as e:
             result = {"ok": False, "msg": str(e)}
-        # 只有当前 job 还未被 cancel 时才写入结果
-        if job_id in _query_jobs:
+        # 只有当前 job 还未被 cancel/超时 时才写入结果
+        if job_id in _query_jobs and _query_jobs[job_id] is None:
             _query_jobs[job_id] = result
 
     _get_db_thread_pool().submit(_run)
+    # ★ 看门狗线程：独立计时，超时后写入超时结果（不阻塞 Eel 主线程）
+    def _watchdog():
+        time.sleep(timeout + 2)
+        if job_id in _query_jobs and _query_jobs[job_id] is None:
+            _query_jobs[job_id] = {"ok": False, "msg": f"操作超时（{timeout}秒）"}
+    threading.Thread(target=_watchdog, daemon=True, name=f"wd_{job_id}").start()
     return {"ok": True, "_async": True, "_job_id": job_id}
 
 # ==================== 表操作 ====================
@@ -6866,17 +6871,6 @@ def _force_cleanup_and_exit():
         # 1b: 按名称杀启动后新增的浏览器进程（兜底：PID 树可能因 PyInstaller 而断裂）
         _kill_new_browser_processes()
 
-        # ★ 1b2: 额外按名称杀所有可能残留的浏览器子进程
-        for bname in ['chrome.exe', 'msedge.exe', 'chromium.exe']:
-            try:
-                subprocess.run(
-                    ['taskkill', '/F', '/IM', bname],
-                    capture_output=True, timeout=3,
-                    creationflags=0x08000000
-                )
-            except Exception:
-                pass
-
         # 1c: taskkill /F /T 杀当前进程整棵树
         try:
             subprocess.run(
@@ -6968,29 +6962,7 @@ if __name__ == "__main__":
     import atexit
     atexit.register(_force_cleanup_and_exit)
 
-    # ★ 使用 chrome-app 模式（独立窗口，更像桌面应用）
-    # ★ close_callback：浏览器窗口关闭时立即触发清理，防止进程残留
-    def _on_close(page, sockets):
-        print("[main] 窗口关闭，开始清理...")
-        _force_cleanup_and_exit()
-
     try:
-        eel.start(
-            "index.html",
-            size=(1280, 860),
-            port=0,
-            mode='chrome-app',
-            close_callback=_on_close,
-            cmdline_args=[
-                '--disable-extensions',
-                '--disable-plugins',
-                '--disable-background-networking',
-                '--no-first-run',
-                '--no-default-browser-check',
-                '--disable-sync',
-                '--disable-translate',
-                '--disable-features=TranslateUI',
-            ]
-        )
+        eel.start("index.html", size=(1280, 860), port=0, cmdline_args=[])
     finally:
         _force_cleanup_and_exit()
