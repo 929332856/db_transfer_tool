@@ -388,7 +388,11 @@ textarea { resize: vertical; min-height: 80px; font-size: 12px; line-height: 1.5
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn-import { padding: 6px 12px; }
 .btn-row { display: flex; gap: 6px; align-items: center; margin-top: 2px; }
-.test-status { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.test-status {
+    font-size: 11px; white-space: normal; overflow: visible;
+    flex: 1; min-width: 0; user-select: text; cursor: text;
+    word-break: break-all;
+}
 
 /* ========== 下拉/进度/表格/日志 ========== */
 .dropdown { position: relative; }
