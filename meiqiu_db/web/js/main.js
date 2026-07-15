@@ -861,6 +861,7 @@ function slowQueryConnect() {
     if (!data) return;
     _sqConnData = data;
     _sqConnName = data._name || '';
+    _sqConnected = false;
 
     var statusEl = $('sq_test_status');
     statusEl.style.color = '#f39c12';
@@ -868,7 +869,8 @@ function slowQueryConnect() {
     $('sq_conn_status').textContent = '连接中...';
     $('sq_conn_status').style.color = '#f39c12';
 
-    eel.test_connection(data, 'src')(function(res) {
+    // ★ 改用 tree_test_conn（支持多数据库类型 + 异步线程池，不阻塞 Eel）
+    _eelAutoAsync(eel.tree_test_conn(data), function(res) {
         if (res && res.ok) {
             _sqConnected = true;
             statusEl.style.color = '#2ecc71';
@@ -900,6 +902,13 @@ function slowQueryConnect() {
             $('sq_conn_status').textContent = '连接失败';
             $('sq_conn_status').style.color = '#e74c3c';
         }
+    }, 20000, function() {
+        // 超时回调
+        _sqConnected = false;
+        statusEl.style.color = '#e74c3c';
+        statusEl.textContent = '⏱ 连接超时（20秒）';
+        $('sq_conn_status').textContent = '连接超时';
+        $('sq_conn_status').style.color = '#e74c3c';
     });
 }
 
@@ -916,7 +925,8 @@ function slowQueryTestConn() {
     var statusEl = $('sq_test_status');
     statusEl.style.color = '#f39c12';
     statusEl.textContent = '测试中...';
-    eel.test_connection(data, 'src')(function(res) {
+    // ★ 改用 tree_test_conn（支持多数据库类型 + 异步）
+    _eelAutoAsync(eel.tree_test_conn(data), function(res) {
         if (res && res.ok) {
             statusEl.style.color = '#2ecc71';
             statusEl.textContent = '✅ ' + res.msg;
@@ -924,6 +934,9 @@ function slowQueryTestConn() {
             statusEl.style.color = '#e74c3c';
             statusEl.textContent = '❌ ' + (res ? res.msg : '失败');
         }
+    }, 20000, function() {
+        statusEl.style.color = '#e74c3c';
+        statusEl.textContent = '⏱ 连接超时（20秒）';
     });
 }
 
