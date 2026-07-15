@@ -1596,18 +1596,21 @@ function _drawLineChart(canvasId, series, labels, colors, unit) {
     var ml = 45, mr = 12, mt = 10, mb = 22;
     var plotW = w - ml - mr, plotH = h - mt - mb;
 
-    // 找全局最大值（多系列取 max）
+    // 找全局最大值（多系列取 max），但只取最近窗口（避免极老尖峰压扁 Y 轴）
+    // 取每个系列最后 20 个点的最大值（≈最近 100s 范围，5s 间隔）
     var maxV = 0.1, allEmpty = true;
     for (var s = 0; s < series.length; s++) {
-        for (var i = 0; i < series[s].length; i++) {
-            if (series[s][i] > 0) allEmpty = false;
-            if (series[s][i] > maxV) maxV = series[s][i];
+        var data = series[s];
+        var win = Math.min(data.length, 20);
+        for (var i = data.length - win; i < data.length; i++) {
+            if (i < 0) continue;
+            if (data[i] > 0) allEmpty = false;
+            if (data[i] > maxV) maxV = data[i];
         }
     }
     if (allEmpty) maxV = 1;
-    // 留 15% 头部空间
+    // 留 15% 顶部空间
     maxV = maxV * 1.15;
-    // 如果 maxV 太小，向上取整到合适的数量级
     if (maxV < 1) maxV = 1;
 
     // 网格 + Y 轴
@@ -1645,27 +1648,37 @@ function _drawLineChart(canvasId, series, labels, colors, unit) {
         var data = series[s];
         if (data.length < 2) continue;
         var color = colors[s];
-        // 填充区
-        ctx.beginPath();
-        ctx.moveTo(ml, mt + plotH);
+        // 计算每个数据点的 x,y 坐标（避免在循环里重复算）
+        var pts = [];
         for (var i = 0; i < data.length; i++) {
             var x = ml + plotW * (i / (DASH_MAX_POINTS - 1));
-            var y = mt + plotH * (1 - data[i] / maxV);
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            // 钳制 y 在画布范围内（避免 maxV 估算过小导致 y 越界）
+            var ratio = data[i] / maxV;
+            if (ratio > 1) ratio = 1;
+            if (ratio < 0) ratio = 0;
+            var y = mt + plotH * (1 - ratio);
+            pts.push({x: x, y: y, v: data[i]});
         }
-        ctx.lineTo(ml + plotW * ((data.length - 1) / (DASH_MAX_POINTS - 1)), mt + plotH);
-        ctx.closePath();
-        ctx.fillStyle = color + '22';  // 13% 透明
-        ctx.fill();
+        // 填充区（仅在有非零值时填充，否则只画折线）
+        var hasNonZero = false;
+        for (var k = 0; k < data.length; k++) { if (data[k] > 0) { hasNonZero = true; break; } }
+        if (hasNonZero) {
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, mt + plotH);
+            for (var i = 0; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+            ctx.lineTo(pts[pts.length - 1].x, mt + plotH);
+            ctx.closePath();
+            ctx.fillStyle = color + '22';  // ~13% 透明
+            ctx.fill();
+        }
         // 折线
         ctx.beginPath();
-        for (var i = 0; i < data.length; i++) {
-            var x = ml + plotW * (i / (DASH_MAX_POINTS - 1));
-            var y = mt + plotH * (1 - data[i] / maxV);
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
         ctx.strokeStyle = color;
         ctx.lineWidth = 1.6;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
         ctx.stroke();
     }
     // 图例（在画布上方）
