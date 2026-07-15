@@ -1,5 +1,6 @@
 """
 配置管理、数据库操作日志、ProfileManager
+★ 日志函数统一从 db_transfer_eel 导入，避免重复初始化
 """
 import eel
 import re
@@ -22,43 +23,26 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILES_FILE = os.path.join(BASE_DIR, "db_profiles.json")
 
-# ==================== 数据库操作日志 ====================
-import logging
-
-_LOG_FILE = os.path.join(BASE_DIR, "db_operation.log")
-
-_db_op_logger = logging.getLogger("db_operation")
-_db_op_logger.setLevel(logging.INFO)
-_db_op_logger.propagate = False
-
-if not _db_op_logger.handlers:
-    _handler = logging.FileHandler(_LOG_FILE, encoding="utf-8")
-    _handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
-    _db_op_logger.addHandler(_handler)
-
-
-def _log_db_select(sql: str):
-    """记录查询 SQL"""
-    _db_op_logger.info(f"[SELECT] {sql}")
-
-
-def _log_db_insert(sql: str):
-    """记录新增 SQL"""
-    _db_op_logger.info(f"[INSERT] {sql}")
-
-
-def _log_db_update(sql: str, rollback_sql: str = ""):
-    """记录修改 SQL + 回退 SQL"""
-    _db_op_logger.info(f"[UPDATE] {sql}")
-    if rollback_sql:
-        _db_op_logger.info(f"[ROLLBACK] {rollback_sql}")
-
-
-def _log_db_delete(sql: str, rollback_sql: str = ""):
-    """记录删除 SQL + 回退 SQL"""
-    _db_op_logger.info(f"[DELETE] {sql}")
-    if rollback_sql:
-        _db_op_logger.info(f"[ROLLBACK] {rollback_sql}")
+# ★ 日志函数和工具函数：从主模块导入（主模块已初始化 logs/ 目录和按日期轮转的 logger）
+try:
+    from db_transfer_eel import (_log_db_select, _log_db_insert, _log_db_update, _log_db_delete,
+                                 _log_db_error, _db_op_logger, _sql_value, _safe_ident)
+except ImportError:
+    # 兼容独立运行（如测试），回退到简单 console 日志
+    import logging
+    _db_op_logger = logging.getLogger("db_operation")
+    _db_op_logger.setLevel(logging.INFO)
+    if not _db_op_logger.handlers:
+        _db_op_logger.addHandler(logging.StreamHandler())
+    def _log_db_select(sql: str): _db_op_logger.info(f"[SELECT] {sql}")
+    def _log_db_insert(sql: str): _db_op_logger.info(f"[INSERT] {sql}")
+    def _log_db_update(sql: str, rollback_sql: str = ""):
+        _db_op_logger.info(f"[UPDATE] {sql}")
+        if rollback_sql: _db_op_logger.info(f"[ROLLBACK] {rollback_sql}")
+    def _log_db_delete(sql: str, rollback_sql: str = ""):
+        _db_op_logger.info(f"[DELETE] {sql}")
+        if rollback_sql: _db_op_logger.info(f"[ROLLBACK] {rollback_sql}")
+    def _log_db_error(label: str, msg: str): _db_op_logger.warning(f"[{label}] {msg}")
 
 
 def _gen_rollback_update(tbl: str, db_type: str, columns: list, orig_row: list, where_cols: list = None):

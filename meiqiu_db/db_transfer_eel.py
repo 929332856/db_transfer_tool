@@ -42,19 +42,47 @@ else:
 PROFILES_FILE = os.path.join(BASE_DIR, "db_profiles.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
-# ==================== 数据库操作日志 ====================
+# ==================== 数据库操作日志（logs/ 目录，按日期分文件） ====================
 import logging
 
-_LOG_FILE = os.path.join(BASE_DIR, "db_operation.log")
+_LOG_BASE_DIR = os.path.join(BASE_DIR, "logs")
+_LOG_OP_DIR   = os.path.join(_LOG_BASE_DIR, "db_operations")
+_LOG_RB_DIR   = os.path.join(_LOG_BASE_DIR, "rollback")
+os.makedirs(_LOG_OP_DIR, exist_ok=True)
+os.makedirs(_LOG_RB_DIR, exist_ok=True)
 
-_db_op_logger = logging.getLogger("db_operation")
-_db_op_logger.setLevel(logging.INFO)
-_db_op_logger.propagate = False
+# 统一的日志格式
+_log_fmt = logging.Formatter('%(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-if not _db_op_logger.handlers:
-    _handler = logging.FileHandler(_LOG_FILE, encoding="utf-8")
-    _handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
-    _db_op_logger.addHandler(_handler)
+def _init_logger(name, dir_path, suffix):
+    """创建按天轮转的日志 logger，文件名: 2026-07-15_<suffix>.log"""
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    # 每次检查：如果 handler 的 baseFilename 已经过时（跨天），则清空重建
+    if logger.handlers:
+        h = logger.handlers[0]
+        if hasattr(h, 'baseFilename') and os.path.exists(h.baseFilename):
+            return logger  # 当前 handler 有效，复用
+        # 跨天了，移除旧 handler
+        for old_h in list(logger.handlers):
+            old_h.close()
+            logger.removeHandler(old_h)
+    # 创建新 handler，文件命名: 2026-07-15_op.log / 2026-07-15_rb.log
+    today = datetime.now().strftime("%Y-%m-%d")
+    log_file = os.path.join(dir_path, f"{today}_{suffix}.log")
+    handler = logging.FileHandler(log_file, encoding="utf-8")
+    handler.setFormatter(_log_fmt)
+    logger.addHandler(handler)
+    return logger
+
+# 三个独立 logger
+_db_op_logger = _init_logger("db_op",        _LOG_OP_DIR, "op")  # 数据库操作 + 错误
+_db_rb_logger = _init_logger("db_rollback",  _LOG_RB_DIR, "rb")  # 回滚 SQL
+_db_err_logger = _init_logger("db_error",    _LOG_OP_DIR, "err") # 操作错误（WARNING 级别）
+
+# ★ 将 _db_op_logger 作为主 logger 暴露给 modules/ 使用（保持向后兼容）
+# modules/config_state.py 会导入这个 logger
 
 
 def _log_db_select(sql: str):
@@ -68,17 +96,22 @@ def _log_db_insert(sql: str):
 
 
 def _log_db_update(sql: str, rollback_sql: str = ""):
-    """记录修改 SQL + 回退 SQL"""
+    """记录修改 SQL + 回退 SQL（回退 SQL 单独写入 rollback 日志）"""
     _db_op_logger.info(f"[UPDATE] {sql}")
     if rollback_sql:
-        _db_op_logger.info(f"[ROLLBACK] {rollback_sql}")
+        _db_rb_logger.info(f"[ROLLBACK] {rollback_sql}")
 
 
 def _log_db_delete(sql: str, rollback_sql: str = ""):
-    """记录删除 SQL + 回退 SQL"""
+    """记录删除 SQL + 回退 SQL（回退 SQL 单独写入 rollback 日志）"""
     _db_op_logger.info(f"[DELETE] {sql}")
     if rollback_sql:
-        _db_op_logger.info(f"[ROLLBACK] {rollback_sql}")
+        _db_rb_logger.info(f"[ROLLBACK] {rollback_sql}")
+
+
+def _log_db_error(label: str, msg: str):
+    """记录数据库操作错误"""
+    _db_err_logger.warning(f"[{label}] {msg}")
 
 
 def _gen_rollback_update(tbl: str, db_type: str, columns: list, orig_row: list, where_cols: list = None):
