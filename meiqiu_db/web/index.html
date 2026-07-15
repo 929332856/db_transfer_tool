@@ -8,14 +8,8 @@
     <!-- ★ 同步读取 localStorage 主题，必须在 CSS 加载前执行防止闪烁 -->
     <script>if(localStorage.getItem('mqdb_theme')==='light')document.documentElement.classList.add('light-theme')</script>
     <link rel="stylesheet" href="css/style.css">
-    <script type="text/javascript" src="/eel.js"></script>
-    <script type="text/javascript">
-        if (typeof eel === 'undefined') {
-            var s = document.createElement('script');
-            s.src = 'js/eel.js';
-            document.head.appendChild(s);
-        }
-    </script>
+    <!-- ★ Flask 适配层：替代 Eel，eel.xxx()(callback) → fetch() -->
+    <script src="js/eel_adapter.js"></script>
     <script></script>
 </head>
 <body>
