@@ -7,7 +7,12 @@ import sys, os, json, threading, time, re
 from functools import wraps
 from flask import request, jsonify
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# ★ 兼容 PyInstaller：sys._MEIPASS 是临时解压目录
+if getattr(sys, 'frozen', False):
+    BASE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, BASE_DIR)
 
 
 def async_route(timeout=15):

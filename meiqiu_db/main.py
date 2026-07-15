@@ -7,13 +7,17 @@ MQDB 主入口（Flask + PyWebView）
 import sys, os, threading, socket, time
 
 if getattr(sys, 'frozen', False):
-    # PyInstaller 打包
+    # PyInstaller 打包：exe 所在目录放用户数据，_MEIPASS 放源码
     BASE_DIR = os.path.dirname(sys.executable)
+    SRC_DIR = sys._MEIPASS
+    os.chdir(BASE_DIR)
+    sys.path.insert(0, SRC_DIR)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    SRC_DIR = BASE_DIR
+    os.chdir(BASE_DIR)
 
-os.chdir(BASE_DIR)
-sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, SRC_DIR)
 
 from app import create_app
 

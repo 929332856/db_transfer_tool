@@ -8,8 +8,11 @@ import os, sys, json, threading, time
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
-# 路径设置
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ★ 路径设置（兼容 PyInstaller）
+if getattr(sys, 'frozen', False):
+    BASE_DIR = sys._MEIPASS
+else:
+    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR  = os.path.join(BASE_DIR, "web")
 
 def create_app():

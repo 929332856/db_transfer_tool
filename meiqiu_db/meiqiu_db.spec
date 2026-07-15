@@ -29,9 +29,14 @@ ms_datas = collect_data_files('pymssql')
 redis_datas = collect_data_files('redis')
 
 all_hidden = (eel_subs + sa_subs + py_subs + bt_subs + pg_subs + or_subs + ms_subs +
-              redis_subs + cr_subs + flask_subs + wt_subs + wv_subs + fc_subs)
+              redis_subs + cr_subs + flask_subs + wt_subs + wv_subs + fc_subs +
+              ['db_transfer_eel', 'modules', 'modules.config_state', 'modules.table_ops',
+               'modules.table_design', 'modules.transfer_engine', 'modules.export_import',
+               'modules.db_manage', 'modules.redis_ops', 'modules.datagrip_import',
+               'modules.tree_manager'])
 all_extra_datas = [
     ('web', 'web'),
+    ('app', 'app'),
 ] + eel_datas + sa_datas + py_datas + bt_datas + pg_datas + or_datas + ms_datas + redis_datas
 
 if Path('db_profiles.json').exists():
