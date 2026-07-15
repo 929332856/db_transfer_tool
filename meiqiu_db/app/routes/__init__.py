@@ -76,9 +76,26 @@ def _resolve_args(func, data):
     sig = inspect.signature(func)
     param_names = list(sig.parameters.keys())
 
+    # 检查参数是否有默认值
+    params = list(sig.parameters.values())
+    has_defaults = any(p.default is not inspect.Parameter.empty for p in params)
+
     if not param_names:
+        # 无参函数
         return func()
     elif len(param_names) == 1:
+        # 单参数函数
+        p1 = params[0]
+        # 如果 data 为空且参数有默认值，直接调用
+        if not data and p1.default is not inspect.Parameter.empty:
+            return func()
+        # 如果 data 是空 dict 但参数必填，尝试 func()
+        if not data:
+            try:
+                return func()
+            except TypeError:
+                pass
+        # 正常调用
         try:
             return func(data)
         except TypeError:
@@ -87,6 +104,7 @@ def _resolve_args(func, data):
             except TypeError:
                 return func()
     else:
+        # 多参数函数
         try:
             return func(**data)
         except TypeError:
