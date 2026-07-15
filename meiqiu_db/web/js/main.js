@@ -234,7 +234,8 @@ function testConnection(side, prefix) {
     }
     setTestStatus(statusEl, '⏳ 测试中...', '#f39c12');
 
-    eel.test_connection(data, side)(function (result) {
+    // ★ 改用异步模式，不阻塞 Eel 主线程，互不影响
+    _eelAutoAsync(eel.test_connection(data, side), function (result) {
         if (!result) {
             setTestStatus(statusEl, '❌ 无响应', '#e74c3c');
             return;
@@ -244,6 +245,8 @@ function testConnection(side, prefix) {
         } else {
             setTestStatus(statusEl, '❌ ' + result.msg, '#e74c3c');
         }
+    }, 20000, function() {
+        setTestStatus(statusEl, '⏱ 连接超时（20秒）', '#e74c3c');
     });
 }
 

@@ -316,19 +316,15 @@ function selectConnColor(el, val) {
     if (colorInput) colorInput.value = val || '';
 }
 function hideConnDlg() { document.getElementById('conn_modal_overlay').classList.remove('show'); }
-var _connTesting = false;
 function connTest() {
     var c = readConnForm(); var st = document.getElementById('cf_test');
     if (!c.host||!c.user) { st.textContent='⚠️ 填主机和用户名'; st.style.color='#f39c12'; return; }
-    if (_connTesting) { st.textContent='⏳ 正在测试...'; st.style.color='#f39c12'; return; }
-    _connTesting = true;
+    // ★ 移除全局锁 _connTesting，允许多连接并发测试
     st.textContent='⏳'; st.style.color='#f39c12';
     _eelAutoAsync(eel.tree_test_conn(c), function(r){
-        _connTesting = false;
         if(r&&r.ok){st.textContent='✅ '+r.msg;st.style.color='#2ecc71';}
         else{st.textContent='❌ '+(r?r.msg:'失败');st.style.color='#e74c3c';}
     }, 20000, function() {
-        _connTesting = false;
         st.textContent='⏱ 连接超时（20秒）'; st.style.color='#e74c3c';
     });
 }

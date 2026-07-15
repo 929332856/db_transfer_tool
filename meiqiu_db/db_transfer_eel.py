@@ -493,46 +493,23 @@ def find_profile(name: str):
 
 @eel.expose
 def test_connection(data: dict, side: str):
-    """测试连接"""
+    """测试连接（同步兼容接口，内部调用 tree_test_conn）
+    ★ 改用异步线程池，不再阻塞 Eel 主线程
+    """
     try:
-        if side == "src":
-            src_db = data.get('src_db', '').strip()
-            if src_db:
-                url = (f"mysql+mysqldb://{quote_plus(data['src_user'])}:"
-                       f"{quote_plus(data['src_pwd'])}@{data['src_host']}:"
-                       f"{data['src_port']}/{src_db}?charset=utf8mb4")
-            else:
-                # 不指定数据库，仅测试服务器连通性
-                url = (f"mysql+mysqldb://{quote_plus(data['src_user'])}:"
-                       f"{quote_plus(data['src_pwd'])}@{data['src_host']}:"
-                       f"{data['src_port']}/?charset=utf8mb4")
-            label = "源库"
-            engine = create_engine(url, connect_args=_connect_args("mysql", timeout=5))
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            engine.dispose()
-            return {"ok": True, "msg": f"{label}连接成功！"}
-        else:
-            # 目标库：先连服务器，再检查数据库是否存在
-            label = "目标库"
-            url_no_db = (f"mysql+mysqldb://{quote_plus(data['dst_user'])}:"
-                         f"{quote_plus(data['dst_pwd'])}@{data['dst_host']}:"
-                         f"{data['dst_port']}?charset=utf8mb4")
-            engine = create_engine(url_no_db, connect_args=_connect_args("mysql", timeout=5))
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-                db_name = data.get('dst_db', '').strip()
-                if db_name:
-                    result = conn.execute(
-                        text(f"SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA "
-                             f"WHERE SCHEMA_NAME = :db"), {"db": db_name}
-                    )
-                    if not result.fetchone():
-                        engine.dispose()
-                        return {"ok": False,
-                                "msg": f"服务器可连接，但数据库 [{db_name}] 不存在"}
-            engine.dispose()
-            return {"ok": True, "msg": f"{label}连接成功！"}
+        prefix = "src_" if side == "src" else "dst_"
+        label = "源库" if side == "src" else "目标库"
+        conn_data = {
+            'user': data.get(f'{prefix}user', ''),
+            'pwd':  data.get(f'{prefix}pwd', ''),
+            'host': data.get(f'{prefix}host', ''),
+            'port': data.get(f'{prefix}port', '3306'),
+            'db':   data.get(f'{prefix}db', ''),
+            'db_type': 'mysql',
+        }
+        if not conn_data['host'] or not conn_data['user']:
+            return {"ok": False, "msg": f"{label}连接信息不完整"}
+        return tree_test_conn(conn_data)
     except Exception as e:
         return {"ok": False, "msg": f"{label}连接失败: {str(e)}"}
 
