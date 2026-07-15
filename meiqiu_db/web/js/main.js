@@ -867,10 +867,10 @@ function slowQueryConnect() {
     _sqConnName = data._name || '';
     _sqConnected = false;
 
-    // ★ 每次连接递增 token，旧连接的回调自动失效（防止旧连接结果覆盖新连接状态）
+    // ★ 每次连接递增 token，旧连接的回调自动失效
     _sqConnToken++;
     var myToken = _sqConnToken;
-    var myCid = cid;  // 闭包记住本次连接的 cid
+    var myCid = cid;
 
     var statusEl = $('sq_test_status');
     statusEl.style.color = '#f39c12';
@@ -878,54 +878,66 @@ function slowQueryConnect() {
     $('sq_conn_status').textContent = '连接中...';
     $('sq_conn_status').style.color = '#f39c12';
 
-    // ★ 改用 tree_test_conn（支持多数据库类型 + 异步线程池，不阻塞 Eel）
-    _eelAutoAsync(eel.tree_test_conn(data), function(res) {
-        // ★ 已被更新的连接替代，跳过旧结果
-        if (myToken !== _sqConnToken) return;
-        // ★ 连接切换了（用户改了 dropdown），也不更新当前 UI
-        if (myCid !== $('sq_conn_sel').value) return;
-        if (res && res.ok) {
-            _sqConnected = true;
-            statusEl.style.color = '#2ecc71';
-            statusEl.textContent = '✅ ' + res.msg;
-            $('sq_conn_status').textContent = '✅ 已连接 (' + _sqConnName + ')';
-            $('sq_conn_status').style.color = '#2ecc71';
-            $('sq_btn_conn').textContent = '已连接';
-
-            // 检查慢查询状态
-            eel.slow_query_check_enabled(data)(function(s) {
-                if (myToken !== _sqConnToken) return;  // ★ token 检查
-                updateSqStatusBadge(s);
-            });
-            // 重置排序并自动刷新慢SQL列表
-            _sqSortKey = null;
-            _sqSortDir = 'desc';
-            document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
-            slowQueryRefresh();
-            // ★ 如果当前在仪表盘tab，连接成功后自动刷新并启动定时器
-            if (typeof _dashSubtab !== 'undefined' && _dashSubtab === 'dash') {
-                _dashPrev = null; _dashPrevTime = 0;
-                for (var k in _dashHistory) _dashHistory[k] = [];
-                dashboardRefresh();
-                changeDashInterval();
+    // ★ 直接用 Eel 原生异步调用（_with_db_timeout 返回 _async 后由看门狗线程兜底）
+    eel.tree_test_conn(data)(function(resp) {
+        // 如果是异步模式，轮询 job_id
+        if (resp && resp._async && resp._job_id) {
+            var jobId = resp._job_id;
+            var startTime = Date.now();
+            function poll() {
+                if (myToken !== _sqConnToken || myCid !== $('sq_conn_sel').value) return; // 已切换
+                if (Date.now() - startTime > 20000) {
+                    _onConnResult(myToken, myCid, statusEl, data, {"ok": false, "msg": "操作超时（20秒）"});
+                    return;
+                }
+                eel.poll_query_result(jobId)(function(result) {
+                    if (myToken !== _sqConnToken || myCid !== $('sq_conn_sel').value) return;
+                    if (result && result._pending) {
+                        setTimeout(poll, 200);
+                    } else {
+                        _onConnResult(myToken, myCid, statusEl, data, result);
+                    }
+                });
             }
+            poll();
         } else {
-            _sqConnected = false;
-            statusEl.style.color = '#e74c3c';
-            statusEl.textContent = '❌ ' + (res ? res.msg : '连接失败');
-            $('sq_conn_status').textContent = '连接失败';
-            $('sq_conn_status').style.color = '#e74c3c';
+            _onConnResult(myToken, myCid, statusEl, data, resp);
         }
-    }, 20000, function() {
-        // 超时回调
-        if (myToken !== _sqConnToken) return;
-        if (myCid !== $('sq_conn_sel').value) return;
+    });
+}
+
+/** 处理连接测试结果（独立函数，避免闭包嵌套过深） */
+function _onConnResult(myToken, myCid, statusEl, data, res) {
+    if (myToken !== _sqConnToken) return;
+    if (myCid !== $('sq_conn_sel').value) return;
+    if (res && res.ok) {
+        _sqConnected = true;
+        statusEl.style.color = '#2ecc71';
+        statusEl.textContent = '✅ ' + res.msg;
+        $('sq_conn_status').textContent = '✅ 已连接 (' + _sqConnName + ')';
+        $('sq_conn_status').style.color = '#2ecc71';
+        $('sq_btn_conn').textContent = '已连接';
+
+        eel.slow_query_check_enabled(data)(function(s) {
+            if (myToken !== _sqConnToken) return;
+            updateSqStatusBadge(s);
+        });
+        _sqSortKey = null; _sqSortDir = 'desc';
+        document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
+        slowQueryRefresh();
+        if (typeof _dashSubtab !== 'undefined' && _dashSubtab === 'dash') {
+            _dashPrev = null; _dashPrevTime = 0;
+            for (var k in _dashHistory) _dashHistory[k] = [];
+            dashboardRefresh();
+            changeDashInterval();
+        }
+    } else {
         _sqConnected = false;
         statusEl.style.color = '#e74c3c';
-        statusEl.textContent = '⏱ 连接超时（20秒）';
-        $('sq_conn_status').textContent = '连接超时';
+        statusEl.textContent = '❌ ' + (res ? res.msg : '连接失败');
+        $('sq_conn_status').textContent = '连接失败';
         $('sq_conn_status').style.color = '#e74c3c';
-    });
+    }
 }
 
 /** 测试连接按钮 */

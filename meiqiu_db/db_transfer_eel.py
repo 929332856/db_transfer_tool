@@ -929,9 +929,9 @@ def _get_db_thread_pool():
 def _with_db_timeout(func, *args, timeout=15, **kwargs):
     """在独立 OS 线程中执行数据库操作（异步非阻塞模式）。
     
-    不阻塞 Eel 主线程：提交到线程池后立即返回 job_id，
-    由 JS 侧轮询 poll_query_result 获取结果。
-    ★ 用独立看门狗线程实现硬超时：超时后自动写入超时结果
+    立即返回 job_id，实际工作在独立线程中执行。
+    JS 侧轮询 poll_query_result 获取结果。
+    看门狗线程确保任务不会永久卡住。
     """
     import uuid
     job_id = str(uuid.uuid4())[:8]
@@ -942,14 +942,13 @@ def _with_db_timeout(func, *args, timeout=15, **kwargs):
             result = func(*args, **kwargs)
         except Exception as e:
             result = {"ok": False, "msg": str(e)}
-        # 只有当前 job 还未被 cancel/超时 时才写入结果
         if job_id in _query_jobs and _query_jobs[job_id] is None:
             _query_jobs[job_id] = result
 
     _get_db_thread_pool().submit(_run)
-    # ★ 看门狗线程：独立计时，超时后写入超时结果（不阻塞 Eel 主线程）
+    # 看门狗：timeout+5 秒后强制写入超时
     def _watchdog():
-        time.sleep(timeout + 2)
+        time.sleep(timeout + 5)
         if job_id in _query_jobs and _query_jobs[job_id] is None:
             _query_jobs[job_id] = {"ok": False, "msg": f"操作超时（{timeout}秒）"}
     threading.Thread(target=_watchdog, daemon=True, name=f"wd_{job_id}").start()
