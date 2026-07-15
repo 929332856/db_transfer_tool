@@ -64,7 +64,7 @@ ASYNC_FUNCTIONS = {
 
 
 def _make_route_handler(func, func_name):
-    """为 eel 函数创建 Flask 路由处理器（自动参数匹配）"""
+    """为 eel 函数创建 Flask 路由处理器（智能参数匹配）"""
     import inspect
     sig = inspect.signature(func)
     param_names = list(sig.parameters.keys())
@@ -78,32 +78,31 @@ def _make_route_handler(func, func_name):
                 if k not in data:
                     data[k] = v
 
-            # 参数匹配策略
-            if len(param_names) == 1:
-                # 单参数函数：整个 data dict 传入
-                result = func(data)
-            elif len(param_names) == 2:
-                # 双参数函数：尝试 data + 第二个参数
-                p2 = param_names[1]
-                if p2 in data:
-                    result = func(data, data[p2])
-                else:
-                    result = func(data, '')
-            else:
-                # 多参数函数：按参数名匹配
-                kwargs = {}
-                for name in param_names:
-                    if name in data:
-                        kwargs[name] = data[name]
-                    elif name == 'self':
-                        continue
-                if kwargs:
-                    try:
-                        result = func(**kwargs)
-                    except TypeError:
-                        result = func(data)
-                else:
+            # ★ 多策略调用：依次尝试匹配函数签名
+            if not param_names:
+                # 无参函数
+                result = func()
+            elif len(param_names) == 1:
+                # 单参数函数：尝试 func(data) 或 func(**data)
+                try:
                     result = func(data)
+                except TypeError:
+                    try:
+                        result = func(**data)
+                    except TypeError:
+                        result = func()
+            else:
+                # 多参数函数：尝试 func(**data)，失败则 func(data)
+                try:
+                    result = func(**data)
+                except TypeError:
+                    # 可能是 (data, side) 模式
+                    if len(param_names) == 2:
+                        p2 = param_names[1]
+                        side_val = data.get(p2, data.get('side', ''))
+                        result = func(data, side_val)
+                    else:
+                        result = func(data)
 
             return jsonify(result)
         except Exception as e:
