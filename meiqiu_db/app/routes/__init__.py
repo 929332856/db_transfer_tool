@@ -178,43 +178,44 @@ def register_routes(app):
         route_path = f'/api/{func_name}'
 
         if func_name in ASYNC_FUNCTIONS:
-            # ★ 异步函数：wrapper 内解析参数并提交线程任务
-            fn = func  # 捕获引用
-            @wraps(fn)
-            def async_handler():
-                import uuid
-                from flask import current_app
-                # 在请求上下文中解析参数
-                data = request.get_json(force=True, silent=True) or {}
-                for k, v in request.args.items():
-                    if k not in data:
-                        data[k] = v
-                # 创建 job（用完整 UUID 避免冲突）
-                job_id = str(uuid.uuid4())
-                app = current_app._get_current_object()
-                jobs = app.config['ASYNC_JOBS']
-                with app.config['ASYNC_LOCK']:
-                    jobs[job_id] = None
-                # 线程中执行（不访问 request）
-                def _run():
-                    with app.app_context():
-                        try:
-                            result = _resolve_args(fn, data)
-                        except Exception as e:
-                            result = {"ok": False, "msg": str(e)}
-                        with app.config['ASYNC_LOCK']:
-                            if job_id in jobs and jobs[job_id] is None:
-                                jobs[job_id] = result
-                def _watchdog():
-                    time.sleep(20)  # timeout+5
-                    with app.app_context():
-                        with app.config['ASYNC_LOCK']:
-                            if job_id in jobs and jobs[job_id] is None:
-                                jobs[job_id] = {"ok": False, "msg": "操作超时（15秒）"}
-                threading.Thread(target=_run, daemon=True).start()
-                threading.Thread(target=_watchdog, daemon=True).start()
-                return jsonify({"ok": True, "_async": True, "_job_id": job_id})
-            handler = async_handler
+            # ★ 异步函数：用工厂函数创建 handler（避免闭包延迟绑定）
+            def _make_async_handler(fn, fname):
+                @wraps(fn)
+                def async_handler():
+                    import uuid
+                    from flask import current_app
+                    # 在请求上下文中解析参数
+                    data = request.get_json(force=True, silent=True) or {}
+                    for k, v in request.args.items():
+                        if k not in data:
+                            data[k] = v
+                    # 创建 job（用完整 UUID 避免冲突）
+                    job_id = str(uuid.uuid4())
+                    app = current_app._get_current_object()
+                    jobs = app.config['ASYNC_JOBS']
+                    with app.config['ASYNC_LOCK']:
+                        jobs[job_id] = None
+                    # 线程中执行（不访问 request）
+                    def _run():
+                        with app.app_context():
+                            try:
+                                result = _resolve_args(fn, data)
+                            except Exception as e:
+                                result = {"ok": False, "msg": str(e)}
+                            with app.config['ASYNC_LOCK']:
+                                if job_id in jobs and jobs[job_id] is None:
+                                    jobs[job_id] = result
+                    def _watchdog():
+                        time.sleep(20)  # timeout+5
+                        with app.app_context():
+                            with app.config['ASYNC_LOCK']:
+                                if job_id in jobs and jobs[job_id] is None:
+                                    jobs[job_id] = {"ok": False, "msg": "操作超时（15秒）"}
+                    threading.Thread(target=_run, daemon=True).start()
+                    threading.Thread(target=_watchdog, daemon=True).start()
+                    return jsonify({"ok": True, "_async": True, "_job_id": job_id})
+                return async_handler
+            handler = _make_async_handler(func, func_name)
         else:
             handler = _make_route_handler(func, func_name)
 

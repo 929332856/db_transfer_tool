@@ -862,8 +862,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 }
                 var sql = r.sql || '';
                 showConfirmDialog('确认删除行',
-                    '<div style="max-height:300px;overflow:auto;background:#0d1117;padding:8px;border-radius:4px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;">' + escapeHtml(sql) + '</div>' +
-                    '<div style="margin-top:6px;color:#e74c3c;font-size:11px;">⚠ 将删除 ' + r.count + ' 行数据，此操作不可撤销</div>',
+                    sql + '\n\n⚠ 将删除 ' + r.count + ' 行数据，此操作不可撤销',
                     function() {
                         eel.table_exec_delete(conn, db||activeDatabase, tn, sch, rowsData)(function(r2) {
                             if (!r2 || !r2.ok) {

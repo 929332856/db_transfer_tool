@@ -233,11 +233,14 @@ function testConnection(side, prefix) {
     const statusEl = $(prefix + 'test_' + side + '_status');
 
     if (side === 'src' && (!data.src_host || !data.src_user || !data.src_db)) {
-        setTestStatus(statusEl, '⚠️ 请填写 IP、用户名、数据库名', '#f39c12');
+        if (!data.src_host) setTestStatus(statusEl, '⚠️ 请填写源库 IP/主机', '#f39c12');
+        else if (!data.src_user) setTestStatus(statusEl, '⚠️ 请填写源库用户名', '#f39c12');
+        else setTestStatus(statusEl, '⚠️ 请填写源库数据库名', '#f39c12');
         return;
     }
     if (side === 'dst' && (!data.dst_host || !data.dst_user)) {
-        setTestStatus(statusEl, '⚠️ 请填写 IP、用户名', '#f39c12');
+        if (!data.dst_host) setTestStatus(statusEl, '⚠️ 请填写目标库 IP/主机', '#f39c12');
+        else setTestStatus(statusEl, '⚠️ 请填写目标库用户名', '#f39c12');
         return;
     }
     setTestStatus(statusEl, '⏳ 测试中...', '#f39c12');
@@ -871,6 +874,23 @@ function slowQueryConnect() {
     }
     var data = sqGetConnDataById(cid);
     if (!data) return;
+
+    // ★ 连接前校验必填参数
+    if (!data.src_host) {
+        $('sq_test_status').style.color = '#e74c3c';
+        $('sq_test_status').textContent = '❌ 连接参数不完整：缺少主机地址';
+        $('sq_conn_status').textContent = '连接失败：缺少主机地址';
+        $('sq_conn_status').style.color = '#e74c3c';
+        return;
+    }
+    if (!data.src_user) {
+        $('sq_test_status').style.color = '#e74c3c';
+        $('sq_test_status').textContent = '❌ 连接参数不完整：缺少用户名';
+        $('sq_conn_status').textContent = '连接失败：缺少用户名';
+        $('sq_conn_status').style.color = '#e74c3c';
+        return;
+    }
+
     _sqConnData = data;
     _sqConnName = data._name || '';
     _sqConnected = false;
@@ -958,6 +978,19 @@ function slowQueryTestConn() {
     }
     var data = sqGetConnDataById(cid);
     if (!data) return;
+
+    // ★ 测试前校验必填参数
+    if (!data.src_host) {
+        $('sq_test_status').style.color = '#e74c3c';
+        $('sq_test_status').textContent = '❌ 连接参数不完整：缺少主机地址';
+        return;
+    }
+    if (!data.src_user) {
+        $('sq_test_status').style.color = '#e74c3c';
+        $('sq_test_status').textContent = '❌ 连接参数不完整：缺少用户名';
+        return;
+    }
+
     var statusEl = $('sq_test_status');
     statusEl.style.color = '#f39c12';
     statusEl.textContent = '测试中...';
@@ -1523,6 +1556,11 @@ function dashboardRefresh() {
     if (!_sqConnData) return;
     if (!_sqConnected) {
         $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5">⏳ 请先连接数据库</div>';
+        return;
+    }
+    // ★ 额外校验连接参数完整性（防止已保存的连接密码丢失）
+    if (!_sqConnData.src_host || !_sqConnData.src_user) {
+        $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5;color:#e74c3c">❌ 连接参数不完整，请重新选择连接</div>';
         return;
     }
     _eelAutoAsync(eel.dashboard_get_metrics(_sqConnData), function(r) {

@@ -3270,6 +3270,24 @@ def tree_test_conn(conn_data):
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, db_type)}
 
+def _normalize_conn_data(data: dict) -> dict:
+    """统一规范化连接参数：兼容 src_ 前缀格式，校验必填字段"""
+    cdata = dict(data)
+    # 兼容两种格式：{user,host,...} 和 {src_user,src_host,...}
+    if "user" not in cdata:
+        cdata = {
+            "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
+            "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
+            "db": cdata.get("src_db", ""), "db_type": cdata.get("db_type", "mysql")
+        }
+    # 校验必填字段
+    if not cdata.get("host"):
+        raise ValueError("连接参数不完整：缺少主机地址（host）")
+    if not cdata.get("user"):
+        raise ValueError("连接参数不完整：缺少用户名（user）")
+    return cdata
+
+
 def _conn_url(conn_data):
     # ★ 用 .get() 提供默认值，避免 KeyError
     u = quote_plus(conn_data.get("user", ""))
@@ -5552,13 +5570,7 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
 def slow_query_get_databases(data: dict):
     """获取慢查询可用的数据库列表（需要连接信息）"""
     try:
-        cdata = dict(data)
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": cdata.get("src_db", ""), "db_type": cdata.get("db_type", "mysql")
-            }
+        cdata = _normalize_conn_data(data)
         db_type = cdata.get("db_type", "mysql")
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "慢SQL查询仅支持 MySQL / OceanBase 数据库"}
@@ -5582,13 +5594,7 @@ def slow_query_get_databases(data: dict):
 def slow_query_check_enabled(data: dict):
     """检查慢查询是否已开启（MySQL 用 slow_query_log，OceanBase 用 SQL_AUDIT）"""
     try:
-        cdata = dict(data)
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": "", "db_type": cdata.get("db_type", "mysql")
-            }
+        cdata = _normalize_conn_data(data)
         db_type = cdata.get("db_type", "mysql")
         url = _conn_url(cdata)
         engine = create_engine(url, connect_args=_connect_args("mysql", timeout=10))
@@ -5680,13 +5686,7 @@ def _parse_ob_time_to_sec(val: str) -> float:
 def slow_query_enable(data: dict, long_time: float = 2.0):
     """开启慢查询记录（MySQL 用慢日志，OceanBase 用 SQL 审计）"""
     try:
-        cdata = dict(data)
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": "", "db_type": cdata.get("db_type", "mysql")
-            }
+        cdata = _normalize_conn_data(data)
         db_type = cdata.get("db_type", "mysql")
         url = _conn_url(cdata)
         engine = create_engine(url, connect_args=_connect_args("mysql", timeout=10))
@@ -5736,14 +5736,7 @@ def slow_query_get_list(data: dict, start_time: str = '', end_time: str = '',
     OceanBase：从 oceanbase.GV$OB_SQL_AUDIT 聚合查询
     """
     try:
-        cdata = dict(data)
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": "", "db_type": cdata.get("db_type", "mysql")
-            }
-
+        cdata = _normalize_conn_data(data)
         db_type = cdata.get("db_type", "mysql")
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
@@ -5861,14 +5854,7 @@ def slow_query_get_log(data: dict, start_time: str = '', end_time: str = '',
     OceanBase：从 GV$OB_SQL_AUDIT 查询
     """
     try:
-        cdata = dict(data)
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": "", "db_type": cdata.get("db_type", "mysql")
-            }
-
+        cdata = _normalize_conn_data(data)
         db_type = cdata.get("db_type", "mysql")
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
@@ -5967,14 +5953,7 @@ def slow_query_get_log(data: dict, start_time: str = '', end_time: str = '',
 def slow_query_get_detail(conn_data: dict, database: str, digest_text: str):
     """获取某条慢 SQL 的完整信息和最近执行样本"""
     try:
-        cdata = dict(conn_data)
-        # 兼容两种格式：{user,host,...} 和 {src_user,src_host,...}
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": "", "db_type": cdata.get("db_type", "mysql")
-            }
+        cdata = _normalize_conn_data(conn_data)
         db_type = cdata.get("db_type", "mysql")
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": "仅支持 MySQL / OceanBase"}
@@ -6127,14 +6106,7 @@ def slow_query_get_detail(conn_data: dict, database: str, digest_text: str):
 def slow_query_kill_processlist(conn_data: dict, process_id: int):
     """Kill 指定进程（用于终止慢查询）"""
     try:
-        cdata = dict(conn_data)
-        # 兼容两种格式：{user,host,...} 和 {src_user,src_host,...}
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": cdata.get("src_db", ""), "db_type": cdata.get("db_type", "mysql")
-            }
+        cdata = _normalize_conn_data(conn_data)
         db_type = cdata.get("db_type", "mysql")
         url = _conn_url(cdata)
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=5))
@@ -6150,14 +6122,7 @@ def slow_query_kill_processlist(conn_data: dict, process_id: int):
 def slow_query_get_running(conn_data: dict):
     """获取当前正在运行的慢进程列表（运行时间超过阈值的）"""
     try:
-        cdata = dict(conn_data)
-        # 兼容两种格式：{user,host,...} 和 {src_user,src_host,...}
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": cdata.get("src_db", ""), "db_type": cdata.get("db_type", "mysql")
-            }
+        cdata = _normalize_conn_data(conn_data)
         db_type = cdata.get("db_type", "mysql")
         url = _conn_url(cdata)
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
@@ -6213,14 +6178,7 @@ def dashboard_get_metrics(conn_data: dict):
     ★ 异步执行，避免阻塞 Eel 主线程
     """
     try:
-        cdata = dict(conn_data)
-        # 兼容两种格式
-        if "user" not in cdata:
-            cdata = {
-                "host": cdata.get("src_host", ""), "port": cdata.get("src_port", "3306"),
-                "user": cdata.get("src_user", ""), "pwd": cdata.get("src_pwd", ""),
-                "db": cdata.get("src_db", ""), "db_type": cdata.get("db_type", "mysql")
-            }
+        cdata = _normalize_conn_data(conn_data)
         db_type = cdata.get("db_type", "mysql")
         if db_type not in ('mysql', 'ob-mysql'):
             return {"ok": False, "msg": f"仪表盘暂不支持 {db_type} 数据库"}
@@ -6357,8 +6315,10 @@ def dashboard_get_metrics(conn_data: dict):
                 engine.dispose()
 
         return _with_db_timeout(_do_collect, timeout=15)
+    except ValueError as e:
+        return {"ok": False, "msg": str(e)}
     except Exception as e:
-        return {"ok": False, "msg": _friendly_error(e, conn_data.get("db_type", "mysql")) if 'db_type' in conn_data else str(e)}
+        return {"ok": False, "msg": _friendly_error(e, cdata.get("db_type", "mysql"))}
 
 
 # ==================== 右侧信息面板：连接/数据库详情 ====================

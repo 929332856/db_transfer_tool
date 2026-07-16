@@ -855,7 +855,10 @@ function _formatSqlTab(qid) {
 
     try {
         var formatted = _formatSql(sql);
-        ta.value = formatted;
+        // ★ 用 execCommand 替换全部内容，使其支持 Ctrl+Z 撤销
+        ta.focus();
+        ta.select();
+        document.execCommand('insertText', false, formatted);
         // 尝试恢复光标到相近位置
         var newPos = Math.min(selStart, formatted.length);
         ta.selectionStart = newPos;
@@ -863,7 +866,7 @@ function _formatSqlTab(qid) {
         ta.scrollTop = scrollTop;
         // 触发 input 事件以更新行号、高亮等
         ta.dispatchEvent(new Event('input', { bubbles: true }));
-        // 绿色闪烁提示
+        // 橙色闪烁提示
         ta.style.boxShadow = 'inset 0 0 0 2px #f39c12';
         ta.style.transition = 'box-shadow 0.3s';
         var clearFlash = function(){ ta.style.boxShadow = ''; };
@@ -872,7 +875,9 @@ function _formatSqlTab(qid) {
     } catch(e) {
         // 格式化失败不影响使用，恢复原值
         console.warn('SQL 格式化失败:', e);
-        ta.value = sql;
+        ta.focus();
+        ta.select();
+        document.execCommand('insertText', false, sql);
         ta.selectionStart = selStart;
         ta.selectionEnd = selEnd;
     }
