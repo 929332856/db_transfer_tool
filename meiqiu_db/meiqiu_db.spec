@@ -92,5 +92,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlement_file=None,
-    icon=None,
+    icon='web/mqdb.ico',
 )

@@ -804,8 +804,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 }
                 var sql = r.sql || '';
                 showConfirmDialog('确认执行修改',
-                    '<div style="max-height:300px;overflow:auto;background:#0d1117;padding:8px;border-radius:4px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;">' + escapeHtml(sql) + '</div>' +
-                    '<div style="margin-top:6px;color:#f39c12;font-size:11px;">共 ' + r.count + ' 处修改</div>',
+                    '<div class="confirm-sql-preview">' + escapeHtml(sql) + '</div>' +
+                    '<div class="confirm-sql-count">共 ' + r.count + ' 处修改</div>',
                     function() {
                         eel.table_exec_save(conn, db||activeDatabase, tn, sch, changes)(function(r2) {
                             if (!r2 || !r2.ok) {

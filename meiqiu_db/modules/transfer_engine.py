@@ -83,15 +83,26 @@ class TransferEngine:
         return row[1] if row else ""
 
     def _create_all_tables(self, src_engine, dst_engine, tables: List[str]):
-        _progress_q.put(("log", "📋 阶段1：创建所有表结构..."))
+        _progress_q.put(("log", "📋 阶段1：检查/创建表结构..."))
         ddls = {}
         with src_engine.connect() as src_conn:
             for table_name in tables:
                 if self._stop_event.is_set():
-                    return
+                    return False
                 ddl = self._get_table_ddl(src_conn, table_name)
                 if ddl:
                     ddls[table_name] = ddl
+        # ★ 先检查目标库是否已存在同名表，存在则报错停止
+        existing = []
+        inspector = inspect(dst_engine)
+        dst_tables = set(inspector.get_table_names())
+        for table_name in tables:
+            if table_name in dst_tables:
+                existing.append(table_name)
+        if existing:
+            _progress_q.put(("error", f"❌ 目标数据库中已存在以下表，请手动处理后重试：{', '.join(existing)}"))
+            _progress_q.put(("done", "同步已取消"))
+            return False
         with dst_engine.connect() as dst_conn:
             dst_conn.execute(text("COMMIT"))
             dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
@@ -99,13 +110,13 @@ class TransferEngine:
                 if self._stop_event.is_set():
                     break
                 if table_name in ddls:
-                    dst_conn.execute(text(f"DROP TABLE IF EXISTS `{table_name}`"))
                     # 清理 OceanBase 专有语法后执行
                     safe_ddl = self._sanitize_ddl(ddls[table_name])
                     dst_conn.execute(text(safe_ddl))
                     _progress_q.put(("log", f"  ✅ 表 [{table_name}] 结构已创建"))
             dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
         _progress_q.put(("log", "✅ 所有表结构创建完成"))
+        return True
 
     def _transfer_single_table(self, src_engine, dst_engine,
                                table_name: str, table_index: int,
@@ -157,7 +168,10 @@ class TransferEngine:
                 _progress_q.put(("log", f"📋 发现 {len(tables)} 张表: {', '.join(tables)}"))
 
             start_time = time.time()
-            self._create_all_tables(src_engine, dst_engine, tables)
+            if not self._create_all_tables(src_engine, dst_engine, tables):
+                # ★ 建表失败（目标库存在同名表）→ 直接结束
+                _progress_q.put(("total", ""))
+                return
 
             if self._stop_event.is_set():
                 _progress_q.put(("log", "⏸ 用户停止传输"))

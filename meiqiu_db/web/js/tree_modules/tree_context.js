@@ -268,7 +268,7 @@ function refreshDatabaseList(cid) {
                     '<div class="tree-children" id="'+dbId2+'"></div></div>';
             } else {
                 html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db2)+'"><div class="my-conn-row" style="padding-left:'+(prevPad+20)+'px"'+dropAttrs2+ctxAttr2+' onclick="showDbInfo(\''+cid+'\',\''+escapeAttr(db2)+'\')" ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db2)+'\',\''+dbId2+'\',\'ar_'+dbId2+'\')">' +
-                    '<span class="arrow" id="ar_'+dbId2+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId2+'\',\'ar_'+dbId2+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db2)+'</span></div>' +
+                    '<span class="arrow" id="ar_'+dbId2+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId2+'\',\'ar_'+dbId2+'\')">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db2)+'</span></div>' +
                     '<div class="tree-children" id="'+dbId2+'">' + renderDbCats(cid, db2, prevPad+40) + '</div></div>';
             }
         });
@@ -519,7 +519,7 @@ function _startTreeRename(div) {
     var input = document.createElement('input');
     input.type = 'text';
     input.value = oldName;
-    input.style.cssText = 'background:#1a1a1a;border:1px solid #4a90d9;border-radius:3px;color:#e0e0e0;padding:1px 4px;font-size:11px;outline:none;width:120px;margin-left:4px;vertical-align:middle;';
+    input.className = 'tree-rename-input';
     nameSpan.style.display = 'none';
     div.insertBefore(input, nameSpan.nextSibling);
     input.focus();

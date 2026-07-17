@@ -69,13 +69,17 @@ def start_webview(port):
             break
         except Exception:
             time.sleep(0.3)
-    webview.create_window(
+    # ★ 窗口图标：mqdb.ico（Windows 任务栏/标题栏图标）
+    ico_path = os.path.join(WEB_DIR, 'mqdb.ico')
+    icon_path = ico_path if os.path.isfile(ico_path) else None
+    window = webview.create_window(
         "MQDB",
         f"http://127.0.0.1:{port}",
         width=1280,
         height=860,
         resizable=True,
         min_size=(900, 600),
+        **({'icon': icon_path} if icon_path else {}),
     )
     webview.start()
     # 窗口关闭后清理

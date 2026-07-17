@@ -18,15 +18,20 @@ function showModal(icon, title, msg, iconColor, btns) {
     $('modal_icon').textContent = icon;
     $('modal_title').textContent = title;
     $('modal_title').style.color = iconColor;
-    // ★ 用 textContent 而不是 innerHTML，确保文字可完整选中复制
     var msgEl = $('modal_msg');
     msgEl.textContent = '';
-    // 支持多行：按 \n 拆分成多个段落
-    var lines = String(msg).split('\n');
-    lines.forEach(function(line, idx) {
-        if (idx > 0) msgEl.appendChild(document.createElement('br'));
-        msgEl.appendChild(document.createTextNode(line));
-    });
+    // ★ 富 HTML 模式：msg 以 '<' 开头表示是 HTML，直接用 innerHTML 渲染（用于导出向导等需要交互控件的弹窗）
+    //    否则按纯文本处理（多行用 <br> 拆分，保证文本可完整选中复制）
+    var msgStr = String(msg);
+    if (/^\s*</.test(msgStr)) {
+        msgEl.innerHTML = msgStr;
+    } else {
+        var lines = msgStr.split('\n');
+        lines.forEach(function(line, idx) {
+            if (idx > 0) msgEl.appendChild(document.createElement('br'));
+            msgEl.appendChild(document.createTextNode(line));
+        });
+    }
     $('modal_btns').innerHTML = btns;
     $('modal_overlay').classList.add('show');
 }
@@ -211,9 +216,26 @@ document.addEventListener('click', function (e) {
 
 // ========== 确认弹窗 ==========
 function showConfirmDialog(title, msg, onConfirm, onCancel) {
-    showModal('⚠️', title, msg, '#e67e22',
-        '<button class="btn btn-gray" id="modal_cancel_btn">取消</button>' +
-        '<button class="btn btn-red" id="modal_confirm_btn">确定</button>');
+    // ★ 确认弹窗支持 HTML（如 <b>加粗</b>），用 innerHTML 渲染
+    var msgStr = String(msg);
+    if (/^\s*</.test(msgStr)) {
+        // HTML 内容：直接用 innerHTML
+        showModal('⚠️', title, '<div style="text-align:center;padding:8px 0;">' + msgStr + '</div>', '#e67e22',
+            '<button class="btn btn-gray" id="modal_cancel_btn">取消</button>' +
+            '<button class="btn btn-red" id="modal_confirm_btn">确定</button>');
+    } else {
+        // 纯文本：检查是否含 HTML 标签
+        if (/<[a-zA-Z][^>]*>/.test(msgStr)) {
+            // 含 HTML 标签但以文字开头（如 "将创建备份表 <b>[xxx]</b>？"），强制包一层 div 让 showModal 识别
+            showModal('⚠️', title, '<div style="text-align:center;padding:8px 0;">' + msgStr + '</div>', '#e67e22',
+                '<button class="btn btn-gray" id="modal_cancel_btn">取消</button>' +
+                '<button class="btn btn-red" id="modal_confirm_btn">确定</button>');
+        } else {
+            showModal('⚠️', title, msgStr, '#e67e22',
+                '<button class="btn btn-gray" id="modal_cancel_btn">取消</button>' +
+                '<button class="btn btn-red" id="modal_confirm_btn">确定</button>');
+        }
+    }
     setTimeout(function () {
         var cfm = $('modal_confirm_btn');
         if (cfm) cfm.onclick = function () { hideModal(); onConfirm(); };
@@ -281,6 +303,9 @@ function setTestStatus(el, fullText, color) {
 
 // ========== 传输控制（数据库同步 Tab） ==========
 let pollingTimer = null;
+let _transferAnimId = null;
+let _transferTargetPct = 0;
+let _transferCurrentPct = 0;
 
 function startTransfer() {
     const data = collectForm('sync_');
@@ -301,10 +326,13 @@ function startTransfer() {
 function doStartTransfer(data) {
     $('btn_start').disabled = true;
     $('btn_stop').disabled = false;
+    _transferTargetPct = 0;
+    _transferCurrentPct = 0;
     progressFill.style.width = '0%';
     progressText.textContent = '就绪';
     logBox.innerHTML = '';
-
+    // ★ 启动进度条平滑动画（每 100ms 追一步）
+    _startTransferAnim();
     eel.start_transfer(data)(function () {
         pollingTimer = setInterval(pollProgress, 100);
     });
@@ -312,6 +340,7 @@ function doStartTransfer(data) {
 
 function stopTransfer() {
     if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
+    _stopTransferAnim();
     resetTransferBtns();
     appendLog('⏸ 用户手动停止传输');
     eel.stop_transfer()();
@@ -320,6 +349,23 @@ function stopTransfer() {
 function resetTransferBtns() {
     $('btn_start').disabled = false;
     $('btn_stop').disabled = true;
+}
+
+// ★ 进度条平滑动画：每帧追目标值，避免一跳到底
+function _startTransferAnim() {
+    _stopTransferAnim();
+    function step() {
+        if (_transferCurrentPct < _transferTargetPct) {
+            _transferCurrentPct += Math.max(0.3, (_transferTargetPct - _transferCurrentPct) * 0.15);
+            if (_transferCurrentPct > _transferTargetPct) _transferCurrentPct = _transferTargetPct;
+            progressFill.style.width = Math.min(_transferCurrentPct, 99.5).toFixed(1) + '%';
+        }
+        _transferAnimId = requestAnimationFrame(step);
+    }
+    _transferAnimId = requestAnimationFrame(step);
+}
+function _stopTransferAnim() {
+    if (_transferAnimId) { cancelAnimationFrame(_transferAnimId); _transferAnimId = null; }
 }
 
 function pollProgress() {
@@ -335,21 +381,33 @@ function pollProgress() {
                 case 'table_progress':
                     progressText.textContent = '[' + data.table + '] ' + (data.count || 0).toLocaleString() + ' 行';
                     appendLog('📊 [' + data.table + '] 已传输 ' + (data.count || 0).toLocaleString() + ' 行');
+                    // ★ 每张表完成后，逐步推进目标进度（最多到 90%，留 10% 给 total/done）
+                    _transferTargetPct = Math.min(90, _transferTargetPct + 15);
                     break;
                 case 'total':
-                    progressFill.style.width = '100%';
+                    _transferTargetPct = 98;
                     break;
                 case 'done':
-                    progressFill.style.width = '100%';
+                    _transferTargetPct = 100;
                     clearInterval(pollingTimer);
                     pollingTimer = null;
+                    _stopTransferAnim();
+                    progressFill.style.width = '100%';
                     resetTransferBtns();
                     appendLog(data);
-                    setTimeout(function () { showOkDialog('传输完成', data); }, 100);
+                    // ★ 如果是错误导致的 done（如"同步已取消"），不弹成功弹窗
+                    if (data && (String(data).indexOf('取消') >= 0 || String(data).indexOf('已取消') >= 0)) {
+                        // 不弹窗
+                    } else {
+                        setTimeout(function () { showOkDialog('传输完成', data); }, 100);
+                    }
                     break;
                 case 'error':
                     clearInterval(pollingTimer);
                     pollingTimer = null;
+                    _stopTransferAnim();
+                    progressFill.style.width = _transferCurrentPct.toFixed(1) + '%';
+                    progressFill.style.background = '#e74c3c';
                     resetTransferBtns();
                     appendLog(data);
                     setTimeout(function () { showErrorDialog('传输失败', data); }, 100);
@@ -454,16 +512,17 @@ function _buildSqlContent(qr, tableName) {
 // ========== 第1步：选择格式 ==========
 function _showExportStep1() {
     var s = _qsExportState;
+    var csvActive = s.fmt === 'csv', sqlActive = s.fmt === 'sql';
     var html =
         '<div style="padding:5px 0;text-align:left;">' +
-            '<h4 style="margin:0 0 12px;color:#4fc3f7;font-size:13px;">📥 第1步：选择导出格式</h4>' +
-            '<div style="font-size:11px;color:#888;margin-bottom:10px;">查询结果共 <b style="color:#f39c12;">' + s.rowCount + '</b> 条记录</div>' +
+            '<h4 class="export-step-title" style="margin:0 0 12px;font-size:13px;">📥 第1步：选择导出格式</h4>' +
+            '<div class="export-sub" style="font-size:11px;margin-bottom:10px;">查询结果共 <b class="export-num">' + s.rowCount + '</b> 条记录</div>' +
             '<div style="display:flex;gap:14px;margin-bottom:10px;">' +
-                '<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;padding:6px 10px;border:1px solid ' + (s.fmt === 'csv' ? '#4fc3f7' : '#444') + ';border-radius:4px;background:' + (s.fmt === 'csv' ? '#1a2e44' : 'transparent') + ';">' +
-                    '<input type="radio" name="export_fmt" value="csv" ' + (s.fmt === 'csv' ? 'checked' : '') + ' onchange="_qsFmtChange(this)" style="accent-color:#4fc3f7;"> 📄 CSV' +
+                '<label class="export-fmt-opt' + (csvActive ? ' active' : '') + '" id="qs_fmt_csv">' +
+                    '<input type="radio" name="export_fmt" value="csv" ' + (csvActive ? 'checked' : '') + ' onchange="_qsFmtChange(this)"> 📄 CSV' +
                 '</label>' +
-                '<label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;padding:6px 10px;border:1px solid ' + (s.fmt === 'sql' ? '#4fc3f7' : '#444') + ';border-radius:4px;background:' + (s.fmt === 'sql' ? '#1a2e44' : 'transparent') + ';">' +
-                    '<input type="radio" name="export_fmt" value="sql" ' + (s.fmt === 'sql' ? 'checked' : '') + ' onchange="_qsFmtChange(this)" style="accent-color:#4fc3f7;"> 📜 SQL' +
+                '<label class="export-fmt-opt' + (sqlActive ? ' active' : '') + '" id="qs_fmt_sql">' +
+                    '<input type="radio" name="export_fmt" value="sql" ' + (sqlActive ? 'checked' : '') + ' onchange="_qsFmtChange(this)"> 📜 SQL' +
                 '</label>' +
             '</div>' +
             '<div id="qs_export_tablename_row" style="display:' + (s.fmt === 'sql' ? 'flex' : 'none') + ';align-items:center;gap:8px;margin-bottom:6px;">' +
@@ -480,15 +539,11 @@ function _qsFmtChange(el) {
     _qsExportState.fmt = el.value;
     var row = document.getElementById('qs_export_tablename_row');
     if (row) row.style.display = el.value === 'sql' ? 'flex' : 'none';
-    // 更新边框高亮
-    var labels = document.querySelectorAll('#modal_msg label');
-    labels.forEach(function(l) {
-        var r = l.querySelector('input[type=radio]');
-        if (r) {
-            l.style.borderColor = r.checked ? '#4fc3f7' : '#444';
-            l.style.background = r.checked ? '#1a2e44' : 'transparent';
-        }
-    });
+    // 更新 class 高亮
+    var csvL = document.getElementById('qs_fmt_csv');
+    var sqlL = document.getElementById('qs_fmt_sql');
+    if (csvL) csvL.className = 'export-fmt-opt' + (el.value === 'csv' ? ' active' : '');
+    if (sqlL) sqlL.className = 'export-fmt-opt' + (el.value === 'sql' ? ' active' : '');
 }
 
 // ========== 第2步：选择路径 ==========
@@ -506,15 +561,15 @@ function _showExportStep2() {
     var fmtLabel = s.fmt === 'csv' ? 'CSV' : 'SQL';
     var html =
         '<div style="padding:5px 0;text-align:left;">' +
-            '<h4 style="margin:0 0 8px;color:#4fc3f7;font-size:13px;">📥 第2步：选择保存路径</h4>' +
-            '<div style="font-size:11px;color:#bbb;margin-bottom:10px;background:#1a2230;padding:6px 10px;border-radius:4px;">' +
-                '格式: <b style="color:#4fc3f7;">' + fmtLabel + '</b> | 行数: <b style="color:#f39c12;">' + s.rowCount + '</b>' +
+            '<h4 class="export-step-title" style="margin:0 0 8px;font-size:13px;">📥 第2步：选择保存路径</h4>' +
+            '<div class="export-info-bar" style="font-size:11px;margin-bottom:10px;padding:6px 10px;border-radius:4px;">' +
+                '格式: <b class="export-num">' + fmtLabel + '</b> | 行数: <b class="export-num">' + s.rowCount + '</b>' +
                 (s.fmt === 'sql' ? ' | 表名: <b>' + escapeHtml(s.tableName) + '</b>' : '') +
             '</div>' +
             '<div style="margin-bottom:8px;">' +
                 '<button class="btn btn-sm" style="background:#5dade2;" onclick="_qsPickPath()">📁 选择保存路径</button>' +
             '</div>' +
-            '<div id="qs_export_path_display" style="font-size:11px;color:' + (s.path ? '#2ecc71' : '#888') + ';word-break:break-all;margin-bottom:6px;min-height:18px;">' +
+            '<div id="qs_export_path_display" class="export-path-info' + (s.path ? ' ok' : '') + '" style="font-size:11px;word-break:break-all;margin-bottom:6px;min-height:18px;">' +
                 (s.path ? '✅ ' + escapeHtml(s.path) : '⚠ 请选择保存路径') +
             '</div>' +
         '</div>';
@@ -528,7 +583,7 @@ function _qsPickPath() {
         if (!path) return;
         _qsExportState.path = path;
         var disp = document.getElementById('qs_export_path_display');
-        if (disp) { disp.textContent = '✅ ' + path; disp.style.color = '#2ecc71'; }
+        if (disp) { disp.textContent = '✅ ' + path; disp.className = 'export-path-info ok'; }
         var btn = document.getElementById('qs_export_exec_btn');
         if (btn) btn.disabled = false;
     });
@@ -618,13 +673,13 @@ function _showExportStep3() {
     var s = _qsExportState;
     var html =
         '<div style="padding:5px 0;">' +
-            '<h4 style="margin:0 0 6px;color:#4fc3f7;font-size:13px;">📥 正在导出...</h4>' +
-            '<div style="font-size:11px;color:#888;margin-bottom:4px;word-break:break-all;">' + escapeHtml(s.path) + '</div>' +
-            '<div style="font-size:11px;color:#999;margin-bottom:8px;">格式: ' + (s.fmt === 'csv' ? 'CSV' : 'SQL') + ' | 共 <b style="color:#f39c12;">' + s.rowCount + '</b> 行</div>' +
+            '<h4 class="export-step-title" style="margin:0 0 6px;font-size:13px;">📥 正在导出...</h4>' +
+            '<div class="export-sub" style="font-size:11px;margin-bottom:4px;word-break:break-all;">' + escapeHtml(s.path) + '</div>' +
+            '<div class="export-sub" style="font-size:11px;margin-bottom:8px;">格式: ' + (s.fmt === 'csv' ? 'CSV' : 'SQL') + ' | 共 <b class="export-num">' + s.rowCount + '</b> 行</div>' +
             '<div class="progress-bar" style="height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;margin-bottom:6px;">' +
                 '<div id="qsexport_progress_bar" class="progress-fill" style="width:0%;height:100%;background:#27ae60;border-radius:4px;transition:width .3s;"></div>' +
             '</div>' +
-            '<div id="qsexport_progress_info" style="font-size:11px;color:#888;text-align:center;">准备写入文件...</div>' +
+            '<div id="qsexport_progress_info" class="export-sub" style="font-size:11px;text-align:center;">准备写入文件...</div>' +
             '<div id="qsexport_result_detail" style="margin-top:8px;font-size:11px;display:none;"></div>' +
         '</div>';
     showModal('📥', '导出查询结果', html, '#4fc3f7',
@@ -643,7 +698,7 @@ function _updateExportProgress() {
         if (info) { info.textContent = '❌ 导出失败'; info.style.color = '#e74c3c'; }
         if (detail) {
             detail.style.display = 'block';
-            detail.innerHTML = '<div style="background:#2a1515;border:1px solid #c0392b;border-radius:4px;padding:8px 10px;color:#e74c3c;font-family:Consolas,monospace;">' +
+            detail.innerHTML = '<div class="export-result-box error">' +
                 '<div style="font-weight:bold;margin-bottom:4px;">错误信息:</div>' +
                 '<div>' + escapeHtml(s.error.msg || '未知错误') + '</div></div>';
         }
@@ -656,10 +711,10 @@ function _updateExportProgress() {
         }
         if (detail) {
             detail.style.display = 'block';
-            detail.innerHTML = '<div style="background:#1a2a1a;border:1px solid #27ae60;border-radius:4px;padding:8px 10px;">' +
-                '<div style="color:#2ecc71;margin-bottom:3px;">✅ 导出成功</div>' +
-                '<div style="font-size:10px;color:#aaa;">文件: ' + escapeHtml(s.path) + '</div>' +
-                '<div style="font-size:10px;color:#aaa;">大小: ' + _qsFmtBytes(s.totalBytes) + ' | 行数: ' + rowCount + ' | 格式: ' + (s.fmt === 'csv' ? 'CSV' : 'SQL') + '</div></div>';
+            detail.innerHTML = '<div class="export-result-box success">' +
+                '<div class="export-result-title">✅ 导出成功</div>' +
+                '<div class="export-result-item">文件: ' + escapeHtml(s.path) + '</div>' +
+                '<div class="export-result-item">大小: ' + _qsFmtBytes(s.totalBytes) + ' | 行数: ' + rowCount + ' | 格式: ' + (s.fmt === 'csv' ? 'CSV' : 'SQL') + '</div></div>';
         }
     } else if (s.pct !== undefined) {
         if (bar) bar.style.width = s.pct + '%';
@@ -680,12 +735,12 @@ function _qsExportToFile(content, fmt) {
         var title = fmt === 'csv' ? '📥 导出 CSV' : '📥 导出 SQL';
         var html =
             '<div style="padding:10px 0;">' +
-                '<h4 style="margin:0 0 8px;">' + title + '</h4>' +
-                '<div style="font-size:11px;color:#aaa;margin-bottom:8px;word-break:break-all;">' + escapeHtml(path) + '</div>' +
+                '<h4 class="export-step-title" style="margin:0 0 8px;">' + title + '</h4>' +
+                '<div class="export-sub" style="font-size:11px;margin-bottom:8px;word-break:break-all;">' + escapeHtml(path) + '</div>' +
                 '<div class="progress-bar" style="height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;margin-bottom:6px;">' +
                     '<div id="qsexport_progress_bar" class="progress-fill" style="width:0%;height:100%;background:#27ae60;border-radius:4px;transition:width .3s;"></div>' +
                 '</div>' +
-                '<div id="qsexport_progress_info" style="font-size:11px;color:#888;text-align:center;">准备写入...</div>' +
+                '<div id="qsexport_progress_info" class="export-sub" style="font-size:11px;text-align:center;">准备写入...</div>' +
             '</div>';
         showModal('📥', title, html, '#4fc3f7',
             '<button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;" onclick="_qsCancelExport()">⏹ 中断</button>' +
@@ -857,7 +912,7 @@ function onSqConnChange() {
         $('sq_conn_status').style.color = '#888';
         $('sq_status_badge').textContent = '--';
         $('sq_status_badge').className = 'sq-status-badge disabled';
-        $('sq_tbody').innerHTML = '<tr><td colspan="10" class="sq-empty">请在顶部选择已保存的连接</td></tr>';
+        $('sq_tbody').innerHTML = '<tr><td colspan="9" class="sq-empty">请在顶部选择已保存的连接</td></tr>';
         return;
     }
     // 切换连接 → 自动连接
@@ -1084,12 +1139,12 @@ function onSqSourceChange() {
 function slowQueryRefresh() {
     if (!_sqConnData || !_sqConnected) {
         $('sq_tbody').innerHTML =
-            '<tr><td colspan="10" class="sq-empty">请先选择并连接</td></tr>';
+            '<tr><td colspan="9" class="sq-empty">请先选择并连接</td></tr>';
         return;
     }
     var data = _sqConnData;
     var isLog = _sqSource === 'log';
-    var colspan = isLog ? '9' : '10';
+    var colspan = isLog ? '9' : '9';
 
     // 显示加载中
     $('sq_tbody').innerHTML =
@@ -1147,7 +1202,7 @@ function sqSortLog(key) {
 function renderSlowQueryTable(res) {
     var tbody = $('sq_tbody');
     if (!res || !res.ok) {
-        tbody.innerHTML = '<tr><td colspan="10" class="sq-empty">' +
+        tbody.innerHTML = '<tr><td colspan="9" class="sq-empty">' +
             escapeHtml((res && res.msg) || '查询失败') + '</td></tr>';
         $('sq_total_count').textContent = '0';
         $('sq_db_count').textContent = '0';
@@ -1177,7 +1232,7 @@ function renderSlowQueryTable(res) {
     $('sq_db_count').textContent = dbCount.toString();
 
     if (rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="10" class="sq-empty">🎉 当前服务器暂无慢查询记录</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="sq-empty">🎉 当前服务器暂无慢查询记录</td></tr>';
         return;
     }
 
@@ -1206,15 +1261,13 @@ function renderSlowQueryTable(res) {
         html += '<tr>' +
             '<td style="text-align:center;color:#666;">' + idx + '</td>' +
             '<td title="' + schema + '" style="color:#5dade2;font-weight:bold;">' + schema + '</td>' +
-            '<td class="sql-text" title="' + sqlText + '">' + truncateSql(sqlText, 180) + '</td>' +
+            '<td class="sql-text" title="双击查看完整SQL" ondblclick="showSqlFullDialog(\'' + escapeAttr(sqlText) + '\',\'' + escapeAttr(schema) + '\')">' + truncateSql(sqlText, 180) + '</td>' +
             '<td class="count-num" style="text-align:center;">' + count + '</td>' +
             '<td class="time-val" style="text-align:right;">' + totalTime + '</td>' +
             '<td class="' + avgCls + '" style="text-align:right;">' + avgTime + '</td>' +
             '<td class="' + maxCls + '" style="text-align:right;">' + maxTime + '</td>' +
             '<td style="text-align:right;" title="' + formatNum(rowsExamined) + '">' + formatShortNum(rowsExamined) + '</td>' +
             '<td style="color:#888;font-size:10px;">' + lastSeen + '</td>' +
-            '<td><span class="sq-btn-detail" onclick="slowQueryShowDetail(' + idx +
-                ',\'' + escapeAttr(schema) + '\')">详情</span></td>' +
             '</tr>';
     }
     tbody.innerHTML = html;
@@ -1222,6 +1275,41 @@ function renderSlowQueryTable(res) {
     // 存储原始行数据（未排序）供详情弹窗和排序使用
     // rows 变量此时是 sorted copy，需要从 res.rows 重新获取原始数据
     window._sqRows = res.rows || [];
+}
+
+/** 双击展示完整 SQL 语句 */
+function showSqlFullDialog(sqlText, dbName) {
+    var hdr = dbName ? escapeHtml(dbName) : '慢SQL';
+    showModal('📝', '完整SQL — ' + hdr,
+        '<pre class="sql-full-view" style="max-height:400px;overflow:auto;padding:12px;border-radius:6px;font-family:Consolas,monospace;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-all;text-align:left;margin:0;">' + escapeHtml(sqlText) + '</pre>',
+        '#5dade2',
+        '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>' +
+        '<button class="btn btn-sm" onclick="_copySqlFull(this)" style="background:#555;color:#fff;font-size:10px;">📋 复制</button>');
+    // 存储完整 SQL 到按钮 data 属性
+    setTimeout(function() {
+        var btns = document.querySelectorAll('#modal_btns .btn');
+        btns.forEach(function(b) {
+            if (b.textContent.indexOf('复制') >= 0) b.setAttribute('data-sql', sqlText);
+        });
+    }, 10);
+}
+function _copySqlFull(btn) {
+    var sql = btn.getAttribute('data-sql') || '';
+    if (!sql) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(sql).then(function() {
+            btn.textContent = '✅ 已复制'; btn.style.background = '#27ae60';
+            setTimeout(function() { btn.textContent = '📋 复制'; btn.style.background = '#555'; }, 1500);
+        });
+    } else {
+        // 降级方案
+        var ta = document.createElement('textarea');
+        ta.value = sql; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+        document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); document.body.removeChild(ta);
+        btn.textContent = '✅ 已复制'; btn.style.background = '#27ae60';
+        setTimeout(function() { btn.textContent = '📋 复制'; btn.style.background = '#555'; }, 1500);
+    }
 }
 
 /** 渲染慢查询日志表格（从 mysql.slow_log 读取的原始日志） */
@@ -1286,7 +1374,7 @@ function renderSlowQueryLogTable(res) {
         html += '<tr>' +
             '<td style="text-align:center;color:#666;">' + idx + '</td>' +
             '<td title="' + db + '" style="color:#5dade2;font-weight:bold;">' + (db || '-') + '</td>' +
-            '<td class="sql-text" title="' + sqlText + '">' + truncateSql(sqlText, 180) + '</td>' +
+            '<td class="sql-text" title="双击查看完整SQL" ondblclick="showSqlFullDialog(\'' + escapeAttr(sqlText) + '\',\'' + escapeAttr(db) + '\')">' + truncateSql(sqlText, 180) + '</td>' +
             '<td style="text-align:right;" title="' + userHost + '">' + userHost.substring(0, 15) + '</td>' +
             '<td class="' + timeCls + '" style="text-align:right;">' + queryTimeStr + '</td>' +
             '<td style="text-align:right;">' + lockTime + '</td>' +
@@ -1498,41 +1586,252 @@ var DASH_CHART_COLORS = {
 /** 切换慢SQL子tab */
 function switchSqSubtab(name) {
     _dashSubtab = name;
-    var sqTab = $('sq_subtab_sq'), dashTab = $('sq_subtab_dash');
+    var sqTab = $('sq_subtab_sq'), dashTab = $('sq_subtab_dash'), replTab = $('sq_subtab_repl');
     var sqBody = document.querySelector('.slow-table-wrap');
     if (sqTab) sqTab.classList.toggle('active', name === 'sq');
     if (dashTab) dashTab.classList.toggle('active', name === 'dash');
-    // 隐藏/显示顶部右侧额外控件
+    if (replTab) replTab.classList.toggle('active', name === 'repl');
     var sqOnlyEls = ['sq_btn_enable', 'sq_source_sel', 'sq_threshold_wrap', 'sq_btn_running'];
     sqOnlyEls.forEach(function(id){
         var el = $(id); if (el) el.style.display = (name === 'sq' ? '' : 'none');
     });
-    $('sq_btn_refresh').style.display = '';
+    $('sq_btn_refresh').style.display = (name === 'repl' ? 'none' : '');
+    // ★ 连接选择器整行：主从监控隐藏（独立连接），sq/dash 显示
+    var topBar = document.querySelector('.slow-top-bar');
+    if (topBar) topBar.style.display = (name === 'repl' ? 'none' : '');
     if (name === 'dash') {
         sqBody.style.display = 'none';
         var statsBar = document.querySelector('.slow-stats-bar');
         if (statsBar) statsBar.style.display = 'none';
         $('dash_view').style.display = '';
-        // ★ 切回仪表盘时：先强制重绘一次（DOM 重新布局后 clientWidth 才准确），再拉取数据
+        $('repl_view').style.display = 'none';
         requestAnimationFrame(function() { _redrawDashCharts(); });
-        // 启动仪表盘
-        if (_sqConnected) {
-            dashboardRefresh();
-            changeDashInterval();
-        } else {
-            $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5">请先在上方选择并连接数据库</div>';
-        }
+        if (_sqConnected) { dashboardRefresh(); changeDashInterval(); }
+        else { $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5">请先在上方选择并连接数据库</div>'; }
+        if (_dashTimer) { clearInterval(_dashTimer); _dashTimer = null; }
+    } else if (name === 'repl') {
+        sqBody.style.display = 'none';
+        var statsBar3 = document.querySelector('.slow-stats-bar');
+        if (statsBar3) statsBar3.style.display = 'none';
+        $('dash_view').style.display = 'none';
+        $('repl_view').style.display = '';
+        if (_dashTimer) { clearInterval(_dashTimer); _dashTimer = null; }
+        replRenderConnList();
     } else {
         sqBody.style.display = '';
         var statsBar2 = document.querySelector('.slow-stats-bar');
         if (statsBar2) statsBar2.style.display = '';
         $('dash_view').style.display = 'none';
-        // 停止自动刷新
+        $('repl_view').style.display = 'none';
         if (_dashTimer) { clearInterval(_dashTimer); _dashTimer = null; }
+        if (_replTimer) { clearInterval(_replTimer); _replTimer = null; }
     }
 }
 
 /** 仅重绘 4 个图表（不重新拉取数据），用于 tab 切回时恢复 canvas 尺寸 */
+
+// ==================== 主从复制监控 ====================
+var _replTimer = null;
+var _replConns = [];        // [{id, name, host, port, user, password}]
+var _replActiveId = '';     // 当前选中连接 id
+var _replActiveConn = null;
+
+function replRenderConnList() {
+    var list = $('repl_conn_list'); if (!list) return;
+    if (_replConns.length === 0) {
+        list.innerHTML = '<div class="repl-empty" style="padding:20px;">暂无连接，请点击"＋ 添加"录入</div>';
+        return;
+    }
+    var h = '';
+    _replConns.forEach(function(c){
+        var active = c.id === _replActiveId;
+        h += '<div class="repl-conn-row'+(active?' active':'')+'" data-id="'+c.id+'" onclick="replSelectConn(\''+c.id+'\')" oncontextmenu="replConnCtx(event,\''+c.id+'\')">' +
+            '<span class="repl-conn-icon">🖥</span><span class="repl-conn-name">'+escapeHtml(c.name)+'</span>' +
+            '<span class="repl-conn-host">'+escapeHtml(c.host)+':'+c.port+'</span>' +
+            '<span class="repl-conn-del" onclick="event.stopPropagation();replDelConn(\''+c.id+'\')" title="删除">✕</span></div>';
+    });
+    list.innerHTML = h;
+}
+function replAddConn() {
+    var html = '<div style="text-align:left;">' +
+        '<div style="margin-bottom:10px;">' +
+            '<button class="btn btn-sm" style="background:#5dade2;color:#fff;" onclick="replImportFromTree()">📥 从我的连接导入</button>' +
+            '<span style="font-size:10px;color:#888;margin-left:6px;">或手动填写</span>' +
+        '</div>' +
+        '<div style="margin-bottom:8px;"><label style="font-size:11px;">名称:</label><input id="repl_new_name" style="width:100%;height:28px;" placeholder="如: 生产从库"></div>' +
+        '<div style="margin-bottom:8px;"><label style="font-size:11px;">主机:</label><input id="repl_new_host" style="width:100%;height:28px;" placeholder="127.0.0.1"></div>' +
+        '<div style="margin-bottom:8px;"><label style="font-size:11px;">端口:</label><input id="repl_new_port" style="width:100%;height:28px;" value="3306"></div>' +
+        '<div style="margin-bottom:8px;"><label style="font-size:11px;">用户名:</label><input id="repl_new_user" style="width:100%;height:28px;" value="root"></div>' +
+        '<div style="margin-bottom:8px;"><label style="font-size:11px;">密码:</label><input type="password" id="repl_new_pwd" style="width:100%;height:28px;"></div></div>';
+    showModal('➕', '添加 MySQL 连接', html, '#5dade2',
+        '<button class="btn btn-gray btn-sm" onclick="hideModal()">取消</button><button class="btn btn-green btn-sm" onclick="replSaveConn()">保存</button>');
+}
+function replImportFromTree() {
+    if (typeof treeData === 'undefined' || !treeData || !treeData.connections) { showWarnDialog('提示', '暂无已保存的连接'); return; }
+    var conns = [];
+    for (var cid in treeData.connections) {
+        var c = treeData.connections[cid];
+        if (c.db_type === 'mysql' || c.db_type === 'ob-mysql') conns.push({cid:cid, name:c.name||c.host||'', host:c.host||'', port:c.port||'3306', user:c.user||'', pwd:c.pwd||''});
+    }
+    if (conns.length === 0) { showWarnDialog('提示', '没有 MySQL 类型的连接'); return; }
+    var h = '<div style="max-height:300px;overflow-y:auto;">';
+    conns.forEach(function(c){
+        h += '<div class="repl-import-item" onclick="replImportFromTreeSelect(\''+c.cid+'\')">' +
+            '<div><div style="font-size:12px;">🖥 '+escapeHtml(c.name)+'</div><div style="font-size:10px;color:#888;">'+escapeHtml(c.host)+':'+c.port+'</div></div>' +
+            '<span style="font-size:10px;color:#5dade2;">选择 →</span></div>';
+    });
+    h += '</div>';
+    hideModal();
+    showModal('📥', '从我的连接导入', h, '#5dade2',
+        '<button class="btn btn-gray btn-sm" onclick="hideModal();replAddConn()">返回</button>');
+    window._replImportList = conns;
+}
+function replImportFromTreeSelect(cid) {
+    var item = (window._replImportList||[]).find(function(c){return c.cid===cid;});
+    if (!item) return;
+    var exists = _replConns.find(function(c){return c.host===item.host && c.port===item.port;});
+    if (exists) { showWarnDialog('提示', '该连接已存在'); return; }
+    _replConns.push({id:'repl_'+Date.now(),name:item.name,host:item.host,port:item.port,user:item.user,password:item.pwd});
+    replPersistConns(); replRenderConnList(); hideModal();
+}
+function replSaveConn() {
+    var name=($('repl_new_name')||{}).value||'', host=($('repl_new_host')||{}).value||'';
+    var port=($('repl_new_port')||{}).value||'3306', user=($('repl_new_user')||{}).value||'';
+    var pwd=($('repl_new_pwd')||{}).value||'';
+    if (!name||!host) { showWarnDialog('提示','名称和主机不能为空'); return; }
+    _replConns.push({id:'repl_'+Date.now(),name:name,host:host,port:port,user:user,password:pwd});
+    replPersistConns(); replRenderConnList(); hideModal();
+}
+function replSelectConn(id) {
+    _replActiveId = id; _replActiveConn = _replConns.find(function(c){return c.id===id;})||null;
+    replRenderConnList();
+    if (_replActiveConn) {
+        $('repl_right_empty').style.display='none'; $('repl_right_content').style.display='';
+        $('repl_server_info').textContent = _replActiveConn.name + ' (' + _replActiveConn.host + ')';
+        replicationRefresh(); changeReplInterval();
+    }
+}
+function replDelConn(id) {
+    showConfirmDialog('确认删除','确定删除此连接？',function(){
+        _replConns = _replConns.filter(function(c){return c.id!==id;});
+        if (_replActiveId===id) { _replActiveId=''; _replActiveConn=null;
+            $('repl_right_empty').style.display=''; $('repl_right_content').style.display='none'; }
+        replPersistConns(); replRenderConnList();
+    });
+}
+function replConnCtx(e,id) { e.preventDefault(); showCtxMenu(e.clientX,e.clientY,[{label:'🗑 删除',action:function(){replDelConn(id);}}]); }
+function replPersistConns() { try{localStorage.setItem('mqdb_repl_conns',JSON.stringify(_replConns));}catch(e){} }
+function replLoadConns() { try{var raw=localStorage.getItem('mqdb_repl_conns');if(raw)_replConns=JSON.parse(raw);}catch(e){_replConns=[];} }
+replLoadConns();
+
+function replicationRefresh() {
+    if (!_replActiveConn) return;
+    var c = _replActiveConn;
+    eel.replication_get_status({host:c.host,port:parseInt(c.port)||3306,user:c.user,password:c.password,db_type:'mysql'})(function(r){
+        _renderReplResult(r);
+    });
+}
+
+function _renderReplResult(r) {
+    if (!r || !r.ok) {
+        $('repl_kpi_grid').innerHTML = '<div class="repl-empty" style="grid-column:1/4;color:#e74c3c;">❌ ' + escapeHtml((r&&r.msg)||'查询失败') + '</div>';
+        $('repl_detail_body').innerHTML = '';
+        return;
+    }
+    if (!r.is_slave && !r.is_master) {
+        $('repl_kpi_grid').innerHTML = '<div class="repl-empty" style="grid-column:1/4">' + escapeHtml(r.msg||'当前实例未配置主从复制') + '</div>';
+        $('repl_detail_body').innerHTML = '';
+        return;
+    }
+
+    var master = r.master || {};
+    var hasMaster = r.is_master && Object.keys(master).length > 0;
+    var ch = (r.channels && r.channels.length > 0) ? r.channels[0] : {};
+    var ioRunning = (ch.Slave_IO_Running || '').toLowerCase() === 'yes';
+    var sqlRunning = (ch.Slave_SQL_Running || '').toLowerCase() === 'yes';
+    var delaySec = ch.Seconds_Behind_Master;
+    var delayStr = (delaySec !== null && delaySec !== undefined) ? (delaySec >= 60 ? Math.floor(delaySec/60)+'m'+delaySec%60+'s' : delaySec+'s') : '--';
+    var delayCls = (delaySec !== null && delaySec > 5) ? 'repl-bad' : 'repl-ok';
+
+    // ★ KPI 卡片：主库 + 从库信息
+    var cards = [];
+    if (hasMaster) {
+        cards.push(
+            {label:'角色', val:'主库 (Master)', cls:'repl-ok'},
+            {label:'Binlog 文件', val: master.File || '--', cls:''},
+            {label:'Binlog 位置', val: String(master.Position || '--'), cls:''},
+            {label:'Binlog_Do_DB', val: master.Binlog_Do_DB || '--', cls:''},
+        );
+    }
+    if (r.is_slave) {
+        var healthy = ioRunning && sqlRunning;
+        cards.push(
+            {label:'IO 线程', val: ioRunning?'运行中':'已停止', cls: ioRunning?'repl-ok':'repl-bad'},
+            {label:'SQL 线程', val: sqlRunning?'运行中':'已停止', cls: sqlRunning?'repl-ok':'repl-bad'},
+            {label:'主从延迟', val: delayStr, cls: delayCls},
+            {label:'整体状态', val: healthy?'✅ 正常':'❌ 异常', cls: healthy?'repl-ok':'repl-bad'},
+        );
+    }
+    var kpiHtml = '';
+    cards.forEach(function(c){
+        kpiHtml += '<div class="repl-kpi"><div class="repl-kpi-label">'+c.label+'</div><div class="repl-kpi-value '+(c.cls||'')+'">'+c.val+'</div></div>';
+    });
+    $('repl_kpi_grid').innerHTML = kpiHtml;
+
+    // ★ 详情表格
+    var sections = [];
+    if (hasMaster) {
+        sections.push({
+            title: '📤 主库信息 (SHOW MASTER STATUS)',
+            source: master,
+            rows: [
+                ['File', 'Binlog 文件'], ['Position', 'Binlog 位置'],
+                ['Binlog_Do_DB', '同步数据库'], ['Binlog_Ignore_DB', '忽略数据库'],
+            ]
+        });
+    }
+    if (r.is_slave) {
+        sections.push({
+            title: '📥 从库信息 (SHOW SLAVE STATUS)',
+            source: ch,
+            rows: [
+                ['Master_Host', '主库主机'], ['Master_Port', '主库端口'], ['Master_User', '复制用户'],
+                ['Master_Log_File', '主库 Binlog 文件'], ['Read_Master_Log_Pos', '读取主库 Binlog 位置'],
+                ['Relay_Master_Log_File', '中继主库 Binlog'], ['Exec_Master_Log_Pos', '执行主库 Binlog 位置'],
+                ['Relay_Log_File', 'Relay Log 文件'], ['Relay_Log_Pos', 'Relay Log 位置'],
+                ['Slave_IO_Running', 'IO 线程状态'], ['Slave_SQL_Running', 'SQL 线程状态'],
+                ['Last_IO_Errno', '最后 IO 错误号'], ['Last_IO_Error', '最后 IO 错误'],
+                ['Last_SQL_Errno', '最后 SQL 错误号'], ['Last_SQL_Error', '最后 SQL 错误'],
+                ['Seconds_Behind_Master', '主从延迟(秒)'],
+                ['Slave_SQL_Running_State', 'SQL 线程状态描述'],
+            ]
+        });
+    }
+    var detailHtml = '';
+    sections.forEach(function(sec){
+        detailHtml += '<div class="repl-detail-title">'+sec.title+'</div><table class="repl-table"><tbody>';
+        sec.rows.forEach(function(pair){
+            var key = pair[0], label = pair[1];
+            var val = sec.source[key];
+            if (val === null || val === undefined || val === '') val = '--';
+            var tdCls = '';
+            if (key === 'Seconds_Behind_Master' && parseInt(val) > 5) tdCls = ' class="repl-bad"';
+            if (key === 'Last_IO_Error' && String(val) !== '--') tdCls = ' class="repl-bad"';
+            if (key === 'Last_SQL_Error' && String(val) !== '--') tdCls = ' class="repl-bad"';
+            detailHtml += '<tr><td class="repl-key">'+label+'</td><td'+tdCls+'>'+escapeHtml(String(val))+'</td></tr>';
+        });
+        detailHtml += '</tbody></table>';
+    });
+    $('repl_detail_body').innerHTML = detailHtml;
+}
+
+function changeReplInterval() {
+    if (_replTimer) { clearInterval(_replTimer); _replTimer = null; }
+    var sec = parseInt(($('repl_interval')||{}).value) || 0;
+    if (sec > 0 && _sqConnected) {
+        _replTimer = setInterval(replicationRefresh, sec * 1000);
+    }
+}
 function _redrawDashCharts() {
     if (!_dashHistory) return;
     _drawLineChart('dash_chart_qps', [_dashHistory.qps], ['QPS'], ['#5dade2'], 'num');
@@ -1796,16 +2095,26 @@ function _fmtChartVal(v, unit) {
     return v.toFixed(0);
 }
 
-/** 渲染状态变量表格（虚拟列表：最多渲染 500 行避免卡顿） */
+/** 渲染状态变量表格（默认只显示有说明的重要变量，可切换显示全部） */
+var _dashStatusShowAll = false;
 function renderDashStatus() {
-    $('dash_status_count').textContent = _dashStatusVars.length;
+    var total = _dashStatusVars.length;
+    var important = _dashStatusVars.filter(function(v){return !!v.desc;});
+    $('dash_status_count').textContent = _dashStatusShowAll ? total : important.length;
     if (_dashStatusVars.length === 0) {
         $('dash_status_body').innerHTML = '<div class="dash-status-empty">暂无状态变量数据</div>';
         return;
     }
-    var html = '<table class="dash-status-table"><thead><tr><th style="width:55%">变量名</th><th style="text-align:right">当前值</th></tr></thead><tbody id="dash_status_tbody"></tbody></table>';
+    var toggleHtml = '<div style="padding:4px 10px;font-size:10px;color:#888;display:flex;justify-content:space-between;align-items:center;">' +
+        '当前显示 ' + (_dashStatusShowAll ? '全部 ' + total + ' 项' : '重要 ' + important.length + ' 项 / 共 ' + total + ' 项') +
+        '<button class="btn btn-sm" style="font-size:9px;padding:2px 8px;" onclick="toggleDashStatusAll()">' + (_dashStatusShowAll ? '只看重要' : '显示全部') + '</button></div>';
+    var html = toggleHtml + '<table class="dash-status-table"><thead><tr><th style="width:35%">变量名</th><th style="width:40%">说明</th><th style="text-align:right">当前值</th></tr></thead><tbody id="dash_status_tbody"></tbody></table>';
     $('dash_status_body').innerHTML = html;
     _renderDashStatusRows();
+}
+function toggleDashStatusAll() {
+    _dashStatusShowAll = !_dashStatusShowAll;
+    renderDashStatus();
 }
 
 function _renderDashStatusRows() {
@@ -1816,16 +2125,16 @@ function _renderDashStatusRows() {
     var matched = 0;
     for (var i = 0; i < _dashStatusVars.length; i++) {
         var v = _dashStatusVars[i];
+        if (!_dashStatusShowAll && !v.desc) continue; // ★ 只看重要：跳过无说明的
         if (filter && v.name.toLowerCase().indexOf(filter) < 0) continue;
-        if (matched >= 500) continue;  // 最多渲染 500 行
+        if (matched >= 500) continue;
         var valStr = v.value;
-        // 长值截断
         if (valStr.length > 80) valStr = valStr.substring(0, 80) + '...';
-        rows += '<tr><td>' + escapeHtml(v.name) + '</td><td class="val-num">' + escapeHtml(valStr) + '</td></tr>';
+        rows += '<tr><td>' + escapeHtml(v.name) + '</td><td class="val-desc">' + escapeHtml(v.desc || '') + '</td><td class="val-num">' + escapeHtml(valStr) + '</td></tr>';
         matched++;
     }
     if (matched === 0) {
-        rows = '<tr><td colspan="2" class="dash-status-empty">没有匹配的状态变量</td></tr>';
+        rows = '<tr><td colspan="3" class="dash-status-empty">没有匹配的状态变量</td></tr>';
     }
     tbody.innerHTML = rows;
 }

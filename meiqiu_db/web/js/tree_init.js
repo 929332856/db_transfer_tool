@@ -45,7 +45,8 @@
                     'find_profile', 'test_connection', 'start_transfer', 'stop_transfer',
                     'datagrip_parse_import',
                     'settings_get', 'settings_save', 'settings_get_paths',
-                    'ping', 'debug_python_info'];
+                    'ping', 'debug_python_info',
+                    'replication_get_status'];
                 var imported = 0;
                 for (var i = 0; i < criticalFns.length; i++) {
                     if (typeof eel[criticalFns[i]] !== 'function') {

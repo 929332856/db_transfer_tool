@@ -6298,9 +6298,100 @@ def dashboard_get_metrics(conn_data: dict):
                         "cmd_delete":   {"cum": com_delete,          "name":"DELETE"},
                     }
 
-                    # ★ 6. 状态变量列表（按名字排序）
+                    # ★ 6. 状态变量列表（按名字排序，附加中文说明）
+                    _STATUS_DESC = {
+                        # 连接
+                        "Aborted_connects": "连接失败次数（密码错误/权限不足等）",
+                        "Aborted_clients": "客户端未正确关闭连接次数",
+                        "Connections": "自启动以来总连接尝试次数",
+                        "Max_used_connections": "历史最高并发连接数",
+                        "Max_used_connections_time": "达到最大并发连接的时间",
+                        "Threads_cached": "线程缓存中空闲线程数",
+                        "Threads_connected": "当前打开的连接数",
+                        "Threads_created": "自启动以来创建的线程总数",
+                        "Threads_running": "当前正在执行命令的线程数",
+                        # 查询/命令
+                        "Questions": "客户端发送的总查询数（含存储过程中的语句）",
+                        "Queries": "服务器执行的总语句数",
+                        "Com_select": "SELECT 语句总数",
+                        "Com_insert": "INSERT 语句总数",
+                        "Com_update": "UPDATE 语句总数",
+                        "Com_delete": "DELETE 语句总数",
+                        "Com_commit": "COMMIT 语句总数",
+                        "Com_rollback": "ROLLBACK 语句总数",
+                        "Slow_queries": "慢查询总数",
+                        # InnoDB Buffer Pool
+                        "Innodb_buffer_pool_read_requests": "InnoDB Buffer Pool 读请求总数",
+                        "Innodb_buffer_pool_reads": "InnoDB 从磁盘物理读取页次数（未命中缓存）",
+                        "Innodb_buffer_pool_pages_total": "InnoDB Buffer Pool 总页数",
+                        "Innodb_buffer_pool_pages_free": "InnoDB Buffer Pool 空闲页数",
+                        "Innodb_buffer_pool_pages_dirty": "InnoDB Buffer Pool 脏页数（待刷盘）",
+                        "Innodb_buffer_pool_pages_data": "InnoDB Buffer Pool 已用数据页数",
+                        "Innodb_buffer_pool_size": "InnoDB Buffer Pool 当前字节大小",
+                        "Innodb_buffer_pool_wait_free": "等待空闲页的写入次数（值 > 0 说明需加大 BP）",
+                        # InnoDB 行锁
+                        "Innodb_row_lock_current_waits": "当前正在等待的行锁数",
+                        "Innodb_row_lock_time": "获取行锁总等待时间(ms)",
+                        "Innodb_row_lock_time_avg": "获取行锁平均等待时间(ms)",
+                        "Innodb_row_lock_time_max": "获取行锁最大等待时间(ms)",
+                        "Innodb_row_lock_waits": "行锁等待总次数",
+                        # InnoDB 读写
+                        "Innodb_rows_read": "InnoDB 读取总行数",
+                        "Innodb_rows_inserted": "InnoDB 插入总行数",
+                        "Innodb_rows_updated": "InnoDB 更新总行数",
+                        "Innodb_rows_deleted": "InnoDB 删除总行数",
+                        # InnoDB IO
+                        "Innodb_data_read": "InnoDB 从磁盘读取总字节数",
+                        "Innodb_data_reads": "InnoDB 磁盘读取总次数",
+                        "Innodb_data_writes": "InnoDB 磁盘写入总次数",
+                        "Innodb_data_written": "InnoDB 写入磁盘总字节数",
+                        "Innodb_log_waits": "redo log buffer 满导致等待刷盘的次数",
+                        "Innodb_os_log_written": "InnoDB redo log 写入字节数",
+                        # 临时表
+                        "Created_tmp_disk_tables": "磁盘临时表创建次数（值高说明需加大 tmp_table_size）",
+                        "Created_tmp_tables": "临时表创建总次数（含内存+磁盘）",
+                        "Created_tmp_files": "临时文件创建次数",
+                        # 表锁
+                        "Table_locks_immediate": "立即获得的表锁次数",
+                        "Table_locks_waited": "需要等待的表锁次数",
+                        # 表缓存
+                        "Open_tables": "当前打开的表数量",
+                        "Opened_tables": "自启动以来打开过的表总数",
+                        "Table_open_cache_hits": "表缓存命中次数",
+                        "Table_open_cache_misses": "表缓存未命中次数",
+                        # 网络
+                        "Bytes_received": "从客户端接收的总字节数",
+                        "Bytes_sent": "发送给客户端的总字节数",
+                        # Handler 读
+                        "Handler_read_first": "读索引第一条的次数（全索引扫描）",
+                        "Handler_read_key": "通过索引读取行次数",
+                        "Handler_read_next": "按索引顺序读下一行次数（范围扫描）",
+                        "Handler_read_rnd_next": "全表扫描读下一行次数（值高需优化索引）",
+                        # 排序
+                        "Sort_merge_passes": "排序合并次数（需加大 sort_buffer_size）",
+                        "Sort_range": "范围扫描排序次数",
+                        "Sort_rows": "排序总行数",
+                        "Sort_scan": "全表扫描排序次数",
+                        # 查询缓存
+                        "Qcache_hits": "查询缓存命中次数",
+                        "Qcache_inserts": "查询缓存插入次数",
+                        "Qcache_lowmem_prunes": "因内存不足从缓存移除的查询数",
+                        "Qcache_not_cached": "不可缓存的查询数",
+                        # 其他
+                        "Select_full_join": "无索引 JOIN 次数（应接近 0）",
+                        "Select_full_range_join": "引用表的范围 JOIN 次数",
+                        "Select_range": "使用第一个表进行范围扫描的次数",
+                        "Select_range_check": "无索引的 JOIN 估计行数检查次数",
+                        "Select_scan": "全表扫描次数",
+                        "Uptime": "MySQL 服务器运行时长（秒）",
+                        "Key_read_requests": "索引读请求次数",
+                        "Key_reads": "从磁盘物理读索引块次数",
+                        "Key_write_requests": "索引写请求次数",
+                        "Key_writes": "索引物理写入磁盘次数",
+                    }
                     status_list = sorted(
-                        [{"name": n, "value": str(v)} for n, v in status.items()],
+                        [{"name": n, "value": str(v), "desc": _STATUS_DESC.get(n, "")}
+                         for n, v in status.items()],
                         key=lambda x: x["name"].lower()
                     )
 
@@ -6890,6 +6981,17 @@ del "%~f0" >nul 2>&1
 
 
 # ==================== 启动 ====================
+# ★ 在模块级别导入子模块（确保 @eel.expose 注册到 eel._exposed_functions）
+#    不放在 if __name__ == "__main__" 内，因为 Flask 模式不会走 main 分支
+try:
+    import modules.datagrip_import
+except ImportError:
+    pass
+try:
+    import modules.replication_status  # 主从复制监控
+except ImportError:
+    pass
+
 if __name__ == "__main__":
     # ★ PyInstaller onefile 在 Windows 上必须调用
     if sys.platform == 'win32' and getattr(sys, 'frozen', False):
@@ -6910,8 +7012,6 @@ if __name__ == "__main__":
                     eel._eel_js = f.read()
     else:
         web_dir = "web"
-    # 导入 DataGrip 导入模块（注册 eel 暴露函数）
-    import modules.datagrip_import
     eel.init(web_dir)
 
     # ★ Flask 适配层：自动检测 web/js/eel_adapter.js 存在时，优先用 Flask+PyWebView

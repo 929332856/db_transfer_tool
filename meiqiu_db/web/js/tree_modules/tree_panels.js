@@ -59,7 +59,7 @@ function renderFolder(f, indent) {
     var subs = (treeData.folders || []).filter(function (x) { return x.parent === f.id; });
     var conns = getConnectionsByFolder(fid);
     var hasKids = subs.length > 0 || conns.length > 0;
-    return '<div class="tree-node" data-fid="'+fid+'"><div class="my-conn-row folder-row drop-folder" style="padding-left:'+(indent+12)+'px" onclick="event.stopPropagation();highlightRow(this)" oncontextmenu="folderCtx(event,\''+fid+'\')" ondragover="onConnFolderDragOver(event,this,\''+fid+'\')" ondragleave="onConnFolderDragLeave(event,this)" ondrop="onConnFolderDrop(event,\''+fid+'\')">' +
+    return '<div class="tree-node" data-fid="'+fid+'"><div class="my-conn-row folder-row drop-folder" style="padding-left:'+(indent+12)+'px" onclick="event.stopPropagation();highlightRow(this);toggleChildren(\'mc_'+fid+'\',\'ma_'+fid+'\')" ondblclick="event.stopPropagation()" oncontextmenu="folderCtx(event,\''+fid+'\')" ondragover="onConnFolderDragOver(event,this,\''+fid+'\')" ondragleave="onConnFolderDragLeave(event,this)" ondrop="onConnFolderDrop(event,\''+fid+'\')">' +
         (hasKids ? '<span class="arrow" id="ma_'+fid+'" onclick="event.stopPropagation();toggleChildren(\'mc_'+fid+'\',\'ma_'+fid+'\')">▸</span>' : '<span class="arrow" id="ma_'+fid+'" style="visibility:hidden">▸</span>') +
         '<span class="my-conn-icon">📁</span><span class="my-conn-name">' + escapeHtml(f.name) + '</span></div>' +
         '<div class="tree-children" id="mc_'+fid+'">' +
@@ -206,7 +206,7 @@ function expandConn(cid, pad) {
                         '<div class="tree-children" id="'+dbId+'"></div></div>';
                 } else {
                     html += '<div class="tree-node db-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px"'+dropAttrs+ctxAttr+' onclick="showDbInfo(\''+cid+'\',\''+escapeAttr(db)+'\')" ondblclick="selectDatabase(\''+cid+'\',\''+escapeAttr(db)+'\',\''+dbId+'\',\'ar_'+dbId+'\')">' +
-                        '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId+'\',\'ar_'+dbId+'\')" style="visibility:hidden">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db)+'</span></div>' +
+                        '<span class="arrow" id="ar_'+dbId+'" onclick="event.stopPropagation();toggleDbChildren(\''+dbId+'\',\'ar_'+dbId+'\')">▸</span><span class="my-conn-icon db-icon closed">'+DB_ICON_SVG+'</span><span class="my-conn-name">'+escapeHtml(db)+'</span></div>' +
                         '<div class="tree-children" id="'+dbId+'">' + renderDbCats(cid, db, pad+40) + '</div></div>';
                 }
             });
@@ -305,7 +305,7 @@ function catRow(cat, icon, cid, db, dbKey, pad, clickFn, ctxFn, schema) {
     return '<div class="my-conn-row tree-subcat cat-row" id="'+rowId+'" style="padding-left:'+pad+'px" onclick="'+clickFn+'('+clickArgs+');highlightCat(\''+rowId+'\')"'+ctx+dropAttrs+'>' +
         '<span class="arrow" id="ar_'+rowId+'" onclick="event.stopPropagation();'+expandFn+'('+expandArgs+')">▸</span>' +
         icon+' ' + catLabel + refreshBtn +
-        '</div><div class="tree-children" id="'+rowId+'"'+extraAttrs+'></div>';
+        '</div><div class="tree-children" id="ch_'+rowId+'"'+extraAttrs+'></div>';
 }
 
 // 通用行高亮：清除所有高亮，给指定元素加上高亮

@@ -410,7 +410,7 @@ function _openQueryInTabImpl(q) {
         activeConnId = cid;
         activeConnData = treeData.connections[cid];
     }
-    // ★ 构建连接+数据库标签（toolbar 右侧展示）
+    // ★ 构建连接+数据库标签（toolbar 右侧展示，颜色用 class 控制以便浅色主题切换）
     var connLabel = '';
     var connData = (cid && treeData && treeData.connections) ? treeData.connections[cid] : null;
     if (connData) {
@@ -418,10 +418,10 @@ function _openQueryInTabImpl(q) {
         var typeIcon = typeIcons[connData.db_type] || '🗄️';
         var connName = connData.name || connData.host || '未知连接';
         var dbName = qdb || '未选择数据库';
-        connLabel = '<span style="margin-left:auto;font-size:11px;color:#aaa;white-space:nowrap;">' +
+        connLabel = '<span class="conn-label" style="margin-left:auto;font-size:11px;white-space:nowrap;">' +
             typeIcon + ' ' + escapeHtml(connName) +
-            ' <span style="color:#666;">/</span> ' +
-            '<span style="color:#4fc3f7;">' + escapeHtml(dbName) + '</span></span>';
+            ' <span class="conn-label-sep">/</span> ' +
+            '<span class="conn-label-db">' + escapeHtml(dbName) + '</span></span>';
     }
     var content =
         '<div class="query-layout" id="ql_'+qid+'">' +
@@ -853,14 +853,29 @@ function _formatSqlTab(qid) {
     var selEnd = ta.selectionEnd;
     var scrollTop = ta.scrollTop;
 
+    // ★ 区分：有选中 → 只美化选中的 SQL；没选中 → 美化整篇
+    var hasSelection = selStart !== selEnd;
+    var targetText = hasSelection ? sql.substring(selStart, selEnd) : sql;
+    if (!targetText || !targetText.trim()) return;
+
     try {
-        var formatted = _formatSql(sql);
-        // ★ 用 execCommand 替换全部内容，使其支持 Ctrl+Z 撤销
+        var formatted = _formatSql(targetText);
+        // ★ 用 execCommand 替换选中/全部内容，使其支持 Ctrl+Z 撤销
         ta.focus();
-        ta.select();
+        if (hasSelection) {
+            ta.setSelectionRange(selStart, selEnd);
+        } else {
+            ta.select();
+        }
         document.execCommand('insertText', false, formatted);
         // 尝试恢复光标到相近位置
-        var newPos = Math.min(selStart, formatted.length);
+        var newPos;
+        if (hasSelection) {
+            // 选中段被替换后，新光标放在替换内容的开头
+            newPos = selStart;
+        } else {
+            newPos = Math.min(selStart, formatted.length);
+        }
         ta.selectionStart = newPos;
         ta.selectionEnd = newPos;
         ta.scrollTop = scrollTop;
@@ -876,8 +891,12 @@ function _formatSqlTab(qid) {
         // 格式化失败不影响使用，恢复原值
         console.warn('SQL 格式化失败:', e);
         ta.focus();
-        ta.select();
-        document.execCommand('insertText', false, sql);
+        if (hasSelection) {
+            ta.setSelectionRange(selStart, selEnd);
+        } else {
+            ta.select();
+        }
+        document.execCommand('insertText', false, targetText);
         ta.selectionStart = selStart;
         ta.selectionEnd = selEnd;
     }

@@ -1,4 +1,82 @@
 // ==================== 对象面板 ====================
+
+/** 解析 tab 提示信息（连接/分组/数据库/表） */
+function _buildTabTipInfo(tab) {
+    if (!tab) return null;
+    var cid = tab.cid || '';
+    var db = tab.db || '';
+    var name = tab.label || '';
+    if (!cid) return null;
+    var conn = (treeData && treeData.connections) ? treeData.connections[cid] : null;
+    if (!conn) return null;
+    var connName = conn.name || conn.host || '未知连接';
+    // 分组：递归查找父文件夹链，用 ">" 连接
+    var folder = '';
+    try {
+        var cur = conn.parent || '';
+        var segs = [];
+        while (cur) {
+            var f = (treeData.folders || []).find(function(x){return x.id === cur;});
+            if (!f) break;
+            segs.unshift(f.name);
+            cur = f.parent || '';
+        }
+        folder = segs.join(' / ') || '根目录';
+    } catch (e) {
+        folder = '根目录';
+    }
+    return { conn: connName, folder: folder, db: db || '—', name: name };
+}
+
+/** 弹出 tab 提示卡 */
+function _showTabTip(e, el) {
+    _hideTabTip();
+    if (!el || !el.getAttribute('data-tip-conn')) return;
+    var tip = document.createElement('div');
+    tip.id = '_tab_tip_popup';
+    tip.className = 'tab-tip-popup';
+    tip.innerHTML =
+        '<div class="tab-tip-row"><span class="tab-tip-key">连接：</span><span class="tab-tip-val">' + escapeHtml(el.getAttribute('data-tip-conn')) + '</span></div>' +
+        '<div class="tab-tip-row"><span class="tab-tip-key">分组：</span><span class="tab-tip-val">' + escapeHtml(el.getAttribute('data-tip-folder')) + '</span></div>' +
+        '<div class="tab-tip-row"><span class="tab-tip-key">数据库：</span><span class="tab-tip-val">' + escapeHtml(el.getAttribute('data-tip-db')) + '</span></div>' +
+        '<div class="tab-tip-row"><span class="tab-tip-key">表：</span><span class="tab-tip-val">' + escapeHtml(el.getAttribute('data-tip-name')) + '</span></div>';
+    document.body.appendChild(tip);
+    // 定位：tab 下方居中
+    var rect = el.getBoundingClientRect();
+    var tipRect = tip.getBoundingClientRect();
+    var left = rect.left + rect.width / 2 - tipRect.width / 2;
+    var top = rect.bottom + 6;
+    // 防止超出屏幕右边
+    if (left + tipRect.width > window.innerWidth - 4) left = window.innerWidth - tipRect.width - 4;
+    if (left < 4) left = 4;
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+    _tabTipEnterTimer = setTimeout(function(){ tip.classList.add('show'); }, 60);
+}
+
+/** 隐藏 tab 提示卡 */
+function _hideTabTip() {
+    if (_tabTipEnterTimer) { clearTimeout(_tabTipEnterTimer); _tabTipEnterTimer = null; }
+    var tip = document.getElementById('_tab_tip_popup');
+    if (tip) tip.remove();
+}
+var _tabTipEnterTimer = null;
+
+// ★ 全局兜底：鼠标移出 tab 栏区域时强制关闭 tip（避免 tab 被关闭/重建后 tip 残留）
+(function initTabTipGlobalHide() {
+    function onMove(e) {
+        var tip = document.getElementById('_tab_tip_popup');
+        if (!tip) return;
+        var tabBar = document.getElementById('obj_tabs_bar');
+        if (!tabBar) return;
+        var t = e.target;
+        // 鼠标在 tab 上或 tip 上 → 保留；否则关闭
+        if (tabBar.contains(t) || tip.contains(t)) return;
+        _hideTabTip();
+    }
+    document.addEventListener('mousemove', onMove);
+})();
+
 function buildObjHomeContent(items, cat, db, schema, cid) {
     var sch = schema || '';
     var h = '';
@@ -69,7 +147,15 @@ function renderObjectPanel() {
     objectTabs.forEach(function(t){
         var cls = t.id===activeObjTab?'obj-tab active':'obj-tab';
         var icon = t.type==='ddl'?'🔧 ':t.type==='data'?'📊 ':t.type==='query'?'📝 ':'📋 ';
-        h += '<span class="'+cls+'" data-tabid="'+t.id+'" onclick="switchObjTab(\''+t.id+'\')">'+icon+escapeHtml(t.label);
+        var tipAttr = '';
+        // ★ data/ddl/query 类型的 tab 添加悬停提示（连接/分组/数据库/表）
+        if (t.type === 'data' || t.type === 'ddl' || t.type === 'query') {
+            var info = _buildTabTipInfo(t);
+            if (info) {
+                tipAttr = ' data-tip-conn="'+escapeAttr(info.conn)+'" data-tip-folder="'+escapeAttr(info.folder)+'" data-tip-db="'+escapeAttr(info.db)+'" data-tip-name="'+escapeAttr(info.name)+'"';
+            }
+        }
+        h += '<span class="'+cls+'" data-tabid="'+t.id+'"'+tipAttr+' onclick="switchObjTab(\''+t.id+'\')" onmouseenter="_showTabTip(event,this)" onmouseleave="_hideTabTip()">'+icon+escapeHtml(t.label);
         if(t.id!=='obj_home') h += '<span class="tab-close" onclick="event.stopPropagation();closeTab(\''+t.id+'\')">✕</span>';
         h += '</span>';
     });
@@ -321,6 +407,8 @@ function _redisDoServerSearch(cid, dbIdx, dbId, kw) {
 }
 
 function closeTab(tabId) {
+    // ★ 关闭 tab 时强制隐藏 tab 悬浮提示（避免提示卡残留）
+    _hideTabTip();
     // 清理该 tab 对应的 splitter 绑定标记
     var qidMatch = tabId.match(/^query_(.+)$/);
     if (qidMatch) delete _querySplitterInited['qs_' + qidMatch[1]];
@@ -345,6 +433,8 @@ function closeTab(tabId) {
 
 function switchObjTab(tabId) {
     if (activeObjTab === tabId) return; // 同一个 tab 不做任何事
+    // ★ 切换 tab 时强制隐藏 tip（避免上一个 tab 的 tip 残留）
+    _hideTabTip();
     var oldId = activeObjTab;
     activeObjTab = tabId;
     // ★ 先保存 textarea 编辑状态（记录 _cachedSql/_cachedHtml）

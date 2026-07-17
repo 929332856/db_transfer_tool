@@ -63,6 +63,7 @@ ASYNC_FUNCTIONS = {
     'slow_query_get_detail', 'slow_query_get_running', 'slow_query_enable',
     'slow_query_get_databases', 'slow_query_kill_processlist',
     'dashboard_get_metrics',
+    'replication_get_status',
     'get_database_info', 'get_connection_info',
     'db_explore_get_databases', 'db_explore_get_schemas',
     'db_explore_get_tables', 'db_explore_get_views', 'db_explore_get_procedures',
@@ -168,6 +169,17 @@ def register_routes(app):
     exposed_funcs = {}
     for name in exposed_names:
         obj = getattr(main_module, name, None)
+        if not callable(obj):
+            # ★ 子模块中的 @eel.expose 函数（如 modules.replication_status）
+            #    在主模块中找不到，去 modules.* 中查找
+            for sub in ('modules.datagrip_import', 'modules.replication_status'):
+                try:
+                    sub_mod = __import__(sub, fromlist=[name])
+                    obj = getattr(sub_mod, name, None)
+                    if callable(obj):
+                        break
+                except Exception:
+                    pass
         if callable(obj):
             exposed_funcs[name] = obj
 

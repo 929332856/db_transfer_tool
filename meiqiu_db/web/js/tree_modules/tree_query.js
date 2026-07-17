@@ -493,8 +493,8 @@ function _renderRowControls(qid) {
     var isLoadingAll = es._loadingAll;
 
     if (isLoadingAll) {
-        var html2 = '<div id="' + qid + '_pagbar" style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:#111;border-top:1px solid #333;font-size:11px;color:#888;flex-wrap:wrap;">';
-        html2 += '<span style="color:#f39c12;">正在加载全部 ' + loaded + '/' + total + ' 行...</span>';
+        var html2 = '<div id="' + qid + '_pagbar" class="qr-pagbar" style="display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:11px;flex-wrap:wrap;">';
+        html2 += '<span class="qr-pagbar-warn">正在加载全部 ' + loaded + '/' + total + ' 行...</span>';
         html2 += '<button class="btn btn-sm" onclick="_cancelShowAll(\x27' + qid + '\x27)" style="background:#e74c3c;color:#fff;font-size:10px;cursor:pointer;">取消加载</button>';
         html2 += '</div>';
         return html2;
@@ -503,11 +503,11 @@ function _renderRowControls(qid) {
     var shownAll = (loaded >= total && showCount >= total);
     var displayed = Math.min(showCount, loaded, total);
 
-    var html = '<div id="' + qid + '_pagbar" style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:#111;border-top:1px solid #333;font-size:11px;color:#888;flex-wrap:wrap;">';
+    var html = '<div id="' + qid + '_pagbar" class="qr-pagbar" style="display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:11px;flex-wrap:wrap;">';
     html += '<span>显示 <b>1</b>-<b>' + displayed + '</b> 行，共 <b>' + total + '</b> 行</span>';
 
     html += '<span>展示:</span>';
-    html += '<select id="' + qid + '_rowcount_sel" onchange="_changeRowCount(\x27' + qid + '\x27)" style="background:#222;color:#ddd;border:1px solid #444;padding:2px 4px;font-size:10px;border-radius:3px;">';
+    html += '<select class="qr-pagbar-sel" id="' + qid + '_rowcount_sel" onchange="_changeRowCount(\x27' + qid + '\x27)">';
     var rowOptions = [200, 500, 1000, 2000, 5000];
     var selVal = showCount;
     for (var rj = 0; rj < rowOptions.length; rj++) {
@@ -523,9 +523,9 @@ function _renderRowControls(qid) {
     }
 
     if (shownAll) {
-        html += '<span style="color:#2ecc71;">已显示全部 ' + total + ' 行</span>';
+        html += '<span class="qr-pagbar-ok">已显示全部 ' + total + ' 行</span>';
     } else if (loaded < Math.min(showCount, total)) {
-        html += '<span style="color:#f39c12;">(当前仅显示前 ' + loaded + ' 行，需切换行数后加载更多)</span>';
+        html += '<span class="qr-pagbar-warn">(当前仅显示前 ' + loaded + ' 行，需切换行数后加载更多)</span>';
     }
 
     html += '</div>';
@@ -984,8 +984,8 @@ function _qDoSave(qid) {
         var sql = r.sql || '';
         // 第二步：弹窗确认 SQL 后再执行
         showConfirmDialog('确认执行修改',
-            '<div style="max-height:300px;overflow:auto;background:#0d1117;padding:8px;border-radius:4px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;">' + escapeHtml(sql) + '</div>' +
-            '<div style="margin-top:6px;color:#f39c12;font-size:11px;">共 ' + r.count + ' 处修改</div>',
+            '<div class="confirm-sql-preview">' + escapeHtml(sql) + '</div>' +
+            '<div class="confirm-sql-count">共 ' + r.count + ' 处修改</div>',
             function() {
                 // ★ 执行中：按钮 hover 显示"取消执行"，点击可 Kill 数据库会话
                 _qSaveBtnRunning(btn, qid);
@@ -1000,7 +1000,7 @@ function _qDoSave(qid) {
                         showWarnDialog('保存失败', r2 ? r2.msg : '无响应');
                         return;
                     }
-                    showOkDialog('保存成功', r2.msg);
+                    // ★ 保存成功不弹窗，直接刷新数据（避免"确认弹窗→成功弹窗"闪烁）
                     es.changedCells = {};
                     es.editing = false;
                     _qUpdateBtns(qid);
@@ -1086,8 +1086,8 @@ function _qDoDelete(qid) {
     eel.table_delete_rows(es.connData, es.execDb, es._tableName || '', '', rowsData)(function(r){
         if (!r || !r.ok) { showWarnDialog('删除失败', r?r.msg:'无响应'); return; }
         showConfirmDialog('确认删除',
-            '<div style="max-height:300px;overflow:auto;background:#0d1117;padding:8px;border-radius:4px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;">' + escapeHtml(r.sql||'') + '</div>' +
-            '<div style="margin-top:6px;color:#e74c3c;font-size:11px;">⚠ 将删除 ' + r.count + ' 行数据</div>',
+            '<div class="confirm-sql-preview">' + escapeHtml(r.sql||'') + '</div>' +
+            '<div class="confirm-sql-warn">⚠ 将删除 ' + r.count + ' 行数据</div>',
             function(){
                 eel.table_exec_delete(es.connData, es.execDb, es._tableName || '', '', rowsData)(function(r2){
                     if (!r2 || !r2.ok) { showWarnDialog('执行失败', r2?r2.msg:'无响应'); return; }
@@ -1215,15 +1215,15 @@ function _qRebuildSingleTab(qid, tabIdx) {
 
     var tabBody = '';
     if (cols.length > 0) {
-        tabBody += '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:#111;border-bottom:1px solid #333;flex-wrap:wrap;">' +
+        tabBody += '<div class="qr-action-bar" style="display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap;">' +
             '<button class="btn btn-sm" id="'+qid+'_mqsave_'+tabIdx+'" onclick="_qDoSaveMulti(\''+qid+'\','+tabIdx+')" disabled style="background:#2ecc71;color:#fff;font-size:10px;">💾 保存 (0)</button>' +
             '<button class="btn btn-sm" id="'+qid+'_mqcancel_'+tabIdx+'" onclick="_qCancelEditMulti(\''+qid+'\','+tabIdx+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
             '<span style="flex:1;"></span>' +
             '<button class="btn btn-sm" id="'+qid+'_mqdel_'+tabIdx+'" onclick="_qDoDeleteMulti(\''+qid+'\','+tabIdx+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
             '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\','+tabIdx+')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
-            '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
+            '<span class="qr-tip" style="font-size:10px;">双击单元格编辑 | 选中行可删除</span></div>';
         var multiTotal = es._multiTotalRows[tabIdx] || rows.length;
-        tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+multiTotal+' 行'+_fmtExecTimeHtml(es._multiResults && es._multiResults[tabIdx])+'</div>';
+        tabBody += '<div class="qr-stats-bar" style="padding:6px 12px;font-size:11px;">📊 查询结果 — '+multiTotal+' 行'+_fmtExecTimeHtml(es._multiResults && es._multiResults[tabIdx])+'</div>';
         // ★ 超过500行启用虚拟滚动
         var mMax = rows.length;
         var needVTM = (mMax > _VT_THRESHOLD);
@@ -1263,7 +1263,7 @@ function _qRebuildSingleTab(qid, tabIdx) {
         // ★ 多结果分页：总数超过已加载行数时显示分页按钮
         var multiJid = es._multiJobIds[tabIdx];
         if (multiTotal > rows.length && multiJid) {
-            tabBody += '<div id="' + qid + '_mpb_' + tabIdx + '" style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#111;border-top:1px solid #333;font-size:10px;color:#888;">';
+            tabBody += '<div id="' + qid + '_mpb_' + tabIdx + '" class="qr-pagbar" style="display:flex;align-items:center;gap:8px;padding:6px 8px;font-size:10px;">';
             tabBody += '<span>显示 <b>1</b>-<b>' + rows.length + '</b> 行，共 <b>' + multiTotal + '</b> 行</span>';
             tabBody += '<button class="btn btn-sm" onclick="_loadMultiAll(\''+qid+'\',' + tabIdx + ',' + multiTotal + ')" style="background:#27ae60;color:#fff;font-size:9px;">显示全部(' + multiTotal + '行)</button>';
             tabBody += '</div>';
@@ -1282,14 +1282,14 @@ function _qRenderTable(qid) {
     if (!div || !es.columns.length) return;
     var rc = es._totalRows || es.rows.length;
     var html = '';
-    html += '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:#111;border-bottom:1px solid #333;flex-wrap:wrap;">' +
+    html += '<div class="qr-action-bar" style="display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap;">' +
         '<button class="btn btn-sm" id="'+qid+'_qsave_btn" onclick="_qDoSave(\''+qid+'\')" disabled style="background:#2ecc71;color:#fff;font-size:10px;">💾 保存 (0)</button>' +
         '<button class="btn btn-sm" id="'+qid+'_qcancel_btn" onclick="_qCancelEdit(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
         '<span style="flex:1;"></span>' +
         '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
         '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
-        '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-    html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — ' + rc + ' 行'+_fmtExecTimeHtml(es._lastResult)+'</div>';
+        '<span class="qr-tip" style="font-size:10px;">双击单元格编辑 | 选中行可删除</span></div>';
+    html += '<div class="qr-stats-bar" style="padding:6px 12px;font-size:11px;">📊 查询结果 — ' + rc + ' 行'+_fmtExecTimeHtml(es._lastResult)+'</div>';
 
     // ★ 超过500行启用虚拟滚动：只渲染屏幕上可见的30-50行DOM，滚动流畅不卡死
     var maxShow = Math.min(es.rows.length, es._showRowCount || 200);
@@ -1430,14 +1430,14 @@ function renderQueryResults(div, results, total, stmtsArr) {
                 } else if (!es._tableName) {
                     es._allColumnsPresent = false;
                 }
-                html += '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:#111;border-bottom:1px solid #333;flex-wrap:wrap;">' +
+                html += '<div class="qr-action-bar" style="display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap;">' +
                     '<button class="btn btn-sm" id="'+qid+'_qsave_btn" onclick="_qDoSave(\''+qid+'\')" disabled style="background:#2ecc71;color:#fff;font-size:10px;">💾 保存 (0)</button>' +
                     '<button class="btn btn-sm" id="'+qid+'_qcancel_btn" onclick="_qCancelEdit(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
                     '<span style="flex:1;"></span>' +
                     '<button class="btn btn-sm" id="'+qid+'_qdel_btn" onclick="_qDoDelete(\''+qid+'\')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
                     '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
-                    '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-                html += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rc+' 行'+_fmtExecTimeHtml(r0)+'</div>';
+                    '<span class="qr-tip" style="font-size:10px;">双击单元格编辑 | 选中行可删除</span></div>';
+                html += '<div class="qr-stats-bar" style="padding:6px 12px;font-size:11px;">📊 查询结果 — '+rc+' 行'+_fmtExecTimeHtml(r0)+'</div>';
                 html += '<div style="overflow:auto;flex:1;min-height:0;"><table class="exp-table"><thead><tr>';
                 html += '<th class="row-sel-header" id="'+qid+'_qsel_all" onclick="_qToggleSelAll(\x27'+qid+'\x27)" title="全选/取消全选">#</th>';
                 es.columns.forEach(function(c){
@@ -1567,14 +1567,14 @@ function renderQueryResults(div, results, total, stmtsArr) {
                 var rows2 = r2.rows||[];
                 es._multiCols[i2] = cols2;
                 es._multiRows[i2] = rows2;
-                tabBody = '<div style="display:flex;align-items:center;gap:6px;padding:6px 8px;background:#111;border-bottom:1px solid #333;flex-wrap:wrap;">' +
+                tabBody = '<div class="qr-action-bar" style="display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap;">' +
                     '<button class="btn btn-sm" id="'+qid+'_mqsave_'+i2+'" onclick="_qDoSaveMulti(\''+qid+'\','+i2+')" disabled style="background:#2ecc71;color:#fff;font-size:10px;">💾 保存 (0)</button>' +
                     '<button class="btn btn-sm" id="'+qid+'_mqcancel_'+i2+'" onclick="_qCancelEditMulti(\''+qid+'\','+i2+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
                     '<span style="flex:1;"></span>' +
                     '<button class="btn btn-sm" id="'+qid+'_mqdel_'+i2+'" onclick="_qDoDeleteMulti(\''+qid+'\','+i2+')" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
                     '<button class="btn btn-sm" onclick="_qExportResult(\''+qid+'\','+i2+')" style="background:#27ae60;color:#fff;font-size:10px;">📥 导出</button>' +
-                    '<span style="font-size:10px;color:#666;">双击单元格编辑 | 选中行可删除</span></div>';
-                tabBody += '<div style="padding:6px 12px;font-size:11px;color:#888;border-bottom:1px solid #333;">📊 查询结果 — '+rows2.length+' 行'+_fmtExecTimeHtml(r2)+'</div>';
+                    '<span class="qr-tip" style="font-size:10px;">双击单元格编辑 | 选中行可删除</span></div>';
+                tabBody += '<div class="qr-stats-bar" style="padding:6px 12px;font-size:11px;">📊 查询结果 — '+rows2.length+' 行'+_fmtExecTimeHtml(r2)+'</div>';
                 tabBody += '<div style="overflow:auto;flex:1;min-height:0;"><table class="exp-table"><thead><tr>';
                 tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+i2+'" onclick="_qToggleSelAllMulti(\''+qid+'\','+i2+')" title="全选/取消全选">#</th>';
                 cols2.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
@@ -1602,7 +1602,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
                 var multiTotal = es._multiTotalRows[i2] || rows2.length;
                 var multiJid = es._multiJobIds[i2];
                 if (multiTotal > rows2.length && multiJid) {
-                    tabBody += '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#111;border-top:1px solid #333;font-size:10px;color:#888;">';
+                    tabBody += '<div class="qr-pagbar" style="display:flex;align-items:center;gap:8px;padding:6px 8px;font-size:10px;">';
                     tabBody += '<span>显示 <b>1</b>-<b>' + rows2.length + '</b> 行，共 <b>' + multiTotal + '</b> 行</span>';
                     tabBody += '<button class="btn btn-sm" onclick="_loadMultiAll(\''+qid+'\',' + i2 + ',' + multiTotal + ')" style="background:#27ae60;color:#fff;font-size:9px;">显示全部(' + multiTotal + '行)</button>';
                     tabBody += '</div>';
@@ -1877,8 +1877,8 @@ function _qDoSaveMulti(qid, tabIdx) {
             return;
         }
         showConfirmDialog('确认执行修改',
-            '<div style="max-height:300px;overflow:auto;background:#0d1117;padding:8px;border-radius:4px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;">' + escapeHtml(r.sql||'') + '</div>' +
-            '<div style="margin-top:6px;color:#f39c12;font-size:11px;">共 ' + r.count + ' 处修改</div>',
+            '<div class="confirm-sql-preview">' + escapeHtml(r.sql||'') + '</div>' +
+            '<div class="confirm-sql-count">共 ' + r.count + ' 处修改</div>',
             function() {
                 // ★ 执行中：hover 变为取消执行，点击 Kill 数据库会话
                 _qSaveBtnRunning(btn, qid);
@@ -1892,7 +1892,7 @@ function _qDoSaveMulti(qid, tabIdx) {
                         showWarnDialog('保存失败', r2 ? r2.msg : '无响应');
                         return;
                     }
-                    showOkDialog('保存成功', r2.msg);
+                    // ★ 保存成功不弹窗，直接刷新数据
                     es._multiChanged[tabIdx] = {};
                     _qUpdateMultiBtns(qid, tabIdx);
                     _qRefreshData(qid, tabIdx);
@@ -1947,8 +1947,8 @@ function _qDoDeleteMulti(qid, tabIdx) {
     eel.table_delete_rows(es.connData, es.execDb, tableName, '', rowsData)(function(r){
         if (!r || !r.ok) { showWarnDialog('删除失败', r?r.msg:'无响应'); return; }
         showConfirmDialog('确认删除',
-            '<div style="max-height:300px;overflow:auto;background:#0d1117;padding:8px;border-radius:4px;font-family:Consolas,monospace;font-size:11px;white-space:pre-wrap;">' + escapeHtml(r.sql||'') + '</div>' +
-            '<div style="margin-top:6px;color:#e74c3c;font-size:11px;">⚠ 将删除 ' + r.count + ' 行数据</div>',
+            '<div class="confirm-sql-preview">' + escapeHtml(r.sql||'') + '</div>' +
+            '<div class="confirm-sql-warn">⚠ 将删除 ' + r.count + ' 行数据</div>',
             function(){
                 eel.table_exec_delete(es.connData, es.execDb, tableName, '', rowsData)(function(r2){
                     if (!r2 || !r2.ok) { showWarnDialog('执行失败', r2?r2.msg:'无响应'); return; }
