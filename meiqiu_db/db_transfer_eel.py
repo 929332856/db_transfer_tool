@@ -1534,6 +1534,9 @@ def table_exec_save(conn_data, database, table_name, schema, changes):
                 new_val = ch["newVal"]
                 orig_row = ch.get("origRow", [])
                 columns = ch.get("columns", [])
+                # ★ 禁止修改主键列（会引发 Duplicate entry）
+                if col in where_cols:
+                    return {"ok": False, "msg": f"不能修改主键列 '{col}'，请用 DELETE + INSERT 替代"}
                 set_clause = f"{_safe_ident(col, db_type)} = {_sql_value(new_val, db_type)}"
                 where_clause = _build_where_clause(tbl, db_type, where_cols, columns, orig_row)
                 update_sql = f"UPDATE {tbl} SET {set_clause} WHERE {where_clause}"
@@ -6298,96 +6301,96 @@ def dashboard_get_metrics(conn_data: dict):
                         "cmd_delete":   {"cum": com_delete,          "name":"DELETE"},
                     }
 
-                    # ★ 6. 状态变量列表（按名字排序，附加中文说明）
+                    # ★ 6. 状态变量列表（按名字排序，附加中文说明 + [累计]/[瞬时] 标注）
                     _STATUS_DESC = {
                         # 连接
-                        "Aborted_connects": "连接失败次数（密码错误/权限不足等）",
-                        "Aborted_clients": "客户端未正确关闭连接次数",
-                        "Connections": "自启动以来总连接尝试次数",
-                        "Max_used_connections": "历史最高并发连接数",
-                        "Max_used_connections_time": "达到最大并发连接的时间",
-                        "Threads_cached": "线程缓存中空闲线程数",
-                        "Threads_connected": "当前打开的连接数",
-                        "Threads_created": "自启动以来创建的线程总数",
-                        "Threads_running": "当前正在执行命令的线程数",
+                        "Aborted_connects": "连接失败次数（密码错误/权限不足等）[累计]",
+                        "Aborted_clients": "客户端未正确关闭连接次数 [累计]",
+                        "Connections": "总连接尝试次数 [累计]",
+                        "Max_used_connections": "历史最高并发连接数 [瞬时]",
+                        "Max_used_connections_time": "达到最大并发连接的时间 [瞬时]",
+                        "Threads_cached": "线程缓存中空闲线程数 [瞬时]",
+                        "Threads_connected": "当前打开的连接数 [瞬时]",
+                        "Threads_created": "创建的线程总数 [累计]",
+                        "Threads_running": "当前正在执行命令的线程数 [瞬时]",
                         # 查询/命令
-                        "Questions": "客户端发送的总查询数（含存储过程中的语句）",
-                        "Queries": "服务器执行的总语句数",
-                        "Com_select": "SELECT 语句总数",
-                        "Com_insert": "INSERT 语句总数",
-                        "Com_update": "UPDATE 语句总数",
-                        "Com_delete": "DELETE 语句总数",
-                        "Com_commit": "COMMIT 语句总数",
-                        "Com_rollback": "ROLLBACK 语句总数",
-                        "Slow_queries": "慢查询总数",
+                        "Questions": "客户端发送的总查询数 [累计]",
+                        "Queries": "服务器执行的总语句数 [累计]",
+                        "Com_select": "SELECT 语句总数 [累计]",
+                        "Com_insert": "INSERT 语句总数 [累计]",
+                        "Com_update": "UPDATE 语句总数 [累计]",
+                        "Com_delete": "DELETE 语句总数 [累计]",
+                        "Com_commit": "COMMIT 语句总数 [累计]",
+                        "Com_rollback": "ROLLBACK 语句总数 [累计]",
+                        "Slow_queries": "慢查询总数 [累计]",
                         # InnoDB Buffer Pool
-                        "Innodb_buffer_pool_read_requests": "InnoDB Buffer Pool 读请求总数",
-                        "Innodb_buffer_pool_reads": "InnoDB 从磁盘物理读取页次数（未命中缓存）",
-                        "Innodb_buffer_pool_pages_total": "InnoDB Buffer Pool 总页数",
-                        "Innodb_buffer_pool_pages_free": "InnoDB Buffer Pool 空闲页数",
-                        "Innodb_buffer_pool_pages_dirty": "InnoDB Buffer Pool 脏页数（待刷盘）",
-                        "Innodb_buffer_pool_pages_data": "InnoDB Buffer Pool 已用数据页数",
-                        "Innodb_buffer_pool_size": "InnoDB Buffer Pool 当前字节大小",
-                        "Innodb_buffer_pool_wait_free": "等待空闲页的写入次数（值 > 0 说明需加大 BP）",
+                        "Innodb_buffer_pool_read_requests": "Buffer Pool 读请求总数 [累计]",
+                        "Innodb_buffer_pool_reads": "从磁盘物理读取页次数 [累计]",
+                        "Innodb_buffer_pool_pages_total": "Buffer Pool 总页数 [瞬时]",
+                        "Innodb_buffer_pool_pages_free": "Buffer Pool 空闲页数 [瞬时]",
+                        "Innodb_buffer_pool_pages_dirty": "Buffer Pool 脏页数 [瞬时]",
+                        "Innodb_buffer_pool_pages_data": "Buffer Pool 已用数据页数 [瞬时]",
+                        "Innodb_buffer_pool_size": "Buffer Pool 当前字节大小 [瞬时]",
+                        "Innodb_buffer_pool_wait_free": "等待空闲页的写入次数 [累计]",
                         # InnoDB 行锁
-                        "Innodb_row_lock_current_waits": "当前正在等待的行锁数",
-                        "Innodb_row_lock_time": "获取行锁总等待时间(ms)",
-                        "Innodb_row_lock_time_avg": "获取行锁平均等待时间(ms)",
-                        "Innodb_row_lock_time_max": "获取行锁最大等待时间(ms)",
-                        "Innodb_row_lock_waits": "行锁等待总次数",
+                        "Innodb_row_lock_current_waits": "当前正在等待的行锁数 [瞬时]",
+                        "Innodb_row_lock_time": "获取行锁总等待时间(ms) [累计]",
+                        "Innodb_row_lock_time_avg": "获取行锁平均等待时间(ms) [累计]",
+                        "Innodb_row_lock_time_max": "获取行锁最大等待时间(ms) [累计]",
+                        "Innodb_row_lock_waits": "行锁等待总次数 [累计]",
                         # InnoDB 读写
-                        "Innodb_rows_read": "InnoDB 读取总行数",
-                        "Innodb_rows_inserted": "InnoDB 插入总行数",
-                        "Innodb_rows_updated": "InnoDB 更新总行数",
-                        "Innodb_rows_deleted": "InnoDB 删除总行数",
+                        "Innodb_rows_read": "读取总行数 [累计]",
+                        "Innodb_rows_inserted": "插入总行数 [累计]",
+                        "Innodb_rows_updated": "更新总行数 [累计]",
+                        "Innodb_rows_deleted": "删除总行数 [累计]",
                         # InnoDB IO
-                        "Innodb_data_read": "InnoDB 从磁盘读取总字节数",
-                        "Innodb_data_reads": "InnoDB 磁盘读取总次数",
-                        "Innodb_data_writes": "InnoDB 磁盘写入总次数",
-                        "Innodb_data_written": "InnoDB 写入磁盘总字节数",
-                        "Innodb_log_waits": "redo log buffer 满导致等待刷盘的次数",
-                        "Innodb_os_log_written": "InnoDB redo log 写入字节数",
+                        "Innodb_data_read": "从磁盘读取总字节数 [累计]",
+                        "Innodb_data_reads": "磁盘读取总次数 [累计]",
+                        "Innodb_data_writes": "磁盘写入总次数 [累计]",
+                        "Innodb_data_written": "写入磁盘总字节数 [累计]",
+                        "Innodb_log_waits": "redo log buffer 满导致等待刷盘的次数 [累计]",
+                        "Innodb_os_log_written": "redo log 写入字节数 [累计]",
                         # 临时表
-                        "Created_tmp_disk_tables": "磁盘临时表创建次数（值高说明需加大 tmp_table_size）",
-                        "Created_tmp_tables": "临时表创建总次数（含内存+磁盘）",
-                        "Created_tmp_files": "临时文件创建次数",
+                        "Created_tmp_disk_tables": "磁盘临时表创建次数 [累计]",
+                        "Created_tmp_tables": "临时表创建总次数（含内存+磁盘）[累计]",
+                        "Created_tmp_files": "临时文件创建次数 [累计]",
                         # 表锁
-                        "Table_locks_immediate": "立即获得的表锁次数",
-                        "Table_locks_waited": "需要等待的表锁次数",
+                        "Table_locks_immediate": "立即获得的表锁次数 [累计]",
+                        "Table_locks_waited": "需要等待的表锁次数 [累计]",
                         # 表缓存
-                        "Open_tables": "当前打开的表数量",
-                        "Opened_tables": "自启动以来打开过的表总数",
-                        "Table_open_cache_hits": "表缓存命中次数",
-                        "Table_open_cache_misses": "表缓存未命中次数",
+                        "Open_tables": "当前打开的表数量 [瞬时]",
+                        "Opened_tables": "打开过的表总数 [累计]",
+                        "Table_open_cache_hits": "表缓存命中次数 [累计]",
+                        "Table_open_cache_misses": "表缓存未命中次数 [累计]",
                         # 网络
-                        "Bytes_received": "从客户端接收的总字节数",
-                        "Bytes_sent": "发送给客户端的总字节数",
+                        "Bytes_received": "从客户端接收的总字节数 [累计]",
+                        "Bytes_sent": "发送给客户端的总字节数 [累计]",
                         # Handler 读
-                        "Handler_read_first": "读索引第一条的次数（全索引扫描）",
-                        "Handler_read_key": "通过索引读取行次数",
-                        "Handler_read_next": "按索引顺序读下一行次数（范围扫描）",
-                        "Handler_read_rnd_next": "全表扫描读下一行次数（值高需优化索引）",
+                        "Handler_read_first": "读索引第一条的次数 [累计]",
+                        "Handler_read_key": "通过索引读取行次数 [累计]",
+                        "Handler_read_next": "按索引顺序读下一行次数 [累计]",
+                        "Handler_read_rnd_next": "全表扫描读下一行次数 [累计]",
                         # 排序
-                        "Sort_merge_passes": "排序合并次数（需加大 sort_buffer_size）",
-                        "Sort_range": "范围扫描排序次数",
-                        "Sort_rows": "排序总行数",
-                        "Sort_scan": "全表扫描排序次数",
+                        "Sort_merge_passes": "排序合并次数 [累计]",
+                        "Sort_range": "范围扫描排序次数 [累计]",
+                        "Sort_rows": "排序总行数 [累计]",
+                        "Sort_scan": "全表扫描排序次数 [累计]",
                         # 查询缓存
-                        "Qcache_hits": "查询缓存命中次数",
-                        "Qcache_inserts": "查询缓存插入次数",
-                        "Qcache_lowmem_prunes": "因内存不足从缓存移除的查询数",
-                        "Qcache_not_cached": "不可缓存的查询数",
+                        "Qcache_hits": "查询缓存命中次数 [累计]",
+                        "Qcache_inserts": "查询缓存插入次数 [累计]",
+                        "Qcache_lowmem_prunes": "因内存不足从缓存移除的查询数 [累计]",
+                        "Qcache_not_cached": "不可缓存的查询数 [累计]",
                         # 其他
-                        "Select_full_join": "无索引 JOIN 次数（应接近 0）",
-                        "Select_full_range_join": "引用表的范围 JOIN 次数",
-                        "Select_range": "使用第一个表进行范围扫描的次数",
-                        "Select_range_check": "无索引的 JOIN 估计行数检查次数",
-                        "Select_scan": "全表扫描次数",
-                        "Uptime": "MySQL 服务器运行时长（秒）",
-                        "Key_read_requests": "索引读请求次数",
-                        "Key_reads": "从磁盘物理读索引块次数",
-                        "Key_write_requests": "索引写请求次数",
-                        "Key_writes": "索引物理写入磁盘次数",
+                        "Select_full_join": "无索引 JOIN 次数 [累计]",
+                        "Select_full_range_join": "引用表的范围 JOIN 次数 [累计]",
+                        "Select_range": "使用第一个表进行范围扫描的次数 [累计]",
+                        "Select_range_check": "无索引的 JOIN 估计行数检查次数 [累计]",
+                        "Select_scan": "全表扫描次数 [累计]",
+                        "Uptime": "MySQL 服务器运行时长（秒）[瞬时]",
+                        "Key_read_requests": "索引读请求次数 [累计]",
+                        "Key_reads": "从磁盘物理读索引块次数 [累计]",
+                        "Key_write_requests": "索引写请求次数 [累计]",
+                        "Key_writes": "索引物理写入磁盘次数 [累计]",
                     }
                     status_list = sorted(
                         [{"name": n, "value": str(v), "desc": _STATUS_DESC.get(n, "")}
@@ -6989,6 +6992,7 @@ except ImportError:
     pass
 try:
     import modules.replication_status  # 主从复制监控
+    import modules.dashboard_cmds      # 仪表盘命令语句查询
 except ImportError:
     pass
 

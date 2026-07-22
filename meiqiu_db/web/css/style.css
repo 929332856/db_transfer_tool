@@ -160,7 +160,19 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
 .conn-label-db { color: #4fc3f7; }
 .query-editor-wrap { flex: 1; display: flex; overflow: hidden; min-height: 0; max-height: 100%; }
 .query-editor { flex: 1; min-width: 0; background: #1a1f2a; border: none; color: #e0e0e0; padding: 10px; font-family: Consolas, monospace; font-size: 12px; resize: none; line-height: 18px; tab-size: 4; box-sizing: border-box; overflow: auto; }
-.sql-editor-inner { position: relative; flex: 1; min-width: 0; display: flex; overflow: hidden; }
+.sql-editor-inner { position: relative; flex: 1; min-width: 0; display: flex; overflow: hidden; background: #1a1f2a; }
+/* ★ 方案B：执行选中高亮覆盖层 */
+.exec-highlight-overlay {
+    background: rgba(243, 156, 18, 0.15);
+    border-left: 3px solid #f39c12;
+    border-radius: 0 2px 2px 0;
+    transition: opacity 0.5s;
+}
+/* ★ 方案B：执行时 textarea 选中色淡一些，让覆盖层更显眼 */
+.query-editor.exec-highlight::selection {
+    background: rgba(243, 156, 18, 0.2);
+    color: inherit;
+}
 .sql-highlight {
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
@@ -463,6 +475,8 @@ tbody td.truncated { color: #5dade2; }
 .exp-tab-btn.active { background: #555; color: #fff; border-color: #555; }
 .explorer-table-wrap { flex: 1; overflow: auto; margin-top: 4px; }
 .exp-table { width: 100%; }
+/* ★ 表头冻结：滚动时字段名行固定不动 */
+.exp-table thead { position: sticky; top: 0; z-index: 2; background: #1a1a2e; }
 .exp-table tbody td { }
 .exp-table tbody tr:hover { background: #2a3a4a; }
 
@@ -742,6 +756,12 @@ html.light-theme .export-result-box.success { background: #f0faf0; border-color:
 html.light-theme .export-result-title { color: #27ae60; }
 html.light-theme .export-result-item { color: #666; }
 
+/* 弹窗中的输入框（深色/浅色主题） */
+.modal-input { width: 100%; height: 36px; margin-bottom: 12px; background: #1a1a1a; border: 1px solid #3a3a3a; border-radius: 6px; color: #e0e0e0; padding: 0 10px; font-size: 13px; outline: none; box-sizing: border-box; }
+.modal-input:focus { border-color: #5dade2; }
+html.light-theme .modal-input { background: #fff; color: #333; border-color: #ccc; }
+html.light-theme .modal-input:focus { border-color: #5dade2; }
+
 /* SQL 完整查看弹窗（深色/浅色主题） */
 .sql-full-view { background: #0d1117; color: #e0e0e0; border: 1px solid #333; }
 html.light-theme .sql-full-view { background: #f5f5f5; color: #222; border-color: #ddd; }
@@ -775,7 +795,7 @@ html.light-theme .confirm-sql-warn { color: #c0392b; }
     font-size: 12px; color: var(--text-secondary); line-height: 1.5;
     margin-bottom: 14px; word-break: break-word; word-wrap: break-word;
     white-space: pre-wrap; user-select: text; cursor: text;
-    max-height: 320px; overflow-y: auto;
+    /* 不限制高度，让内容决定，由内部表格/容器自带滚动条 */
 }
 .modal-btns { display: flex; justify-content: center; gap: 8px; }
 
@@ -1209,6 +1229,34 @@ html.light-theme .repl-table tr:nth-child(odd) td { background: #fafbfc; }
 html.light-theme .repl-table tr:nth-child(even) td { background: #fff; }
 html.light-theme .repl-table tr:hover td { background: #e8eaed !important; }
 html.light-theme .repl-empty { color: #999; }
+
+/* 命令语句查询表格 */
+.cmd-detail-table { width: 100%; border-collapse: collapse; font-size: 11px; font-family: Consolas, monospace; }
+.cmd-detail-table th { background: #1a2230; color: #bbb; padding: 5px 8px; text-align: left; border-bottom: 1px solid #444; position: sticky; top: 0; z-index: 1; }
+.cmd-detail-table td { padding: 4px 8px; border-bottom: 1px solid #1a1a1a; }
+.cmd-detail-table .cmd-sql { word-break: break-all; white-space: pre-wrap; max-width: 400px; }
+.cmd-detail-table .cmd-num { text-align: center; color: #f39c12; font-weight: bold; }
+.cmd-detail-table .cmd-select { color: #5dade2; }
+.cmd-detail-table .cmd-insert { color: #2ecc71; }
+.cmd-detail-table .cmd-update { color: #f39c12; }
+.cmd-detail-table .cmd-delete { color: #e74c3c; }
+.cmd-detail-table tr:nth-child(odd) td { background: #15181f; }
+.cmd-detail-table tr:nth-child(even) td { background: #1a1d24; }
+.cmd-detail-table tr:hover td { background: #2a3a4a !important; }
+html.light-theme .cmd-detail-table th { background: #f0f3f7; color: #444; border-bottom-color: #ddd; }
+html.light-theme .cmd-detail-table td { border-bottom-color: #eee; }
+html.light-theme .cmd-detail-table .cmd-num { color: #c45a00; }
+html.light-theme .cmd-detail-table .cmd-select { color: #1976d2; }
+html.light-theme .cmd-detail-table .cmd-insert { color: #27ae60; }
+html.light-theme .cmd-detail-table .cmd-update { color: #c45a00; }
+html.light-theme .cmd-detail-table .cmd-delete { color: #c0392b; }
+html.light-theme .cmd-detail-table tr:nth-child(odd) td { background: #fafbfc; }
+html.light-theme .cmd-detail-table tr:nth-child(even) td { background: #fff; }
+html.light-theme .cmd-detail-table tr:hover td { background: #e8eaed !important; }
+
+/* 命令查询下拉框 */
+.dash-cmd-sel { background: #222; color: #ddd; border: 1px solid #444; padding: 3px 8px; font-size: 11px; border-radius: 3px; }
+html.light-theme .dash-cmd-sel { background: #fff; color: #333; border-color: #ccc; }
 html.light-theme .repl-splitter { background: #ddd; }
 html.light-theme .repl-splitter:hover, html.light-theme .repl-splitter.active { background: #5dade2; }
 html.light-theme .repl-right-empty { color: #999; }
@@ -1514,9 +1562,21 @@ html.light-theme .query-splitter:hover, html.light-theme .query-splitter.active 
 html.light-theme .sql-ln-gutter { background: #f0f2f5; border-right-color: #d0d7e0; color: #a0aec0; }
 html.light-theme .sql-ln-gutter .ln-row:hover { background: #e0e6ed; color: #555; }
 html.light-theme .sql-ln-gutter .ln-row.ln-active { background: rgba(93, 173, 226, 0.15); color: #2a7db8; }
+html.light-theme .sql-editor-inner { background: #f7f7f7; }
 html.light-theme .sql-highlight { background: #f7f7f7; color: #222; }
 html.light-theme .sql-highlight .sql-comment { color: #8a9a8a; font-style: italic; }
+/* ★ 方案B：浅色主题执行选中高亮 */
+html.light-theme .exec-highlight-overlay {
+    background: rgba(230, 126, 34, 0.12);
+    border-left-color: #e67e22;
+}
+html.light-theme .query-editor.exec-highlight::selection {
+    background: rgba(230, 126, 34, 0.18);
+    color: inherit;
+}
 /* ========== 浅色主题 - 对象列表/表 ========== */
+html.light-theme .exp-table thead { background: #f0f2f5; }
+html.light-theme .exp-table thead th { border-bottom-color: #d0d7e0; }
 html.light-theme .exp-table tbody tr:hover { background: #e8eaed; }
 html.light-theme .exp-table tbody tr.row-selected { background: rgba(93,173,226,0.22) !important; }
 html.light-theme .exp-table tbody tr.row-selected:hover { background: rgba(93,173,226,0.32) !important; }
@@ -1541,6 +1601,10 @@ html.light-theme .my-conn-row:hover .btn-sm-row { color: #888; }
 html.light-theme .my-conn-row .btn-sm-row:hover { background: #ddd; color: #333; }
 html.light-theme .tree-row.editing input { background: #fff; border-color: #5dade2; color: #333; }
 html.light-theme .tree-rename-input { background: #fff; border-color: #5dade2; color: #333; }
+
+/* 对象面板表行重命名输入框（深色/浅色主题） */
+.table-rename-input { width: 100%; height: 20px; background: #1a1a1a; border: 1px solid #4a90d9; border-radius: 3px; color: #e0e0e0; padding: 1px 4px; font-size: 11px; outline: none; box-sizing: border-box; }
+html.light-theme .table-rename-input { background: #fff; color: #333; border-color: #5dade2; }
 html.light-theme .tree-children.open { }
 html.light-theme .tree-subcat:hover { background: #e8eaed; }
 /* ========== 浅色主题 - WHERE 筛选栏 ========== */

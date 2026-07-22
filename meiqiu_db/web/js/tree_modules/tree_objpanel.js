@@ -82,7 +82,13 @@ function buildObjHomeContent(items, cat, db, schema, cid) {
     var h = '';
     if (cat === 'tables') {
         h += '<table class="exp-table"><thead><tr><th style="width:28%">名称</th><th style="width:10%;text-align:right;">行</th><th style="width:12%;text-align:right;">数据长度</th><th style="width:22%">修改日期</th><th style="width:28%">注释</th></tr></thead><tbody>';
-        items.forEach(function(t){h+='<tr draggable="true" class="drag-table-item" data-tname="'+escapeAttr(t.name)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+escapeAttr(cid||'')+'" ondragstart="onTableDragStart(event,\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" ondragend="onTableDragEnd(event)" ondblclick="addTableDataTab(\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" oncontextmenu="tableCtx(event,\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" onclick="objPanelTableClick(event,this)"><td class="tbl-name-cell">'+escapeHtml(t.name)+'</td><td style="text-align:right;">'+escapeHtml(String(t.rows||''))+'</td><td style="text-align:right;">'+escapeHtml(t.data_size||'')+'</td><td>'+escapeHtml(t.update_time||'')+'</td><td>'+escapeHtml(t.comment||'')+'</td></tr>';});
+        items.forEach(function(t){
+            var rowsVal = t.rows === '' || t.rows === null || t.rows === undefined ? '--' : t.rows;
+            var sizeVal = t.data_size || '--';
+            var timeVal = t.update_time || '--';
+            var cmtVal = t.comment || '';
+            h += '<tr draggable="true" class="drag-table-item" data-tname="'+escapeAttr(t.name)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+escapeAttr(cid||'')+'" ondragstart="onTableDragStart(event,\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" ondragend="onTableDragEnd(event)" ondblclick="addTableDataTab(\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" oncontextmenu="tableCtx(event,\''+escapeAttr(t.name)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+(cid||'')+'\')" onclick="objPanelTableClick(event,this)"><td class="tbl-name-cell">'+escapeHtml(t.name)+'</td><td style="text-align:right;">'+escapeHtml(String(rowsVal))+'</td><td style="text-align:right;">'+escapeHtml(sizeVal)+'</td><td>'+escapeHtml(timeVal)+'</td><td>'+escapeHtml(cmtVal)+'</td></tr>';
+        });
         h += '</tbody></table>';
     } else if (cat === 'views') {
         h += '<table class="exp-table"><thead><tr><th style="width:60%">名称</th><th style="width:40%">数据库</th></tr></thead><tbody>';
@@ -134,6 +140,31 @@ function setupObjectPanelDrop() {
     });
 }
 
+// ★ 只更新 tab 栏 DOM（不重新渲染内容面板，避免跳转到其他 tab）
+function _updateTabBar() {
+    var tabBar = document.getElementById('obj_tabs_bar');
+    if (!tabBar) return;
+    var h = '';
+    objectTabs.forEach(function(t){
+        var cls = t.id===activeObjTab?'obj-tab active':'obj-tab';
+        var icon = t.type==='ddl'?'🔧 ':t.type==='data'?'📊 ':t.type==='query'?'📝 ':'📋 ';
+        var tipAttr = '';
+        if (t.type === 'data' || t.type === 'ddl' || t.type === 'query') {
+            var info = _buildTabTipInfo(t);
+            if (info) {
+                tipAttr = ' data-tip-conn="'+escapeAttr(info.conn)+'" data-tip-folder="'+escapeAttr(info.folder)+'" data-tip-db="'+escapeAttr(info.db)+'" data-tip-name="'+escapeAttr(info.name)+'"';
+            }
+        }
+        h += '<span class="'+cls+'" data-tabid="'+t.id+'"'+tipAttr+' onclick="switchObjTab(\''+t.id+'\')" onmouseenter="_showTabTip(event,this)" onmouseleave="_hideTabTip()">'+icon+escapeHtml(t.label);
+        if(t.id!=='obj_home') h += '<span class="tab-close" onclick="event.stopPropagation();closeTab(\''+t.id+'\')">✕</span>';
+        h += '</span>';
+    });
+    var showSearch = (activeObjTab === 'obj_home');
+    h += '<div class="obj-search-wrap" style="display:' + (showSearch ? '' : 'none') + '"><input class="obj-search-input" id="obj_search" placeholder="🔍 搜索表名..." oninput="filterObjectTable()"></div>';
+    tabBar.innerHTML = h;
+    collapseOverflowTabs();
+}
+
 function renderObjectPanel() {
     // ★ 保存当前 tab 的编辑状态
     _saveCurrentTabState(activeObjTab);
@@ -164,7 +195,7 @@ function renderObjectPanel() {
 
     if (tabBar) {
         // 增量更新 tab 栏（避免 innerHTML 销毁重建事件）
-        tabBar.innerHTML = h;
+        _updateTabBar();
     } else {
         // 首次渲染：创建完整结构
         var at = objectTabs.find(function(t){return t.id===activeObjTab;});
@@ -256,10 +287,9 @@ function renderObjectPanel() {
                         var curTab = objectTabs.find(function(t){ return t.id === 'query_' + qidX; });
                         var cid2 = curTab ? curTab.cid : '';
                         var qdb2 = curTab ? curTab.db : '';
-                        var qname2 = curTab ? curTab.label : '';
                         sqlTa.addEventListener('keydown', function(e){
                             if(e.ctrlKey && e.key === 'Enter') { e.preventDefault(); execQueryTab(qidX); }
-                            if(e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveQueryTab(qidX, cid2, qdb2, qname2); }
+                            if(e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); _handleSaveQuery(qidX, cid2, qdb2); }
                         });
                         updateBtnLabel();
                     }, 0);
@@ -324,12 +354,52 @@ function renderObjectPanel() {
     });
 }
 
+// ★ 查询修改状态追踪：{qid: true/false}
+var _queryModified = {};
+// ★ 查询原始 SQL（打开/保存时的快照，用于判断是否有修改）
+var _querySavedSql = {};
+
 function _queryTextareaChanged(qid, ta) {
     if (!qid || !ta) return;
     var es = _qState(qid);
     es._cachedSql = ta.value;
     var tab = objectTabs.find(function(t){ return t.id === 'query_' + qid; });
-    if (tab) tab._cachedSql = ta.value;
+    if (tab) {
+        tab._cachedSql = ta.value;
+        // ★ 追踪修改状态：当前 SQL 与保存时的快照对比
+        var savedSql = _querySavedSql[qid];
+        var isModified = (savedSql === undefined) ? false : (ta.value !== savedSql);
+        _setQueryModified(qid, isModified);
+    }
+}
+
+// ★ 设置查询修改状态并更新 tab 标题
+function _setQueryModified(qid, modified) {
+    _queryModified[qid] = modified;
+    var tab = objectTabs.find(function(t){ return t.id === 'query_' + qid; });
+    if (!tab) return;
+    var baseLabel = tab._baseLabel || tab.label;
+    if (modified) {
+        tab.label = baseLabel + ' *';
+    } else {
+        tab.label = baseLabel;
+    }
+    // ★ 增量更新 tab 栏中的标题（避免重建整个 tab 栏）
+    var tabEl = document.querySelector('.obj-tab[data-tabid="query_' + qid + '"]');
+    if (tabEl) {
+        var icon = '📝 ';
+        var tipContent = tabEl.querySelector('.tab-close') ? tabEl.innerHTML.replace(/<span class="tab-close".*/, '') : tabEl.innerHTML;
+        // 保留 icon + label，不破坏 close 按钮
+        var closeHtml = tabEl.querySelector('.tab-close');
+        tabEl.childNodes.forEach(function(n) {
+            if (n.nodeType === 3) { n.textContent = icon + escapeHtml(tab.label); return; }
+            if (n === closeHtml) return;
+        });
+        // 重建内容
+        var html = icon + escapeHtml(tab.label);
+        if (closeHtml) html += closeHtml.outerHTML;
+        tabEl.innerHTML = html;
+    }
 }
 
 function filterObjectTable() {
@@ -407,11 +477,89 @@ function _redisDoServerSearch(cid, dbIdx, dbId, kw) {
 }
 
 function closeTab(tabId) {
+    // ★ 关闭前检查是否有未保存的修改
+    var qidMatch = tabId.match(/^query_(.+)$/);
+    if (qidMatch) {
+        var qid = qidMatch[1];
+        if (_queryModified[qid]) {
+            var tab = objectTabs.find(function(t){ return t.id === tabId; });
+            var qname = tab ? (tab._baseLabel || tab.label) : '未命名';
+            var isNew = (qid.indexOf('new_') === 0);
+            showConfirmDialog('未保存的更改',
+                '<div style="text-align:center;"><b>' + escapeHtml(qname) + '</b> 有未保存的修改。<br>是否保存后再关闭？</div>',
+                function(){
+                    // ★ 保存后关闭：新建的需要先命名，已有的直接保存
+                    var cid2 = tab ? tab.cid : '';
+                    var db2 = tab ? tab.db : '';
+                    if (isNew) {
+                        showInputDialog('保存查询', '请输入查询名称：', function(n){
+                            if (!n || !n.trim()) { _closeTabInternal(tabId); return; }
+                            _doSaveQueryAndClose(qid, cid2, db2, n.trim(), tabId);
+                        }, '');
+                    } else {
+                        _doSaveQueryAndClose(qid, cid2, db2, qname, tabId);
+                    }
+                },
+                function(){
+                    // 不保存直接关闭
+                    _closeTabInternal(tabId);
+                },
+                '保存', '不保存', '取消'
+            );
+            return;
+        }
+    }
+    _closeTabInternal(tabId);
+}
+
+// ★ 保存后关闭 tab（处理新建的 ID 变更）
+function _doSaveQueryAndClose(qid, cid, db, qname, oldTabId) {
+    var isNew = (qid.indexOf('new_') === 0);
+    var saveQid = isNew ? '' : qid;
+    var ta = document.getElementById('sq_' + qid);
+    var sql = ta ? ta.value : '';
+    eel.tree_save_query(saveQid, qname, sql, cid, db)(function(r){
+        if (r && r.ok) {
+            var newQid = isNew ? r.id : qid;
+            // 更新 tab
+            if (isNew) {
+                var tab = objectTabs.find(function(t){ return t.id === oldTabId; });
+                if (tab) { tab.id = 'query_' + newQid; tab._baseLabel = qname; tab.label = qname; }
+                delete _queryModified[qid];
+                delete _querySavedSql[qid];
+            }
+            // 刷新树
+            if (cid && db && typeof refreshQueriesTree === 'function') {
+                refreshQueriesTree(cid, db, '');
+            }
+        }
+        // 无论成功失败都关闭
+        var finalTabId = isNew ? ('query_' + (r && r.ok ? r.id : qid)) : oldTabId;
+        _closeTabInternal(finalTabId);
+    });
+}
+
+// ★ 内部关闭逻辑（不检查修改）
+function _closeTabInternal(tabId) {
     // ★ 关闭 tab 时强制隐藏 tab 悬浮提示（避免提示卡残留）
     _hideTabTip();
     // 清理该 tab 对应的 splitter 绑定标记
-    var qidMatch = tabId.match(/^query_(.+)$/);
-    if (qidMatch) delete _querySplitterInited['qs_' + qidMatch[1]];
+    var qidMatch2 = tabId.match(/^query_(.+)$/);
+    if (qidMatch2) {
+        var qid2 = qidMatch2[1];
+        delete _querySplitterInited['qs_' + qid2];
+        delete _queryModified[qid2];
+        delete _querySavedSql[qid2];
+        // ★ 清理 textarea 和 results 的 DOM 缓存，防止重新打开时恢复旧内容
+        delete _textareaCache['sq_' + qid2];
+        delete _textareaCache['qr_' + qid2];
+        delete _queryEditStates[qid2];
+        // ★ 清理高亮防抖定时器
+        if (_sqlHighlightTimers && _sqlHighlightTimers[qid2]) {
+            clearTimeout(_sqlHighlightTimers[qid2]);
+            delete _sqlHighlightTimers[qid2];
+        }
+    }
     // ★ 清理 data tab 的 _tabIdToTid 和 _whereStates
     var tid2 = _tabIdToTid[tabId];
     if (tid2) { delete _whereStates[tid2]; delete _tabIdToTid[tabId]; }
@@ -615,10 +763,9 @@ function _afterContentUpdate(targetTab, contentDiv) {
                     var curTab = objectTabs.find(function(t){ return t.id === 'query_' + qidX; });
                     var cid2 = curTab ? curTab.cid : '';
                     var qdb2 = curTab ? curTab.db : '';
-                    var qname2 = curTab ? curTab.label : '';
                     sqlTa.addEventListener('keydown', function(e){
                         if(e.ctrlKey && e.key === 'Enter') { e.preventDefault(); execQueryTab(qidX); }
-                        if(e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveQueryTab(qidX, cid2, qdb2, qname2); }
+                        if(e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); _handleSaveQuery(qidX, cid2, qdb2); }
                     });
                     updateBtnLabel();
                 }, 0);
@@ -718,7 +865,6 @@ function _startObjPanelRename(tr) {
     input.type = 'text';
     input.value = oldName;
     input.className = 'table-rename-input';
-    input.style.cssText = 'width:100%;height:20px;background:#1a1a1a;border:1px solid #4a90d9;border-radius:3px;color:#e0e0e0;padding:1px 4px;font-size:11px;outline:none;';
     nameCell.textContent = '';
     nameCell.appendChild(input);
     input.focus();

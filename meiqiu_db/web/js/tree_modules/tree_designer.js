@@ -401,33 +401,23 @@ function openQueryInTab(qid) {
     });
 }
 
-function _openQueryInTabImpl(q) {
-    var qid = q.id;
-    var cid = q.conn_id || '';
-    var qdb = q.db || '';
-    // 确保 activeConnData 来自查询所属连接，不依赖外部状态
-    if (cid && treeData && treeData.connections && treeData.connections[cid]) {
-        activeConnId = cid;
-        activeConnData = treeData.connections[cid];
-    }
-    // ★ 构建连接+数据库标签（toolbar 右侧展示，颜色用 class 控制以便浅色主题切换）
+/** ★ 构建查询编辑器 HTML（不绑定事件，只生成 DOM） */
+function _buildQueryEditorHtml(qid, cid, db, sql, name) {
     var connLabel = '';
     var connData = (cid && treeData && treeData.connections) ? treeData.connections[cid] : null;
     if (connData) {
         var typeIcons = {'mysql':'🐬','ob-mysql':'🌊','postgresql':'🐘','oracle':'🔴','mssql':'🟢','redis':'📦'};
         var typeIcon = typeIcons[connData.db_type] || '🗄️';
         var connName = connData.name || connData.host || '未知连接';
-        var dbName = qdb || '未选择数据库';
+        var dbName = db || '未选择数据库';
         connLabel = '<span class="conn-label" style="margin-left:auto;font-size:11px;white-space:nowrap;">' +
             typeIcon + ' ' + escapeHtml(connName) +
             ' <span class="conn-label-sep">/</span> ' +
             '<span class="conn-label-db">' + escapeHtml(dbName) + '</span></span>';
     }
-    var content =
-        '<div class="query-layout" id="ql_'+qid+'">' +
+    return '<div class="query-layout" id="ql_'+qid+'">' +
         '<div class="query-toolbar" style="display:flex;align-items:center;"><button id="btn_exe_'+qid+'" class="btn btn-green" style="font-size:11px;padding:4px 14px;" onclick="execQueryTab(\''+qid+'\')">▶ 执行</button>' +
         '<button id="btn_fmt_'+qid+'" class="btn btn-sm btn-fmt" style="font-size:11px;padding:4px 10px;margin-left:4px;" onclick="_formatSqlTab(\''+qid+'\')" title="格式化 SQL (Ctrl+B)">🧹 美化</button>' +
-
         connLabel +
         '<div class="sql-find-bar" id="sql_find_bar_'+qid+'" style="display:none;">' +
             '<input type="text" id="sql_find_input_'+qid+'" placeholder="查找..." oninput="_applySqlHighlight(\''+qid+'\',null)" onkeydown="if(event.key===\'Enter\'){event.preventDefault();_sqlFindNext(\''+qid+'\');}if(event.key===\'Escape\'){event.preventDefault();_closeSqlFind(\''+qid+'\',null);}">' +
@@ -441,46 +431,73 @@ function _openQueryInTabImpl(q) {
         '<div class="sql-ln-gutter" id="lng_'+qid+'" onscroll="document.getElementById(\'sq_'+qid+'\').scrollTop=this.scrollTop"></div>' +
         '<div class="sql-editor-inner" style="position:relative;flex:1;min-width:0;display:flex;">' +
             '<div class="sql-highlight" id="sql_hl_'+qid+'" aria-hidden="true" style="display:none;z-index:-1;"></div>' +
-            '<textarea id="sq_'+qid+'" class="query-editor" spellcheck="false" wrap="off">'+escapeHtml(q.sql||'')+'</textarea>' +
+            '<textarea id="sq_'+qid+'" class="query-editor" spellcheck="false" wrap="off">'+(sql||'')+'</textarea>' +
         '</div>' +
         '</div>' +
         '<div class="query-splitter" id="qs_'+qid+'"></div>' +
         '<div class="query-results-wrap" id="qr_'+qid+'"></div>' +
         '</div>';
+}
+
+/** ★ 初始化查询编辑器事件绑定（新建/重新打开后调用） */
+function _initQueryEditorEvents(qid, cid, db, name) {
+    var ta = document.getElementById('sq_'+qid);
+    var btnE = document.getElementById('btn_exe_'+qid);
+    function updateBtnLabel() {
+        if (!ta || !btnE || btnE.textContent === '⏹ 取消') return;
+        var s = ta.selectionStart, e = ta.selectionEnd;
+        btnE.textContent = (s !== e) ? '▶ 执行选中' : '▶ 执行';
+    }
+    if (ta) {
+        ta.addEventListener('input', function(){ _queryTextareaChanged(qid, ta); _syncLineGutter(qid, ta); _applySqlHighlightDebounced(qid, ta); });
+        ta.addEventListener('keydown',function(e){
+            if(e.ctrlKey&&e.key==='Enter') execQueryTab(qid);
+            if(e.ctrlKey&&(e.key==='s'||e.key==='S')) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); _handleSaveQuery(qid, cid, db); }
+            if(e.ctrlKey&&(e.key==='b'||e.key==='B')) { e.preventDefault(); _formatSqlTab(qid); }
+            if(e.ctrlKey&&(e.key==='f'||e.key==='F')) { e.preventDefault(); e.stopPropagation(); _openSqlFind(qid, ta); return; }
+            if(e.ctrlKey&&(e.key==='d'||e.key==='D')) { e.preventDefault(); _editorDupLine(ta); }
+            if(e.ctrlKey&&e.key==='/') { e.preventDefault(); _editorToggleComment(ta); }
+            if(e.ctrlKey&&e.shiftKey&&(e.key==='K'||e.key==='k')) { e.preventDefault(); _editorDeleteLine(ta); }
+            if(e.key==='Tab') { e.preventDefault(); if(e.shiftKey) _editorOutdent(ta); else _editorIndent(ta); }
+            if(e.key==='Escape') { var bar=document.getElementById('sql_find_bar_'+qid); if(bar && bar.style.display!=='none'){ e.preventDefault(); _closeSqlFind(qid, ta); } }
+        });
+        ta.addEventListener('mouseup', function(){ updateBtnLabel(); _syncLineGutter(qid, ta); _scrollToLine(ta, _getCursorLineNo(ta)); });
+        ta.addEventListener('keyup', function(){ updateBtnLabel(); _syncLineGutter(qid, ta); });
+        ta.addEventListener('scroll', function(){
+            var gutter = document.getElementById('lng_'+qid);
+            if (gutter) gutter.scrollTop = ta.scrollTop;
+            _positionHighlightOverlay(qid, ta);
+        });
+        _syncLineGutter(qid, ta);
+    }
+    initQuerySplitter('ql_'+qid, 'qs_'+qid, 'sq_'+qid, 'qr_'+qid);
+}
+
+function _openQueryInTabImpl(q) {
+    var qid = q.id;
+    var cid = q.conn_id || '';
+    var qdb = q.db || '';
+    // 确保 activeConnData 来自查询所属连接，不依赖外部状态
+    if (cid && treeData && treeData.connections && treeData.connections[cid]) {
+        activeConnId = cid;
+        activeConnData = treeData.connections[cid];
+    }
+    // ★ 清理旧的编辑状态缓存（防止残留的 _cachedSql 覆盖新加载的内容）
+    if (_queryEditStates[qid]) {
+        delete _queryEditStates[qid]._cachedSql;
+        _queryEditStates[qid]._cachedHtml = '';
+    }
+    var content = _buildQueryEditorHtml(qid, cid, qdb, q.sql, q.name);
+    // ★ 初始化修改追踪快照
+    _querySavedSql[qid] = q.sql || '';
+    _queryModified[qid] = false;
     addOrUpdateTab('query_'+qid, q.name, 'query', content, q.db, cid);
+    // ★ 记录基础名称（不带 * 的原始名）
+    var tab = objectTabs.find(function(t){ return t.id === 'query_' + qid; });
+    if (tab) tab._baseLabel = q.name;
     setTimeout(function(){
-        var ta = document.getElementById('sq_'+qid);
-        var btnE = document.getElementById('btn_exe_'+qid);
-        function updateBtnLabel() {
-            if (!ta || !btnE || btnE.textContent === '⏹ 取消') return;
-            var s = ta.selectionStart, e = ta.selectionEnd;
-            btnE.textContent = (s !== e) ? '▶ 执行选中' : '▶ 执行';
-        }
-        if(ta) {
-            ta.addEventListener('input', function(){ _queryTextareaChanged(qid, ta); _syncLineGutter(qid, ta); _applySqlHighlight(qid, ta); });
-            ta.addEventListener('keydown',function(e){
-                if(e.ctrlKey&&e.key==='Enter') execQueryTab(qid);
-                if(e.ctrlKey&&(e.key==='s'||e.key==='S')) { e.preventDefault(); saveQueryTab(qid, cid, qdb, q.name); }
-                if(e.ctrlKey&&(e.key==='b'||e.key==='B')) { e.preventDefault(); _formatSqlTab(qid); }
-                if(e.ctrlKey&&(e.key==='f'||e.key==='F')) { e.preventDefault(); e.stopPropagation(); _openSqlFind(qid, ta); return; }
-                if(e.ctrlKey&&(e.key==='d'||e.key==='D')) { e.preventDefault(); _editorDupLine(ta); }
-                if(e.ctrlKey&&e.key==='/') { e.preventDefault(); _editorToggleComment(ta); }
-                if(e.ctrlKey&&e.shiftKey&&(e.key==='K'||e.key==='k')) { e.preventDefault(); _editorDeleteLine(ta); }
-                if(e.key==='Tab') { e.preventDefault(); if(e.shiftKey) _editorOutdent(ta); else _editorIndent(ta); }
-                if(e.key==='Escape') { var bar=document.getElementById('sql_find_bar_'+qid); if(bar && bar.style.display!=='none'){ e.preventDefault(); _closeSqlFind(qid, ta); } }
-            });
-            ta.addEventListener('mouseup', function(){ updateBtnLabel(); _syncLineGutter(qid, ta); _scrollToLine(ta, _getCursorLineNo(ta)); });
-            ta.addEventListener('keyup', function(){ updateBtnLabel(); _syncLineGutter(qid, ta); });
-            ta.addEventListener('scroll', function(){
-                var gutter = document.getElementById('lng_'+qid);
-                if (gutter) gutter.scrollTop = ta.scrollTop;
-                _positionHighlightOverlay(qid, ta);
-            });
-            _syncLineGutter(qid, ta);
-        }
-        // 初始化可拖动分割线
-        initQuerySplitter('ql_'+qid, 'qs_'+qid, 'sq_'+qid, 'qr_'+qid);
-    },100);
+        _initQueryEditorEvents(qid, cid, qdb, q.name);
+    }, 100);
 }
 
 /** 渲染 SQL 编辑器行号侧边栏 */
@@ -578,6 +595,15 @@ function _closeSqlFind(qid, ta) {
     if (ta) { ta.focus(); }
 }
 
+// ★ SQL 高亮防抖：大量粘贴时避免每次 input 都重新渲染
+var _sqlHighlightTimers = {};
+function _applySqlHighlightDebounced(qid, ta) {
+    if (_sqlHighlightTimers[qid]) clearTimeout(_sqlHighlightTimers[qid]);
+    _sqlHighlightTimers[qid] = setTimeout(function(){
+        _applySqlHighlight(qid, ta);
+    }, 150);
+}
+
 function _applySqlHighlight(qid, ta) {
     if (!ta) ta = document.getElementById('sq_' + qid);
     var hl = document.getElementById('sql_hl_' + qid);
@@ -594,20 +620,31 @@ function _applySqlHighlight(qid, ta) {
     var commentRanges = _findSqlCommentRanges(text);
     var hasComments = commentRanges.length > 0;
 
-    // ★ 仅在有注释或搜索时启用高亮层；否则使用原生 textarea（保留选中高亮）
+    // ★ 无注释且非搜索：隐藏高亮层，使用原生 textarea
     if (!isSearch && !hasComments) {
         hl.style.display = 'none';
         hl.style.zIndex = '-1';
         ta.style.color = '';
         ta.style.caretColor = '';
+        ta.style.background = '';
         _sqlFindState[qid] = null;
         return;
     }
 
     hl.style.display = '';
-    hl.style.zIndex = '1';
-    ta.style.color = 'transparent';
-    ta.style.caretColor = '#e0e0e0';
+    // ★ 搜索模式下高亮层在上，textarea 透明（让搜索高亮可见）
+    //    仅注释高亮时高亮层在下，textarea 正常显示（光标和选中高亮正常）
+    if (isSearch) {
+        hl.style.zIndex = '1';
+        ta.style.color = 'transparent';
+        ta.style.caretColor = '#e0e0e0';
+    } else {
+        hl.style.zIndex = '-1';
+        ta.style.color = '';
+        ta.style.caretColor = '';
+        // ★ textarea 背景设为透明，让下面的高亮层（注释着色）透上来
+        ta.style.background = 'transparent';
+    }
 
     // 搜索匹配
     var matches = [];
@@ -816,27 +853,97 @@ function _escapeRegex(s) {
 }
 
 
-function saveQueryTab(qid, cid, db, qname) {
+// ★ 智能保存：未命名弹命名框，已命名直接保存
+function _handleSaveQuery(qid, cid, db) {
+    var tab = objectTabs.find(function(t){ return t.id === 'query_' + qid; });
+    var qname = tab ? (tab._baseLabel || tab.label) : '';
+    var isUnnamed = (!qname || qname === '未命名');
+
+    if (isUnnamed) {
+        // ★ 未命名 → 弹出命名框，检测是否输入了名称
+        function promptName() {
+            showInputDialog('保存查询', '请输入查询名称：', function(n){
+                if (!n || !n.trim()) {
+                    showErrorDialog('提示', '请输入文件名称后再保存', function(){
+                        promptName(); // 关闭错误提示后重新弹命名框
+                    });
+                    return;
+                }
+                _doSaveQuery(qid, cid, db, n.trim());
+            }, '');
+        }
+        promptName();
+    } else {
+        // ★ 已命名 → 直接保存
+        _doSaveQuery(qid, cid, db, qname);
+    }
+}
+
+// ★ 执行保存操作
+function _doSaveQuery(qid, cid, db, qname) {
     var ta = document.getElementById('sq_' + qid);
     if (!ta) return;
     var sql = ta.value;
-    eel.tree_save_query(qid, qname || '', sql, cid, db)(function(r){
-        // 绿色边框闪烁提示已保存
-        if (ta) {
-            ta.style.boxShadow = 'inset 0 0 0 2px #2ecc71';
-            ta.style.transition = 'box-shadow 0.3s';
-            var clearFlash = function(){ ta.style.boxShadow = ''; };
-            setTimeout(clearFlash, 1200);
-            // ★ 点击其他地方（blur）时立即清除高亮，不再等 1200ms
-            ta.addEventListener('blur', function _onceBlur(){ ta.removeEventListener('blur', _onceBlur); clearFlash(); });
-        }
-        // ★ 刷新树中查询列表
+    // ★ 如果是新建的临时查询（qid 以 new_ 开头），传空 qid 让后端生成正式 ID
+    var isNew = (qid.indexOf('new_') === 0);
+    var saveQid = isNew ? '' : qid;
+    eel.tree_save_query(saveQid, qname, sql, cid, db)(function(r){
         if (r && r.ok) {
+            var newQid = isNew ? r.id : qid;
+            // ★ 如果是新建的，需要更新 tab ID（从临时 ID 改为正式 ID）
+            if (isNew) {
+                var tab = objectTabs.find(function(t){ return t.id === 'query_' + qid; });
+                if (tab) {
+                    tab.id = 'query_' + newQid;
+                    tab._baseLabel = qname;
+                    tab.label = qname;
+                    tab.content = _buildQueryEditorHtml(newQid, cid, db, sql, qname);
+                    // 更新追踪状态
+                    delete _queryModified[qid];
+                    delete _querySavedSql[qid];
+                    _querySavedSql[newQid] = sql;
+                    _queryModified[newQid] = false;
+                    // ★ 重新绑定编辑器事件
+                    setTimeout(function(){
+                        _initQueryEditorEvents(newQid, cid, db, qname);
+                    }, 50);
+                }
+            } else {
+                var tab2 = objectTabs.find(function(t){ return t.id === 'query_' + qid; });
+                if (tab2) {
+                    tab2._baseLabel = qname;
+                    tab2.label = qname;
+                }
+                _querySavedSql[qid] = sql;
+                _setQueryModified(qid, false);
+            }
+            // 绿色边框闪烁提示已保存
+            var ta2 = document.getElementById('sq_' + newQid);
+            if (ta2) {
+                ta2.style.boxShadow = 'inset 0 0 0 2px #2ecc71';
+                ta2.style.transition = 'box-shadow 0.3s';
+                var clearFlash = function(){ ta2.style.boxShadow = ''; };
+                setTimeout(clearFlash, 1200);
+                ta2.addEventListener('blur', function _onceBlur(){ ta2.removeEventListener('blur', _onceBlur); clearFlash(); });
+            }
+            // ★ 刷新树中查询列表 + 更新 tab 栏（新建的需要更新 tab 栏中的 ID 引用）
             if (cid && db && typeof refreshQueriesTree === 'function') {
                 refreshQueriesTree(cid, db, '');
             }
+            if (isNew) {
+                // ★ 只更新 tab 栏 DOM，不重新渲染整个面板（避免跳转）
+                _updateTabBar();
+            }
+        } else {
+            var errMsg = (r && r.msg) ? r.msg : '未知错误';
+            showErrorDialog('保存失败', errMsg);
         }
     });
+}
+
+// ★ 兼容旧调用（保留原函数名）
+function saveQueryTab(qid, cid, db, qname) {
+    _handleSaveQuery(qid, cid, db);
 }
 
 // ==================== SQL 美化格式化 ====================

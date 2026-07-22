@@ -228,6 +228,13 @@ function closeDatabase(cid, db, dbId) {
         _redisPanelCtx = null;
         activeDatabase = '';
     }
+    // ★ 先清理被移除的 query tab 的修改追踪状态
+    objectTabs.forEach(function(t) {
+        if (t.id !== 'obj_home' && t.cid === cid && t.db === db) {
+            var qm = t.id.match(/^query_(.+)$/);
+            if (qm) { delete _queryModified[qm[1]]; delete _querySavedSql[qm[1]]; }
+        }
+    });
     // ★ 始终移除该连接+数据库下所有相关 tab（data_/ddl_/query_/redis_ 等），不区分当前活跃数据库
     objectTabs = objectTabs.filter(function(t) {
         if (t.id === 'obj_home') return true;

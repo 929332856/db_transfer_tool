@@ -721,29 +721,49 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                     '<button class="btn-apply" onclick="window[\'_popupApply_'+tid+'\']()">应用</button>' +
                 '</div>';
 
-            // 定位浮层：在漏斗图标下方
+            // 定位浮层：在漏斗图标下方，优先右侧，空间不够则左侧
             var rect = iconEl.getBoundingClientRect();
-            var scrollWrap = document.querySelector('.data-table-scroll');
+            var wrap = document.getElementById(tid);
+            var scrollWrap = wrap ? wrap.closest('.data-table-scroll') : null;
             var scrollTop = scrollWrap ? scrollWrap.scrollTop : 0;
             var scrollLeft = scrollWrap ? scrollWrap.scrollLeft : 0;
 
-            // 找到 data-table-wrap 的容器
-            var wrap = document.getElementById(tid);
             if (wrap) {
                 var wrapRect = wrap.getBoundingClientRect();
                 popup.style.position = 'absolute';
-                popup.style.left = (rect.left - wrapRect.left + scrollLeft) + 'px';
+                // ★ 优先图标右侧对齐；如果右侧超出容器，改为左侧对齐
+                var absLeft = rect.right - wrapRect.left + scrollLeft;
+                if (absLeft + 220 > (wrapRect.width + scrollLeft)) {
+                    absLeft = rect.left - wrapRect.left + scrollLeft - 200;
+                }
+                popup.style.left = Math.max(4, absLeft) + 'px';
                 popup.style.top = (rect.bottom - wrapRect.top + scrollTop + 2) + 'px';
                 wrap.appendChild(popup);
             } else {
                 document.body.appendChild(popup);
                 popup.style.position = 'fixed';
-                popup.style.left = rect.left + 'px';
-                popup.style.top = (rect.bottom + 2) + 'px';
+                var left = rect.right;
+                if (left + 220 > window.innerWidth) {
+                    left = rect.left - 200;
+                }
+                left = Math.max(4, Math.min(left, window.innerWidth - 220));
+                var top = rect.bottom + 2;
+                if (top + 60 > window.innerHeight) top = rect.top - 64;
+                popup.style.left = left + 'px';
+                popup.style.top = top + 'px';
             }
 
             _filterPopup = popup;
             _activeFilterCol = ci;
+
+            // ★ 监听滚动：滚动容器滚动时关闭浮层
+            if (scrollWrap) {
+                function _onScrollClose() {
+                    if (_filterPopup === popup) closeFilterPopup();
+                    scrollWrap.removeEventListener('scroll', _onScrollClose);
+                }
+                scrollWrap.addEventListener('scroll', _onScrollClose);
+            }
 
             // 聚焦输入框
             setTimeout(function() {
@@ -798,8 +818,9 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
 
             eel.table_save_changes(conn, db||activeDatabase, tn, sch, changes)(function(r) {
                 if (!r || !r.ok) {
+                    showWarnDialog('保存失败', (r?r.msg:'无响应'));
                     var btn = document.getElementById(tid + '_save_btn');
-                    if (btn) { btn.textContent = '❌ '+(r?r.msg:'失败'); btn.style.background = '#e74c3c'; }
+                    if (btn) { btn.textContent = '❌ 失败'; btn.style.background = '#e74c3c'; }
                     return;
                 }
                 var sql = r.sql || '';
@@ -809,8 +830,9 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                     function() {
                         eel.table_exec_save(conn, db||activeDatabase, tn, sch, changes)(function(r2) {
                             if (!r2 || !r2.ok) {
+                                showWarnDialog('保存失败', (r2?r2.msg:'无响应'));
                                 var btn2 = document.getElementById(tid + '_save_btn');
-                                if (btn2) { btn2.textContent = '❌ '+(r2?r2.msg:'失败'); btn2.style.background = '#e74c3c'; }
+                                if (btn2) { btn2.textContent = '❌ 失败'; btn2.style.background = '#e74c3c'; }
                                 return;
                             }
                             _changedCells = {};

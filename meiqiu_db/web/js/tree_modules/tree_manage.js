@@ -110,6 +110,14 @@ function closeConnection(cid) {
         }
     }
     // 移除该连接下所有相关 tab（data_/ddl_/query_/redis_/redis_cmd 等），保留 obj_home 和其他连接的 tab
+    // ★ 先清理被移除的 query tab 的修改追踪状态
+    objectTabs.forEach(function(t) {
+        var shouldRemove = (t.id !== 'obj_home') && (t.cid === cid || (!t.cid && wasActive));
+        if (shouldRemove) {
+            var qm = t.id.match(/^query_(.+)$/);
+            if (qm) { delete _queryModified[qm[1]]; delete _querySavedSql[qm[1]]; }
+        }
+    });
     // ★ 同时清理 cid 为空字符串或 undefined 的孤立 tab（这些 tab 所属连接已不可用，点击无反应）
     objectTabs = objectTabs.filter(function(t) {
         if (t.id === 'obj_home') return true;
@@ -162,20 +170,32 @@ function addQuery(cid, db, schema) {
     var sch = schema || '';
     var useCid = cid || activeConnId || '';
     var useDb = db || '';
-    showInputDialog('新建查询','名称：',function(n){
-        if (!n || !n.trim()) return;
-        eel.tree_save_query('', n.trim(), '', useCid, useDb)(
-            function(r) {
-                if (r && r.ok) {
-                    // ★ 直接从文件系统刷新查询列表
-                    refreshQueriesTree(useCid, useDb, sch);
-                } else {
-                    var errMsg = (r && r.msg) ? r.msg : '未知错误，请查看控制台日志';
-                    showErrorDialog('创建失败', errMsg);
-                }
-            }
-        );
-    });
+    // ★ 直接打开未命名查询编辑器，不调后端保存（等用户 Ctrl+S 时才保存）
+    var tempQid = 'new_' + Date.now();
+    _openNewQueryTab(tempQid, useCid, useDb);
+}
+
+// ★ 打开未命名查询 tab（跳过 tree_get_query，直接构造 tab）
+function _openNewQueryTab(qid, cid, db) {
+    if (cid && treeData && treeData.connections && treeData.connections[cid]) {
+        activeConnId = cid;
+        activeConnData = treeData.connections[cid];
+    }
+    var content = _buildQueryEditorHtml(qid, cid, db, '', '未命名');
+    var tabId = 'query_' + qid;
+    var ex = objectTabs.find(function(t){return t.id===tabId;});
+    if (ex) { ex.content = content; if(db!==undefined)ex.db=db; if(cid!==undefined)ex.cid=cid; }
+    else objectTabs.push({id:tabId, label:'未命名', type:'query', content:content, db:db||'', cid:cid||''});
+    // ★ 初始化修改追踪（新查询，空内容=已保存状态）
+    _querySavedSql[qid] = '';
+    _queryModified[qid] = false;
+    var newTab = objectTabs.find(function(t){ return t.id === tabId; });
+    if (newTab) newTab._baseLabel = '未命名';
+    activeObjTab = tabId;
+    renderObjectPanel();
+    setTimeout(function(){
+        _initQueryEditorEvents(qid, cid, db, '未命名');
+    }, 100);
 }
 
 function showCreateDatabase(cid) {

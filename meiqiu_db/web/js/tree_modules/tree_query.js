@@ -136,13 +136,37 @@ function _smartSplitSQL(text) {
     return stmts;
 }
 
+
+// ★ 清除执行高亮（方案B）
+function _clearExecHighlight(qid) {
+    var oldHl = document.getElementById('sq_hl_exec_' + qid);
+    if (oldHl) { oldHl.remove(); }
+    var ta = document.getElementById('sq_' + qid);
+    if (ta) ta.classList.remove('exec-highlight');
+}
+// ★ 更新执行高亮覆盖层位置（方案B）
+function _updateExecHighlightPos(qid, ta, hlDiv, selStart, selEnd) {
+    var val = ta.value;
+    var lineStart = val.lastIndexOf('\n', selStart - 1) + 1;
+    var lineEnd = val.indexOf('\n', selEnd);
+    if (lineEnd === -1) lineEnd = val.length;
+    var lineH = 18; // textarea 行高
+    var paddingTop = 10;
+    var startLine = (val.substring(0, lineStart).match(/\n/g) || []).length;
+    var endLine = (val.substring(0, lineEnd).match(/\n/g) || []).length;
+    hlDiv.style.top = (paddingTop + startLine * lineH) + 'px';
+    hlDiv.style.height = ((endLine - startLine + 1) * lineH) + 'px';
+    hlDiv.style.left = '0';
+    hlDiv.style.right = '0';
+}
+
 /** ★ 核心执行逻辑（textarea 存在时直接调用，免去 tree_get_query 的延迟） */
 function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, btnExe) {
     // 检查选中文本（过滤注释）
-    var sel = '';
+    var sel = '', selStart = 0, selEnd = 0;
     if (ta) {
-        var st2 = ta.selectionStart, en2 = ta.selectionEnd;
-        if (st2 !== en2) sel = _stripSqlComments(ta.value.substring(st2, en2).trim());
+        selStart = ta.selectionStart; selEnd = ta.selectionEnd;
+        if (selStart !== selEnd) sel = _stripSqlComments(ta.value.substring(selStart, selEnd).trim());
     }
     var sqlToExec = sel || _stripSqlComments(fullSql);
     var stmts = _smartSplitSQL(sqlToExec);
@@ -152,10 +176,21 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
     // ★ 取消/超时检测：如果上一次执行仍在进行
     if (_execRunning[qid]) {
         var elapsedSinceStart = Date.now() - (_execStartTime[qid] || 0);
-        if (elapsedSinceStart > 120000) {
+        // 超过 2 小时 → 强制清除（大表 DDL 如加索引可能很久，但回调已丢失）
+        if (elapsedSinceStart > 7200000) {
+            console.warn('[execQueryTab] _execRunning 超时 ' + Math.round(elapsedSinceStart/3600000) + 'h，强制清除');
+            _execRunning[qid] = false;
+            _execCancelFlags[qid] = false;
+            _clearExecHighlight(qid);
+            var btnOld2 = document.getElementById('btn_exe_'+qid);
+            if (btnOld2) { btnOld2.textContent = '▶ 执行'; btnOld2.style.background = '#2ecc71'; }
+        } else if (elapsedSinceStart > 120000) {
             console.warn('[execQueryTab] _execRunning 卡死 ' + Math.round(elapsedSinceStart/1000) + 's，强制清除');
             _execRunning[qid] = false;
             _execCancelFlags[qid] = false;
+            _clearExecHighlight(qid);
+            var btnOld = document.getElementById('btn_exe_'+qid);
+            if (btnOld) { btnOld.textContent = '▶ 执行'; btnOld.style.background = '#2ecc71'; }
         } else {
             cancelExecQuery(qid);
             return;
@@ -177,6 +212,23 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
     _execRunning[qid] = true;
     _execStartTime[qid] = Date.now();
 
+    // ★ 方案B：给选中的 SQL 添加临时高亮覆盖层
+    if (ta && sel && selStart !== selEnd) {
+        _clearExecHighlight(qid);
+        ta.classList.add('exec-highlight');
+        var hlDiv = document.createElement('div');
+        hlDiv.id = 'sq_hl_exec_' + qid;
+        hlDiv.className = 'exec-highlight-overlay';
+        hlDiv.style.cssText = 'position:absolute;pointer-events:none;z-index:0;';
+        var sqlEditorInner = ta.parentElement;
+        if (sqlEditorInner) sqlEditorInner.appendChild(hlDiv);
+        _updateExecHighlightPos(qid, ta, hlDiv, selStart, selEnd);
+    }
+
+    // ★ 方案C：生成执行 SQL 摘要
+    var execSummary = stmts.length === 1 ? stmts[0] : stmts[0] + ' ...（共' + stmts.length + '条）';
+    if (execSummary.length > 80) execSummary = execSummary.substring(0, 80) + '...';
+
     // ★ 释放上次查询的服务端结果缓存
     _releaseQueryStore(qid);
     // ★ 清除旧的查询结果数据，防止 tab 切换时闪现旧数据
@@ -195,7 +247,7 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
     esClear._cancelLoadAll = false;
 
     if (btnExe) { btnExe.textContent = '⏹ 取消'; btnExe.style.background = '#e74c3c'; }
-    if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
+    if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中...</span><span style="color:#5dade2;font-size:10px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+escapeHtml(execSummary)+'">'+escapeHtml(execSummary)+'</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
     var layout = resultsDiv ? resultsDiv.parentElement : null;
     if (layout) {
         layout.classList.add('split');
@@ -231,6 +283,7 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
         if (_execCancelFlags[qid]) {
             _execCancelFlags[qid] = false;
             _execRunning[qid] = false;
+            _clearExecHighlight(qid);
             if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
             if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#f39c12;">⏸ 查询已取消</div>';
             return;
@@ -241,6 +294,8 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
             var elapsed = Date.now() - (_execStartTime[qid] || 0);
             var minDelay = Math.max(0, 300 - elapsed);
             setTimeout(function() {
+                // ★ 方案B：执行完成后 2 秒再移除高亮，让用户看清执行的是哪段 SQL
+                setTimeout(function() { _clearExecHighlight(qid); }, 2000);
                 if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
                 if (resultsDiv) renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
                 if (hasDDL) { autoRefreshTreeTables(activeConnId, activeConnData, execDb, qDb); }
@@ -279,14 +334,15 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
                     if (_execCancelFlags[qid]) {
                         _execCancelFlags[qid] = false;
                         _execRunning[qid] = false;
+                        _clearExecHighlight(qid);
                         if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
                         if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#f39c12;">⏸ 查询已取消</div>';
                         return;
                     }
-                    // ★ 显示执行耗时（每秒更新）
+                    // ★ 显示执行耗时（每秒更新）+ SQL 摘要
                     var elapsed = Math.round((Date.now() - pollStart) / 1000);
                     var dots = '.'.repeat((elapsed % 3) + 1);
-                    if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中' + dots + ' (' + elapsed + 's)</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
+                    if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中' + dots + ' (' + elapsed + 's)</span><span style="color:#5dade2;font-size:10px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+escapeHtml(clean)+'">'+escapeHtml(clean)+'</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
                     eel.poll_query_result(resp._job_id)(function(pollResult) {
                         if (pollResult && pollResult._pending) {
                             setTimeout(pollLoop, 200);
@@ -311,6 +367,7 @@ function _resetExeBtnLate(qid, btnExe) {
 function cancelExecQuery(qid) {
     _execCancelFlags[qid] = true;
     _execRunning[qid] = false; // ★ 已取消，不再运行
+    _clearExecHighlight(qid);
     eel.cancel_query()();
     var btnExe = document.getElementById('btn_exe_'+qid);
     if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
@@ -320,6 +377,7 @@ function cancelExecQuery(qid) {
 
 /** 关闭查询结果区域（收起分栏、清空结果、重置编辑状态） */
 function closeQueryResults(qid) {
+    _clearExecHighlight(qid);
     // ★ 释放服务端查询结果缓存
     _releaseQueryStore(qid);
     var layout = document.getElementById('ql_' + qid);
@@ -1230,7 +1288,7 @@ function _qRebuildSingleTab(qid, tabIdx) {
         if (needVTM) {
             tabBody += '<div id="'+qid+'_mvt'+tabIdx+'" style="overflow-y:auto;flex:1;min-height:0;" onscroll="_vtOnScrollM(\x27'+qid+'\x27,'+tabIdx+')">';
             tabBody += '<table class="exp-table" style="width:100%;">';
-            tabBody += '<thead style="position:sticky;top:0;z-index:2;background:#1a1a2e;"><tr>';
+            tabBody += '<thead><tr>';
             tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+tabIdx+'" onclick="_qToggleSelAllMulti(\x27'+qid+'\x27,'+tabIdx+')" title="全选/取消全选">#</th>';
             cols.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
             tabBody += '</tr></thead>';
@@ -1300,7 +1358,7 @@ function _qRenderTable(qid) {
         // ----- 虚拟滚动模式 -----
         html += '<div id="'+qid+'_vtwrap" style="overflow-y:auto;flex:1;min-height:0;" onscroll="_vtOnScroll(\x27'+qid+'\x27)">';
         html += '<table id="'+qid+'_vttable" class="exp-table" style="width:100%;">';
-        html += '<thead style="position:sticky;top:0;z-index:2;background:#1a1a2e;"><tr>';
+        html += '<thead><tr>';
         html += '<th class="row-sel-header" id="'+qid+'_qsel_all" onclick="_qToggleSelAll(\x27'+qid+'\x27)" title="全选/取消全选">#</th>';
         es.columns.forEach(function(c){
             var cType = (es._colTypes && es._colTypes[c]) ? es._colTypes[c] : '';

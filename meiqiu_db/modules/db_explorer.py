@@ -181,13 +181,19 @@ def db_explore_get_tables(conn_data, database, schema=''):
                 ), {"sch":sch}).fetchall()
                 tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":"","comment":r[3] or ""} for r in rows]
             elif db_type == 'oracle':
+                # ★ Oracle 用 USER_TABLES（当前用户）+ USER_SEGMENTS（实时字节）+ USER_TAB_COMMENTS
                 rows = c.execute(text(
                     "SELECT t.TABLE_NAME, t.NUM_ROWS, "
-                    "COALESCE((SELECT SUM(s.BYTES) FROM ALL_SEGMENTS s WHERE s.OWNER=t.OWNER AND s.SEGMENT_NAME=t.TABLE_NAME),0), "
-                    "COALESCE((SELECT c.COMMENTS FROM ALL_TAB_COMMENTS c WHERE c.OWNER=t.OWNER AND c.TABLE_NAME=t.TABLE_NAME AND c.TABLE_TYPE='TABLE'),'') "
-                    "FROM ALL_TABLES t WHERE t.OWNER=:db ORDER BY t.TABLE_NAME"
-                ), {"db":database}).fetchall()
-                tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
+                    "NVL((SELECT SUM(s.BYTES) FROM USER_SEGMENTS s WHERE s.SEGMENT_NAME=t.TABLE_NAME),0) AS data_bytes, "
+                    "NVL((SELECT c.COMMENTS FROM USER_TAB_COMMENTS c WHERE c.TABLE_NAME=t.TABLE_NAME),'') AS comment_text, "
+                    "t.LAST_ANALYZED "
+                    "FROM USER_TABLES t ORDER BY t.TABLE_NAME"
+                )).fetchall()
+                tables = [{"name":r[0],
+                           "rows": int(r[1]) if r[1] is not None else "",
+                           "data_size": _format_size(r[2]) if r[2] else "",
+                           "update_time": str(r[4]) if r[4] else "",
+                           "comment": r[3] or ""} for r in rows]
             elif db_type == 'mssql':
                 rows = c.execute(text(
                     "SELECT t.NAME, p.rows, SUM(ISNULL(a.used_pages,0))*8192, "

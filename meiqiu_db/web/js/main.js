@@ -37,14 +37,18 @@ function showModal(icon, title, msg, iconColor, btns) {
 }
 function hideModal() { $('modal_overlay').classList.remove('show'); }
 
-function showOkDialog(title, msg, icon, iconColor) {
+function showOkDialog(title, msg, icon, iconColor, callback) {
     icon = icon || '✅';
     iconColor = iconColor || '#2ecc71';
     showModal(icon, title, msg, iconColor,
-        '<button class="btn btn-gray" onclick="hideModal()">确定</button>');
+        '<button class="btn btn-gray" id="modal_ok_btn">确定</button>');
+    setTimeout(function(){
+        var btn = $('modal_ok_btn');
+        if (btn) btn.onclick = function(){ hideModal(); if (callback) callback(); };
+    }, 10);
 }
-function showErrorDialog(title, msg) {
-    showOkDialog(title, msg, '❌', '#e74c3c');
+function showErrorDialog(title, msg, callback) {
+    showOkDialog(title, msg, '❌', '#e74c3c', callback);
 }
 function showWarnDialog(title, msg) {
     showOkDialog(title, msg, '💡', '#f39c12');
@@ -182,7 +186,7 @@ function saveProfile(prefix) {
 function showInputDialog(title, msg, callback, defaultValue) {
     var defVal = defaultValue || '';
     showModal('💾', title, msg, '#2980b9',
-        '<input id="input_dlg_val" style="width:100%;height:36px;margin-bottom:12px;background:#1a1a1a;border:1px solid #3a3a3a;border-radius:6px;color:#e0e0e0;padding:0 10px;font-size:13px;" placeholder="配置名称" value="' + escapeHtml(defVal) + '">' +
+        '<input id="input_dlg_val" class="modal-input" placeholder="配置名称" value="' + escapeHtml(defVal) + '">' +
         '<div style="display:flex;gap:8px;">' +
         '<button class="btn btn-gray" style="flex:1;height:32px;font-size:11px;" onclick="hideModal()">取消</button>' +
         '<button class="btn btn-green" id="input_dlg_btn" style="flex:1;height:32px;font-size:11px;">保存</button>' +
@@ -215,35 +219,43 @@ document.addEventListener('click', function (e) {
 });
 
 // ========== 确认弹窗 ==========
-function showConfirmDialog(title, msg, onConfirm, onCancel) {
-    // ★ 确认弹窗支持 HTML（如 <b>加粗</b>），用 innerHTML 渲染
+// ★ 支持 2 或 3 个按钮：showConfirmDialog(title, msg, onConfirm, onCancel, confirmText, cancelText, thirdText)
+//   - 2 按钮：onConfirm + onCancel（取消）
+//   - 3 按钮：onConfirm + onCancel + 第三个按钮（通常"取消"不操作）
+function showConfirmDialog(title, msg, onConfirm, onCancel, confirmText, cancelText, thirdText) {
+    var cfmText = confirmText || '确定';
+    var canText = cancelText || '取消';
     var msgStr = String(msg);
-    if (/^\s*</.test(msgStr)) {
-        // HTML 内容：直接用 innerHTML
-        showModal('⚠️', title, '<div style="text-align:center;padding:8px 0;">' + msgStr + '</div>', '#e67e22',
-            '<button class="btn btn-gray" id="modal_cancel_btn">取消</button>' +
-            '<button class="btn btn-red" id="modal_confirm_btn">确定</button>');
+    var buttonsHtml = '';
+    if (thirdText) {
+        // 3 按钮模式：thirdText / cancelText / confirmText
+        buttonsHtml = '<button class="btn btn-gray" id="modal_third_btn">' + thirdText + '</button>' +
+            '<button class="btn btn-gray" id="modal_cancel_btn">' + canText + '</button>' +
+            '<button class="btn btn-red" id="modal_confirm_btn">' + cfmText + '</button>';
     } else {
-        // 纯文本：检查是否含 HTML 标签
+        buttonsHtml = '<button class="btn btn-gray" id="modal_cancel_btn">' + canText + '</button>' +
+            '<button class="btn btn-red" id="modal_confirm_btn">' + cfmText + '</button>';
+    }
+    if (/^\s*</.test(msgStr)) {
+        showModal('⚠️', title, '<div style="text-align:center;padding:8px 0;">' + msgStr + '</div>', '#e67e22', buttonsHtml);
+    } else {
         if (/<[a-zA-Z][^>]*>/.test(msgStr)) {
-            // 含 HTML 标签但以文字开头（如 "将创建备份表 <b>[xxx]</b>？"），强制包一层 div 让 showModal 识别
-            showModal('⚠️', title, '<div style="text-align:center;padding:8px 0;">' + msgStr + '</div>', '#e67e22',
-                '<button class="btn btn-gray" id="modal_cancel_btn">取消</button>' +
-                '<button class="btn btn-red" id="modal_confirm_btn">确定</button>');
+            showModal('⚠️', title, '<div style="text-align:center;padding:8px 0;">' + msgStr + '</div>', '#e67e22', buttonsHtml);
         } else {
-            showModal('⚠️', title, msgStr, '#e67e22',
-                '<button class="btn btn-gray" id="modal_cancel_btn">取消</button>' +
-                '<button class="btn btn-red" id="modal_confirm_btn">确定</button>');
+            showModal('⚠️', title, msgStr, '#e67e22', buttonsHtml);
         }
     }
     setTimeout(function () {
         var cfm = $('modal_confirm_btn');
-        if (cfm) cfm.onclick = function () { hideModal(); onConfirm(); };
+        if (cfm) cfm.onclick = function () { hideModal(); if (onConfirm) onConfirm(); };
         var can = $('modal_cancel_btn');
-        if (can && onCancel) {
-            can.onclick = function () { hideModal(); onCancel(); };
-        } else if (can) {
-            can.onclick = function () { hideModal(); };
+        if (can) {
+            can.onclick = function () { hideModal(); if (onCancel) onCancel(); };
+        }
+        var third = $('modal_third_btn');
+        if (third && thirdText) {
+            // third 按钮直接关闭（不操作）
+            third.onclick = function () { hideModal(); };
         }
     }, 10);
 }
@@ -1608,7 +1620,6 @@ function switchSqSubtab(name) {
         requestAnimationFrame(function() { _redrawDashCharts(); });
         if (_sqConnected) { dashboardRefresh(); changeDashInterval(); }
         else { $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5">请先在上方选择并连接数据库</div>'; }
-        if (_dashTimer) { clearInterval(_dashTimer); _dashTimer = null; }
     } else if (name === 'repl') {
         sqBody.style.display = 'none';
         var statsBar3 = document.querySelector('.slow-stats-bar');
@@ -1617,6 +1628,7 @@ function switchSqSubtab(name) {
         $('repl_view').style.display = '';
         if (_dashTimer) { clearInterval(_dashTimer); _dashTimer = null; }
         replRenderConnList();
+        if (_replActiveConn) { changeReplInterval(); }
     } else {
         sqBody.style.display = '';
         var statsBar2 = document.querySelector('.slow-stats-bar');
@@ -1720,9 +1732,28 @@ function replDelConn(id) {
     });
 }
 function replConnCtx(e,id) { e.preventDefault(); showCtxMenu(e.clientX,e.clientY,[{label:'🗑 删除',action:function(){replDelConn(id);}}]); }
-function replPersistConns() { try{localStorage.setItem('mqdb_repl_conns',JSON.stringify(_replConns));}catch(e){} }
-function replLoadConns() { try{var raw=localStorage.getItem('mqdb_repl_conns');if(raw)_replConns=JSON.parse(raw);}catch(e){_replConns=[];} }
-replLoadConns();
+function replPersistConns() {
+    try {
+        // 存到后端 settings.json（不依赖 localStorage）
+        eel.settings_get()(function(settings) {
+            if (!settings || typeof settings !== 'object') settings = {};
+            settings.repl_conns = _replConns;
+            eel.settings_save(settings)(function(){});
+        });
+    } catch(e) {}
+}
+function replLoadConns() {
+    // 从后端 settings.json 读取
+    try {
+        eel.settings_get()(function(settings) {
+            if (settings && settings.repl_conns && Array.isArray(settings.repl_conns)) {
+                _replConns = settings.repl_conns;
+                replRenderConnList();
+            }
+        });
+    } catch(e) { _replConns = []; }
+}
+setTimeout(replLoadConns, 500); // 等 Eel 就绪后再读
 
 function replicationRefresh() {
     if (!_replActiveConn) return;
@@ -1828,7 +1859,7 @@ function _renderReplResult(r) {
 function changeReplInterval() {
     if (_replTimer) { clearInterval(_replTimer); _replTimer = null; }
     var sec = parseInt(($('repl_interval')||{}).value) || 0;
-    if (sec > 0 && _sqConnected) {
+    if (sec > 0 && _replActiveConn) {
         _replTimer = setInterval(replicationRefresh, sec * 1000);
     }
 }
@@ -1848,6 +1879,62 @@ function changeDashInterval() {
     if (sec > 0 && _dashSubtab === 'dash' && _sqConnected) {
         _dashTimer = setInterval(dashboardRefresh, sec * 1000);
     }
+}
+
+/** 显示最近高频命令语句 */
+function dashShowTopCmds() {
+    if (!_sqConnData || !_sqConnected) {
+        showWarnDialog('提示', '请先连接数据库'); return;
+    }
+    var html = '<div style="margin-bottom:8px;">' +
+        '<label style="font-size:11px;margin-right:8px;">命令类型:</label>' +
+        '<select id="dash_cmd_type" class="dash-cmd-sel" onchange="dashLoadTopCmds()">' +
+            '<option value="UPDATE">UPDATE</option><option value="INSERT">INSERT</option>' +
+            '<option value="DELETE">DELETE</option><option value="SELECT">SELECT</option></select>' +
+        '<label style="font-size:11px;margin:0 8px 0 16px;">时间范围:</label>' +
+        '<select id="dash_cmd_minutes" class="dash-cmd-sel" onchange="dashLoadTopCmds()">' +
+            '<option value="1">最近 1 分钟</option><option value="5">最近 5 分钟</option>' +
+            '<option value="10">最近 10 分钟</option><option value="30">最近 30 分钟</option></select>' +
+        '<button class="btn btn-sm" style="background:#5dade2;color:#fff;margin-left:8px;" onclick="dashLoadTopCmds()">查询</button>' +
+        '</div>' +
+        '<div id="dash_cmd_result" style="max-height:420px;overflow-y:auto;"></div>';
+    showModal('🔍', '最近高频命令语句', html, '#5dade2',
+        '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>');
+    dashLoadTopCmds();
+}
+function dashLoadTopCmds() {
+    var cmdType = ($('dash_cmd_type')||{}).value || 'UPDATE';
+    var minutes = parseInt(($('dash_cmd_minutes')||{}).value || '1');
+    var data = {
+        host: _sqConnData.src_host, port: _sqConnData.src_port||3306,
+        user: _sqConnData.src_user, password: _sqConnData.src_pwd, db_type: 'mysql',
+    };
+    $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">⏳ 查询中...</div>';
+    eel.dashboard_get_top_cmds(data, cmdType, minutes, 30)(function(r) {
+        if (!r || !r.ok) {
+            $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#e74c3c;">❌ ' + escapeHtml((r&&r.msg)||'查询失败') + '</div>';
+            return;
+        }
+        if (!r.rows || r.rows.length === 0) {
+            $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">最近 ' + r.minutes + ' 分钟内没有该类型的 SQL</div>';
+            return;
+        }
+        var html = '<table class="cmd-detail-table"><thead><tr>' +
+            '<th style="width:50%">SQL 语句</th><th style="width:8%">次数</th><th style="width:10%">总耗时(ms)</th>' +
+            '<th style="width:10%">平均(ms)</th><th style="width:11%">扫描行</th><th style="width:11%">返回行</th></tr></thead><tbody>';
+        r.rows.forEach(function(row) {
+            var sql = String(row.sql_text || '').substring(0, 200);
+            var cls = r.cmd_type === 'UPDATE' ? 'cmd-update' : (r.cmd_type === 'DELETE' ? 'cmd-delete' : (r.cmd_type === 'INSERT' ? 'cmd-insert' : 'cmd-select'));
+            html += '<tr><td class="cmd-sql ' + cls + '" title="' + escapeHtml(String(row.sql_text || '')) + '">' + escapeHtml(sql) + '</td>' +
+                '<td class="cmd-num">' + (row.exec_count || 0) + '</td>' +
+                '<td>' + (row.total_ms || 0) + '</td>' +
+                '<td>' + (row.avg_ms || 0) + '</td>' +
+                '<td>' + (row.rows_examined || 0) + '</td>' +
+                '<td>' + (row.rows_sent || 0) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        $('dash_cmd_result').innerHTML = html;
+    });
 }
 
 /** 手动刷新仪表盘 */

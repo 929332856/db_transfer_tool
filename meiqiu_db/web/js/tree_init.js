@@ -46,7 +46,8 @@
                     'datagrip_parse_import',
                     'settings_get', 'settings_save', 'settings_get_paths',
                     'ping', 'debug_python_info',
-                    'replication_get_status'];
+                    'replication_get_status',
+                    'dashboard_get_top_cmds'];
                 var imported = 0;
                 for (var i = 0; i < criticalFns.length; i++) {
                     if (typeof eel[criticalFns[i]] !== 'function') {
