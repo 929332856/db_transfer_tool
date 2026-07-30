@@ -298,22 +298,22 @@ class TransferEngine:
     def src_url(self) -> str:
         u = quote_plus(self.src_user)
         p = quote_plus(self.src_pwd)
-        return f"mysql+mysqldb://{u}:{p}@{self.src_host}:{self.src_port}/{self.src_db}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.src_host}:{self.src_port}/{self.src_db}?charset=utf8mb4&read_timeout=3600"
 
     @property
     def dst_url(self) -> str:
         u = quote_plus(self.dst_user)
         p = quote_plus(self.dst_pwd)
-        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}/{self.dst_db}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}/{self.dst_db}?charset=utf8mb4&read_timeout=3600"
 
     @property
     def dst_url_no_db(self) -> str:
         u = quote_plus(self.dst_user)
         p = quote_plus(self.dst_pwd)
-        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4&read_timeout=3600"
 
     def _create_dst_database(self):
-        tmp_engine = create_engine(self.dst_url_no_db, connect_args=_connect_args("mysql", timeout=10))
+        tmp_engine = create_engine(self.dst_url_no_db, connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
         with tmp_engine.connect() as conn:
             conn.execute(text("COMMIT"))
             conn.execute(text(
@@ -400,7 +400,7 @@ class TransferEngine:
         try:
             _progress_q.put(("log", "🔗 正在连接源库..."))
             src_engine = create_engine(self.src_url, pool_pre_ping=True,
-                                       connect_args=_connect_args("mysql", timeout=10))
+                                       connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
             with src_engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
             _progress_q.put(("log", "✅ 源库连接成功"))
@@ -408,7 +408,7 @@ class TransferEngine:
             _progress_q.put(("log", "🔗 正在连接目标库..."))
             self._create_dst_database()
             dst_engine = create_engine(self.dst_url, pool_pre_ping=True,
-                                       connect_args=_connect_args("mysql", timeout=10))
+                                       connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
             _progress_q.put(("log", "✅ 目标库连接成功"))
 
             if self.table_name:
@@ -606,6 +606,13 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
                 conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 120000"))
             except Exception:
                 pass
+            # ★ PG：自动回滚失败的事务，然后开启新事务（避免 "current transaction is aborted" 和 "DECLARE CURSOR" 错误）
+            if db_type == 'postgresql':
+                try:
+                    conn.execute(text("ROLLBACK"))
+                    conn.execute(text("BEGIN"))
+                except Exception:
+                    pass
 
             import time as _time
             _t0 = _time.perf_counter()
@@ -990,9 +997,8 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
     _query_src_data = None
     try:
         cdata = dict(conn_data)
-        if cdata.get('db_type') == 'postgresql':
-            cdata["db"] = database  # ★ PG 必须切到目标数据库
-        elif cdata.get('db_type') != 'oracle':
+        if cdata.get('db_type') != 'postgresql' and cdata.get('db_type') != 'oracle':
+            # ★ PG 和 Oracle：database 参数实际是 schema，不要覆盖原连接的 database 名
             cdata["db"] = database
         tbl = _build_table_ref(cdata, database, table_name, schema)
         db_type = cdata.get('db_type', 'mysql')
@@ -4091,7 +4097,7 @@ def db_explore_get_procedures(conn_data, database, schema=''):
                 rows = c.execute(text(
                     "SELECT OBJECT_NAME,OBJECT_TYPE FROM ALL_OBJECTS "
                     "WHERE OWNER=:own AND OBJECT_TYPE IN ('PROCEDURE','FUNCTION') "
-                    "AND STATUS='VALID' ORDER BY OBJECT_NAME"
+                    "ORDER BY OBJECT_NAME"
                 ), {"own": owner}).fetchall()
             elif db_type == 'mssql':
                 rows = c.execute(text("SELECT ROUTINE_NAME,ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES ORDER BY ROUTINE_NAME")).fetchall()
@@ -4300,6 +4306,394 @@ def db_explore_get_proc_source(conn_data, database, obj_name, obj_type, schema='
         engine.dispose()
         return {"ok": True, "source": source}
     except Exception as e: return {"ok": False, "msg": _friendly_error(e, db_type)}
+
+@eel.expose
+def db_explore_get_proc_params(conn_data, database, obj_name, obj_type='PROCEDURE', schema=''):
+    """获取存储过程/函数的参数列表"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get("db_type", "mysql")
+        if db_type != 'oracle':
+            cdata["db"] = database
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        params = []
+        with engine.connect() as c:
+            if db_type == 'oracle':
+                owner = (database or cdata.get("user", "") or "").upper()
+                obj_up = obj_name.upper()
+
+                # ★ 1. 先用 ALL_OBJECTS 看对象是否真的存在，便于给出友好提示
+                obj_row = c.execute(text(
+                    "SELECT OBJECT_TYPE, STATUS FROM ALL_OBJECTS "
+                    "WHERE OWNER=:own AND OBJECT_NAME=:name AND ROWNUM=1"
+                ), {"own": owner, "name": obj_up}).fetchone()
+                if not obj_row:
+                    engine.dispose()
+                    return {"ok": False, "msg": f"对象 {owner}.{obj_up} 不存在或当前用户无访问权限"}
+                obj_type_real = (obj_row[0] or '').upper()
+                # INVALID 状态的对象没法取参数——同时返回 ALL_ERRORS 让用户知道原因
+                if (obj_row[1] or '').upper() == 'INVALID':
+                    try:
+                        err_rows = c.execute(text(
+                            "SELECT LINE, POSITION, TEXT FROM ALL_ERRORS "
+                            "WHERE OWNER=:own AND NAME=:name ORDER BY LINE, POSITION"
+                        ), {"own": owner, "name": obj_up}).fetchall()
+                        errs = [f"第{r[0]}行(列{r[1]}): {(r[2] or '').strip()[:200]}" for r in err_rows]
+                        err_detail = "\n".join(errs[:15]) if errs else "无具体错误信息"
+                        msg = f"对象 {obj_type_real} {owner}.{obj_up} 当前状态为 INVALID，请先重新编译。\n\n编译错误详情：\n{err_detail}"
+                    except Exception:
+                        msg = f"对象 {obj_type_real} {owner}.{obj_up} 当前状态为 INVALID，请重新编译后再测试"
+                    engine.dispose()
+                    return {"ok": False, "msg": msg}
+
+                # ★ 2. 用 ALL_ARGUMENTS 取参数（兼容 PACKAGE 内的子程序与 standalone）
+                #    列 PACKAGE_NAME 在所有 10g+ 版本都有；若不存在则降级不带此列
+                try:
+                    rows = c.execute(text(
+                        "SELECT ARGUMENT_NAME, DATA_TYPE, IN_OUT, POSITION, PACKAGE_NAME "
+                        "FROM ALL_ARGUMENTS WHERE OWNER=:own AND OBJECT_NAME=:name "
+                        "ORDER BY PACKAGE_NAME NULLS FIRST, POSITION"
+                    ), {"own": owner, "name": obj_up}).fetchall()
+                    has_pkg_col = True
+                except Exception:
+                    # ★ 极少数版本 ALL_ARGUMENTS 没有 PACKAGE_NAME 列
+                    has_pkg_col = False
+                    rows = c.execute(text(
+                        "SELECT ARGUMENT_NAME, DATA_TYPE, IN_OUT, POSITION "
+                        "FROM ALL_ARGUMENTS WHERE OWNER=:own AND OBJECT_NAME=:name "
+                        "ORDER BY POSITION"
+                    ), {"own": owner, "name": obj_up}).fetchall()
+
+                # ★ 3. 选取最匹配的一组（PACKAGE_NAME 优先 NULL=standalone，其次取第一个非空值）
+                if has_pkg_col and rows:
+                    null_pkg_rows = [r for r in rows if (r[4] or '') == '']
+                    if null_pkg_rows:
+                        rows = null_pkg_rows
+                    else:
+                        first_pkg = rows[0][4]
+                        rows = [r for r in rows if r[4] == first_pkg]
+
+                for r in rows:
+                    name, dtype, inout, pos = r[0], r[1], r[2], r[3]
+                    if pos == 0:
+                        # 函数返回值（PARAMETER=0）
+                        if name is None:
+                            continue  # 真正的返回值，不展示
+                    if name is None and (dtype or '') != 'REFCURSOR':
+                        continue
+                    display_name = name or ('<返回值>' if pos == 0 else f'arg{pos}')
+                    io = (inout or 'IN').upper()
+                    if pos == 0 and (name or '') == '':
+                        io = 'OUT'
+                        display_name = 'RETURN_VALUE'
+                    params.append({
+                        "name": display_name,
+                        "type": dtype or "",
+                        "io": io
+                    })
+            elif db_type in ('mysql', 'ob-mysql'):
+                rows = c.execute(text(
+                    "SELECT PARAMETER_NAME, DATA_TYPE, PARAMETER_MODE, ORDINAL_POSITION "
+                    "FROM INFORMATION_SCHEMA.PARAMETERS "
+                    "WHERE SPECIFIC_SCHEMA=:db AND SPECIFIC_NAME=:name "
+                    "ORDER BY ORDINAL_POSITION"
+                ), {"db": database, "name": obj_name}).fetchall()
+                for r in rows:
+                    name, dtype, mode, pos = r
+                    params.append({"name": name or "", "type": dtype or "", "io": (mode or "IN").upper()})
+            elif db_type == 'postgresql':
+                sch = schema if schema else 'public'
+                rows = c.execute(text(
+                    "SELECT p.proargnames, p.proargmodes, "
+                    "ARRAY(SELECT format_type(t, NULL) FROM unnest(p.proargtypes) t) AS type_arr "
+                    "FROM pg_proc p JOIN pg_namespace n ON p.pronamespace=n.oid "
+                    "WHERE n.nspname=:sch AND p.proname=:name "
+                    "ORDER BY p.oid LIMIT 1"
+                ), {"sch": sch, "name": obj_name}).fetchone()
+                if rows:
+                    names = rows[0] or []
+                    modes = rows[1] or []
+                    types = rows[2] or []
+                    if names is None:
+                        names = []
+                    for i in range(len(names) if names else 0):
+                        io = {'o': 'OUT', 'b': 'IN/OUT', 'i': 'IN'}.get((modes[i] if i < len(modes) else 'i'), 'IN')
+                        dtype = types[i] if i < len(types) else ''
+                        params.append({"name": names[i] or f'${i+1}', "type": dtype, "io": io})
+            # MSSQL 暂不实现参数获取
+        engine.dispose()
+        return {"ok": True, "params": params}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, db_type)}
+
+@eel.expose
+def db_explore_test_proc(conn_data, database, proc_name, inputs, schema=''):
+    """测试执行存储过程/函数（目前仅支持 Oracle）
+    inputs: list of {name, io, value, data_type(可选), enabled(可选)}
+    """
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get("db_type", "mysql")
+        if db_type != 'oracle':
+            return {"ok": False, "msg": "存储过程测试目前仅支持 Oracle"}
+        # ★ 确保 inputs 是列表
+        if isinstance(inputs, dict):
+            inputs = list(inputs.values())
+        elif not isinstance(inputs, list):
+            inputs = []
+        # ★ 用户输入映射（name.upper() → {data_type, value, enabled}）
+        user_input_map = {}
+        for it in inputs:
+            if not isinstance(it, dict):
+                continue
+            nm = (it.get('name', '') or '').upper()
+            if nm:
+                user_input_map[nm] = it
+        import oracledb as _oracledb
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        outputs = []
+        msg = "执行成功"
+
+        def _parse_user_value(val, user_dt, oracle_dtype):
+            """根据用户指定类型或 Oracle 类型转换输入值"""
+            if val == '' or val is None:
+                return val
+            dt = (user_dt or oracle_dtype or 'STRING').upper()
+            if dt in ('FLOAT', 'NUMBER', 'NUMERIC', 'DECIMAL'):
+                try:
+                    return float(val) if '.' in str(val) else int(val)
+                except Exception:
+                    return val
+            if dt == 'INTEGER':
+                try:
+                    return int(val)
+                except Exception:
+                    return val
+            if dt in ('DATE', 'TIMESTAMP'):
+                if hasattr(val, 'year'):
+                    return val
+                s = str(val)[:19]
+                try:
+                    from datetime import datetime as _dt
+                    return _dt.strptime(s, '%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    try:
+                        return _dt.strptime(s, '%Y-%m-%d')
+                    except Exception:
+                        return str(val)
+            return str(val)
+
+        with engine.connect() as c:
+            owner = (database or cdata.get("user", "") or "").upper()
+            proc_up = proc_name.upper()
+            # ★ 1. 从 ALL_ARGUMENTS 取 PACKAGE_NAME（兼容此 Oracle 版本的列）
+            pkg_row = c.execute(text(
+                "SELECT PACKAGE_NAME FROM ALL_ARGUMENTS "
+                "WHERE OWNER=:own AND OBJECT_NAME=:name AND ROWNUM=1"
+            ), {"own": owner, "name": proc_up}).fetchone()
+            package_name = (pkg_row[0] or '').upper() if pkg_row and pkg_row[0] else ''
+            in_package = bool(package_name)
+
+            # ★ 2. 看是不是 FUNCTION（standalone 时 ALL_OBJECTS 有 FUNCTION/PROCEDURE 行）
+            is_function = False
+            if not in_package:
+                obj_row = c.execute(text(
+                    "SELECT OBJECT_TYPE FROM ALL_OBJECTS "
+                    "WHERE OWNER=:own AND OBJECT_NAME=:name AND OBJECT_TYPE IN ('FUNCTION','PROCEDURE') AND ROWNUM=1"
+                ), {"own": owner, "name": proc_up}).fetchone()
+                is_function = (obj_row and (obj_row[0] or '').upper() == 'FUNCTION')
+
+            # ★ 3. 取参数（如果属于 PACKAGE 则按 PACKAGE_NAME 过滤）
+            if in_package:
+                rows = c.execute(text(
+                    "SELECT ARGUMENT_NAME, DATA_TYPE, IN_OUT, POSITION "
+                    "FROM ALL_ARGUMENTS WHERE OWNER=:own AND OBJECT_NAME=:name "
+                    "AND PACKAGE_NAME=:pkg ORDER BY POSITION"
+                ), {"own": owner, "name": proc_up, "pkg": package_name}).fetchall()
+            else:
+                rows = c.execute(text(
+                    "SELECT ARGUMENT_NAME, DATA_TYPE, IN_OUT, POSITION "
+                    "FROM ALL_ARGUMENTS WHERE OWNER=:own AND OBJECT_NAME=:name "
+                    "ORDER BY POSITION"
+                ), {"own": owner, "name": proc_up}).fetchall()
+
+            if is_function:
+                # 函数：用 SELECT 直接调用
+                func_args = []
+                for r in rows:
+                    name, dtype, inout, pos = r
+                    if pos == 0 or name is None:
+                        continue
+                    user = user_input_map.get((name or '').upper())
+                    if user and user.get('enabled', True):
+                        val = user.get('value', '')
+                        val = _parse_user_value(val, user.get('data_type', ''), dtype)
+                    else:
+                        val = ''
+                    func_args.append(val)
+                func_ref = f"{owner}.{proc_up}" if not in_package else f"{owner}.{package_name}.{proc_up}"
+                plsql = f"SELECT {func_ref}(" + ",".join(f":a{i}" for i in range(len(func_args))) + ") FROM DUAL"
+                bind = {f"a{i}": v for i, v in enumerate(func_args)}
+                row = c.execute(text(plsql), bind).fetchone()
+                if row:
+                    outputs.append({"name": "RETURN_VALUE", "value": row[0]})
+            else:
+                # 存储过程：使用底层 DBAPI callproc
+                cursor = c.connection.connection.cursor()
+                proc_args = []
+                for r in rows:
+                    name, dtype, inout, pos = r
+                    if pos == 0 or name is None:
+                        continue
+                    io = (inout or 'IN').upper()
+                    arg_name = name or f'arg{pos}'
+                    if io in ('OUT', 'IN/OUT', 'INOUT'):
+                        dt = (dtype or 'VARCHAR2').upper()
+                        if 'VARCHAR' in dt or 'CHAR' in dt or 'CLOB' in dt or 'LONG' in dt:
+                            var = cursor.var(_oracledb.STRING)
+                        elif 'NUMBER' in dt or 'INTEGER' in dt or 'FLOAT' in dt or 'BINARY' in dt or 'DECIMAL' in dt or 'NUMERIC' in dt:
+                            var = cursor.var(_oracledb.NUMBER)
+                        elif 'DATE' in dt or 'TIMESTAMP' in dt:
+                            var = cursor.var(_oracledb.DATE)
+                        elif 'BLOB' in dt or 'RAW' in dt:
+                            var = cursor.var(_oracledb.BLOB)
+                        elif 'CURSOR' in dt:
+                            var = cursor.var(_oracledb.CURSOR)
+                        else:
+                            var = cursor.var(_oracledb.STRING)
+                        proc_args.append(var)
+                        outputs.append({"name": arg_name, "value": None, "_var_index": len(proc_args) - 1})
+                    else:
+                        user = user_input_map.get(arg_name.upper())
+                        if user and user.get('enabled', True):
+                            val = user.get('value', '')
+                            val = _parse_user_value(val, user.get('data_type', ''), dtype)
+                        else:
+                            val = ''
+                        proc_args.append(val)
+                proc_ref = f"{owner}.{proc_up}" if not in_package else f"{owner}.{package_name}.{proc_up}"
+                cursor.callproc(proc_ref, proc_args)
+                # 回读 OUT 参数
+                for o in outputs:
+                    if '_var_index' in o:
+                        idx = o['_var_index']
+                        v = proc_args[idx].getvalue()
+                        o['value'] = v
+                        del o['_var_index']
+                cursor.close()
+                msg = f"已执行 {proc_ref}"
+        engine.dispose()
+        return {"ok": True, "outputs": outputs, "msg": msg}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+@eel.expose
+def db_explore_drop_object(conn_data, database, obj_name, obj_type, schema=''):
+    """删除存储过程/函数/触发器/包/序列/视图/物化视图等对象"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get("db_type", "mysql")
+        if db_type != 'oracle':
+            cdata["db"] = database
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        with engine.begin() as c:
+            ot = (obj_type or 'PROCEDURE').upper()
+            if db_type == 'oracle':
+                owner = (database or cdata.get("user", "") or "").upper()
+                obj_up = obj_name.upper()
+                # 查真实对象类型
+                row = c.execute(text(
+                    "SELECT OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER=:own AND OBJECT_NAME=:name"
+                ), {"own": owner, "name": obj_up}).fetchone()
+                real_ot = row[0] if row else ot
+                sql = f"DROP {real_ot} {owner}.{obj_up}"
+                c.execute(text(sql))
+            elif db_type in ('mysql', 'ob-mysql'):
+                if ot in ('PROCEDURE', 'FUNCTION'):
+                    sql = f"DROP {ot} IF EXISTS `{database}`.`{obj_name}`"
+                elif ot == 'TRIGGER':
+                    sql = f"DROP TRIGGER IF EXISTS `{database}`.`{obj_name}`"
+                elif ot == 'VIEW':
+                    sql = f"DROP VIEW IF EXISTS `{database}`.`{obj_name}`"
+                else:
+                    sql = f"DROP {ot} IF EXISTS `{database}`.`{obj_name}`"
+                c.execute(text(sql))
+            elif db_type == 'postgresql':
+                sch = schema if schema else 'public'
+                if ot == 'TRIGGER':
+                    sql = f"DROP TRIGGER IF EXISTS {obj_name} ON {sch}.{obj_name} CASCADE"
+                elif ot in ('PROCEDURE', 'FUNCTION'):
+                    sql = f"DROP {ot} IF EXISTS {sch}.{obj_name} CASCADE"
+                elif ot == 'VIEW':
+                    sql = f"DROP VIEW IF EXISTS {sch}.{obj_name} CASCADE"
+                elif ot == 'SEQUENCE':
+                    sql = f"DROP SEQUENCE IF EXISTS {sch}.{obj_name} CASCADE"
+                else:
+                    sql = f"DROP {ot} IF EXISTS {sch}.{obj_name} CASCADE"
+                c.execute(text(sql))
+            elif db_type == 'mssql':
+                sql = f"DROP {ot} [{schema or database}].[{obj_name}]"
+                c.execute(text(sql))
+        engine.dispose()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, db_type)}
+
+@eel.expose
+def db_explore_compile_object(conn_data, database, obj_name, obj_type='PROCEDURE', schema=''):
+    """重新编译 Oracle 存储过程/函数/包/触发器/视图等"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get("db_type", "mysql")
+        if db_type != 'oracle':
+            return {"ok": False, "msg": "重新编译目前仅支持 Oracle"}
+        owner = (database or cdata.get("user", "") or "").upper()
+        obj_up = obj_name.upper()
+        # ★ 查真实对象类型
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        ot = (obj_type or 'PROCEDURE').upper()
+        sqls = []
+        with engine.connect() as c:
+            row = c.execute(text(
+                "SELECT OBJECT_TYPE FROM ALL_OBJECTS WHERE OWNER=:own AND OBJECT_NAME=:name AND ROWNUM=1"
+            ), {"own": owner, "name": obj_up}).fetchone()
+            real_ot = (row[0] or ot).upper() if row else ot
+            if real_ot == 'PACKAGE':
+                sqls = [
+                    f"ALTER PACKAGE {owner}.{obj_up} COMPILE SPECIFICATION",
+                    f"ALTER PACKAGE {owner}.{obj_up} COMPILE BODY"
+                ]
+            elif real_ot == 'PACKAGE BODY':
+                sqls = [f"ALTER PACKAGE {owner}.{obj_up} COMPILE BODY"]
+            elif real_ot == 'MATERIALIZED VIEW':
+                sqls = [f"ALTER MATERIALIZED VIEW {owner}.{obj_up} COMPILE"]
+            else:
+                sqls = [f"ALTER {real_ot} {owner}.{obj_up} COMPILE"]
+        # ★ 编译
+        for s in sqls:
+            with engine.begin() as c2:
+                c2.execute(text(s))
+        # ★ 验证：检查编译后状态
+        with engine.connect() as c:
+            verify_row = c.execute(text(
+                "SELECT STATUS FROM ALL_OBJECTS "
+                "WHERE OWNER=:own AND OBJECT_NAME=:name AND ROWNUM=1"
+            ), {"own": owner, "name": obj_up}).fetchone()
+            new_status = (verify_row[0] or '').upper() if verify_row else ''
+        engine.dispose()
+        if new_status and new_status != 'VALID':
+            # ★ 编译未真正成功，提取 ALL_ERRORS 的具体错误信息
+            with engine.connect() as c:
+                err_rows = c.execute(text(
+                    "SELECT LINE, POSITION, TEXT FROM ALL_ERRORS "
+                    "WHERE OWNER=:own AND NAME=:name ORDER BY LINE, POSITION"
+                ), {"own": owner, "name": obj_up}).fetchall()
+                errs = [f"第{r[0]}行(列{r[1]}): {(r[2] or '').strip()[:200]}" for r in err_rows]
+            err_msg = "\n".join(errs[:15]) if errs else "无具体错误信息"
+            return {"ok": False, "msg": f"{owner}.{obj_up} 编译未通过（状态={new_status}）：\n\n{err_msg}"}
+        return {"ok": True, "msg": f"已重新编译 {owner}.{obj_up}"}
+    except Exception as e:
+        return {"ok": False, "msg": _friendly_error(e, db_type)}
 
 @eel.expose
 def db_explore_get_table_ddl(conn_data, database, table_name):
@@ -4550,6 +4944,9 @@ def tree_save_query(qid, name, sql, conn_id, db=''):
     with _tree_lock:
         try:
             if not qid: qid = f"q_{int(time.time() * 1000)}"
+            # ★ 防御：如果 Eel 传输时把换行符变成了字面量 \\n，还原回去
+            if sql and '\\n' in sql and '\n' not in sql:
+                sql = sql.replace('\\n', '\n').replace('\\t', '\t')
             qdir = _get_query_dir(conn_id, db)
             os.makedirs(qdir, exist_ok=True)
             # 先删除旧文件（按 ID 匹配）
@@ -4630,16 +5027,15 @@ def tree_get_query(qid):
                         name_match = re.search(r'^--\s*name:\s*(.+)$', content, re.MULTILINE)
                         conn_match = re.search(r'^--\s*conn_id:\s*(.+)$', content, re.MULTILINE)
                         db_match = re.search(r'^--\s*db:\s*(.+)$', content, re.MULTILINE)
-                        # SQL 内容从第一个空行后开始
+                        # SQL 内容从第一个空行后开始（保留尾部换行，不做 strip）
                         sql = ''
                         lines = content.split('\n')
                         for i, line in enumerate(lines):
                             if line.strip() == '' and i > 3:
-                                sql = '\n'.join(lines[i+1:]).strip()
+                                sql = '\n'.join(lines[i+1:])
                                 break
                         if not sql and lines:
-                            # 如果找不到空行，从第5行开始取
-                            sql = '\n'.join(lines[4:]).strip() if len(lines) > 4 else ''
+                            sql = '\n'.join(lines[4:]) if len(lines) > 4 else ''
                         return {
                             "id": qid,
                             "name": name_match.group(1).strip() if name_match else fname.replace('.sql',''),
@@ -4950,7 +5346,10 @@ def _generate_create_table(db_type, tbl, cols, indexes=None):
     return ddl
 
 @eel.expose
-def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, copy_data=True):
+def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, copy_data=True, new_table_name=None):
+    """拖拽复制表：支持跨数据库类型（MySQL/OB/PG/Oracle/MSSQL 互相同步）
+    new_table_name: 可选，指定目标表名（用于同库备份场景，备份为带时间戳的副本）
+    """
     """拖拽复制表：支持跨数据库类型（MySQL/OB/PG/Oracle/MSSQL 互相同步）"""
     try:
         # 来源连接
@@ -4967,7 +5366,9 @@ def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, co
         dst_data = dict(dst_conn_data)
         dst_data["db"] = dst_db
         dst_db_type = dst_data.get("db_type", "mysql")
-        dst_tbl = _build_table_ref(dst_data, dst_db, table_name)
+        # ★ 如果指定了 new_table_name（如同库备份带时间戳的副本），用新表名
+        target_table_name = new_table_name if new_table_name else table_name
+        dst_tbl = _build_table_ref(dst_data, dst_db, target_table_name)
         dst_url = _conn_url(dst_data)
         if dst_db_type in ('mysql', 'ob-mysql'):
             dst_url = dst_url.replace("?charset=utf8mb4", "?charset=utf8mb4&connect_timeout=10&read_timeout=30") if "?" in dst_url else dst_url + "?connect_timeout=10&read_timeout=30"
@@ -6902,6 +7303,13 @@ def _force_cleanup_and_exit():
             _db_thread_pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
+
+    # ★ 0a: 清空仪表盘最近 SQL 临时文件
+    try:
+        from modules.dashboard_cmds import clean_recent_cmds_tmp
+        clean_recent_cmds_tmp()
+    except Exception:
+        pass
 
     # ① Windows 清理
     if sys.platform == 'win32':

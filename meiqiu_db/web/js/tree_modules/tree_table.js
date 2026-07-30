@@ -10,7 +10,8 @@ function tableCtx(e, tn, db, schema, cid) {
         {label:'✏️ 重命名',action:function(){showInputDialog('重命名表','新表名：',function(newName){if(!newName||!newName.trim()||newName.trim()===tn)return;eel.table_rename(conn,db,tn,newName.trim(),sch)(function(r){if(r&&r.ok){showOkDialog('成功',r.msg);setTimeout(function(){refreshTableFolder(cid,db,sch);},500);}else showErrorDialog('失败',r?r.msg:'');});},tn);}},
         '---',
         {label:'📤 导出向导',action:function(){showExportWizard(cid,db,sch,tn);}},
-        {label:'💾 备份表',action:function(){var backupName=tn+'_'+(new Date().toISOString().slice(5,7)+new Date().toISOString().slice(8,10)+'_'+new Date().getHours());showConfirmDialog('备份表','将创建备份表 <b>['+backupName+']</b>？',function(){showModal('💾','正在备份表 <b>'+escapeHtml(tn)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在执行 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">CREATE TABLE ... LIKE ...</code><br>和 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">INSERT INTO ... SELECT ...</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');eel.table_backup(conn,db,tn,sch)(function(r){if(r&&r.ok){document.getElementById('modal_title').innerHTML='✅ 备份完成';document.getElementById('modal_title').style.color='#27ae60';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">✅</div><div style="color:#ccc;font-size:14px;">'+escapeHtml(r.msg)+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';setTimeout(function(){refreshTableFolder(cid,db,sch);},500);}else{document.getElementById('modal_title').innerHTML='❌ 备份失败';document.getElementById('modal_title').style.color='#e74c3c';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">❌</div><div style="color:#e74c3c;">'+(r?escapeHtml(r.msg):'未知错误')+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';}});});}},
+        {label:'💾 备份表',action:function(){var backupName=tn+'_'+(new Date().toISOString().slice(5,7)+new Date().toISOString().slice(8,10)+'_'+new Date().getHours());showConfirmDialog('备份表','将创建备份表 <b>['+backupName+']</b>？',function(){showModal('💾','正在备份表 <b>'+escapeHtml(tn)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在执行 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">CREATE TABLE ... LIKE ...</code><br>和 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">INSERT INTO ... SELECT ...</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');eel.table_backup(conn,db,tn,sch)(function(r){if(r&&r.ok){document.getElementById('modal_title').innerHTML='✅ 备份完成';document.getElementById('modal_title').style.color='#27ae60';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">✅</div><div style="color:#ccc;font-size:14px;">'+escapeHtml(r.msg)+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';// ★ 无感刷新：表文件夹 + 对象窗口
+refreshTableFolder(cid,db,sch);if(activeCatId==='cat_tables_'+safeBtoa(db)){loadCategoryItems(conn,db,'tables',function(items){renderCategoryItems('cat_tables_'+safeBtoa(db),items,'tables');},'');}}else{document.getElementById('modal_title').innerHTML='❌ 备份失败';document.getElementById('modal_title').style.color='#e74c3c';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">❌</div><div style="color:#e74c3c;">'+(r?escapeHtml(r.msg):'未知错误')+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';}});});}},
         '---',
         {label:'🗑 清空表',action:function(){showConfirmDialog('确认','清空表 ['+tn+']？',function(){eel.table_clear(conn,db,tn,sch)(function(r){showOkDialog(r&&r.ok?'成功':'失败',r?r.msg:'');});});}},
         {label:'✂️ 截断表',action:function(){showConfirmDialog('确认','截断表 ['+tn+']？',function(){eel.table_truncate(conn,db,tn,sch)(function(r){showOkDialog(r&&r.ok?'成功':'失败',r?r.msg:'');});});}},
@@ -108,6 +109,7 @@ function _unquote(s) { s = s.trim(); if ((s[0]==="'"&&s[s.length-1]==="'")||(s[0
 // 生成 WHERE 栏 HTML
 function buildWhereBar(tid) {
     return '<div class="where-bar">' +
+        '<button class="btn btn-sm where-funnel" id="' + tid + '_funnel_btn" onclick="openFilterModal(\'' + tid + '\')" title="条件筛选" style="font-size:0;padding:3px 6px;position:relative;display:inline-flex;align-items:center;justify-content:center;"><svg viewBox="0 0 16 16" width="14" height="14" style="display:block;opacity:0.75;"><path d="M1 1.5h14l-5 6v6l-4-2V7.5z" fill="currentColor"/></svg><span class="funnel-badge" id="' + tid + '_funnel_badge" style="display:none;position:absolute;top:-4px;right:-4px;background:#e74c3c;color:#fff;border-radius:8px;padding:0 4px;font-size:9px;line-height:14px;min-width:14px;text-align:center;">0</span></button>' +
         '<span class="where-label">WHERE</span>' +
         '<input class="where-input" id="' + tid + '_where" placeholder="例: age > 18 AND name LIKE \'%张%\'（全表筛选）" onkeydown="if(event.key===\'Enter\')applyWhere(\'' + tid + '\')">' +
         '<button class="btn btn-sm" style="font-size:10px;padding:3px 10px;" onclick="applyWhere(\'' + tid + '\')">执行</button>' +
@@ -122,7 +124,10 @@ var _whereStates = {};
 var _tabIdToTid = {};
 
 function registerWhereState(tid, cols, rows, sortRef, onRender, colTypes) {
-    _whereStates[tid] = { cols: cols, rows: rows, sortRef: sortRef, onRender: onRender, colTypes: colTypes || {} };
+    _whereStates[tid] = {
+        cols: cols, rows: rows, sortRef: sortRef, onRender: onRender, colTypes: colTypes || {},
+        filterList: []  // ★ 条件筛选列表
+    };
 }
 function getWhereState(tid) { return _whereStates[tid]; }
 
@@ -150,6 +155,9 @@ function clearWhere(tid) {
     st.whereExpr = '';
     // ★ 清除 WHERE 条件
     window['_activeWhereSql_'+tid] = '';
+    // ★ 同时清掉筛选条件列表
+    st.filterList = [];
+    _updateFunnelBadge(tid, 0);
     // 清除列筛选缓存
     var clearColFn = window['_clearColFilters_'+tid];
     if (clearColFn) clearColFn();
@@ -158,6 +166,283 @@ function clearWhere(tid) {
     // ★ 服务端重新加载（无筛选）
     st.onRender();
 }
+
+// ==================== 条件筛选弹窗（漏斗按钮） ====================
+
+// ★ 筛选操作符定义
+var _FILTER_OPS = [
+    {v: '=',       l: '等于',    needValue: true},
+    {v: '!=',      l: '不等于',  needValue: true},
+    {v: 'LIKE',    l: '包含',    needValue: true},
+    {v: 'NOT LIKE',l: '不包含',  needValue: true},
+    {v: '>',       l: '大于',    needValue: true},
+    {v: '<',       l: '小于',    needValue: true},
+    {v: 'IS NULL',    l: '为空', needValue: false},
+    {v: 'IS NOT NULL',l: '不为空',needValue: false}
+];
+
+// ★ 字段名 → SQL 标识符（加反引号或方括号）
+function _filterEscapeIdent(name, dbType) {
+    if (!name) return '';
+    var dt = (dbType || '').toLowerCase();
+    if (dt === 'mysql' || dt === 'ob-mysql') return '`' + name.replace(/`/g, '``') + '`';
+    if (dt === 'postgresql') return '"' + name.replace(/"/g, '""') + '"';
+    if (dt === 'mssql') return '[' + name.replace(/]/g, ']]') + ']';
+    if (dt === 'oracle') return '"' + name.replace(/"/g, '""') + '"';
+    return name;
+}
+
+// ★ SQL 字符串字面量 → 加引号转义
+function _filterStringValue(v) {
+    if (v === '' || v === null || v === undefined) return "''";
+    return "'" + String(v).replace(/'/g, "''") + "'";
+}
+
+// ★ 把筛选列表转成 SQL
+function _buildFilterSql(filters, dbType) {
+    if (!filters || !filters.length) return '';
+    var parts = [];
+    var db_type = dbType || (window.activeConnData && activeConnData.db_type) || '';
+    filters.forEach(function(f) {
+        if (!f.field || !f.op) return;
+        var ident = _filterEscapeIdent(f.field, db_type);
+        if (!ident) return;
+        if (f.op === 'IS NULL' || f.op === 'IS NOT NULL') {
+            parts.push(ident + ' ' + f.op);
+        } else {
+            // 根据字段类型决定值的格式
+            var val = (f.value || '');
+            var op_upper = f.op.toUpperCase();
+            // LIKE 默认加上 %...% 包裹
+            if (op_upper === 'LIKE' || op_upper === 'NOT LIKE') {
+                if (val.indexOf('%') < 0) val = '%' + val + '%';
+            }
+            parts.push(ident + ' ' + op_upper + ' ' + _filterStringValue(val));
+        }
+    });
+    return parts.join(' AND ');
+}
+
+// ★ 更新漏斗徽标
+function _updateFunnelBadge(tid, count) {
+    var badge = document.getElementById(tid + '_funnel_badge');
+    if (!badge) return;
+    if (count > 0) {
+        badge.style.display = 'inline-block';
+        badge.textContent = String(count);
+    } else {
+        badge.style.display = 'none';
+    }
+}
+
+// ★ 打开筛选面板（在 funnel 按钮下方弹出一个下拉面板）
+function openFilterModal(tid) {
+    var st = _whereStates[tid];
+    if (!st) return;
+    var cols = st.cols || [];
+    if (!st.filterList) st.filterList = [];
+    // ★ 如果已显示，再点一次关闭
+    var existing = document.getElementById(tid + '_filter_panel');
+    if (existing) { existing.remove(); return; }
+    var panelHtml = _renderFilterPanel(tid, cols, st.filterList.slice());
+    // ★ 找到 funnel 按钮，定位在它下方
+    var funnelBtn = document.getElementById(tid + '_funnel_btn');
+    var whereBar = funnelBtn ? funnelBtn.closest('.where-bar') : null;
+    var panel = document.createElement('div');
+    panel.id = tid + '_filter_panel';
+    panel.className = 'filter-popover';
+    panel.innerHTML = panelHtml;
+    document.body.appendChild(panel);
+    // ★ 定位：在 where-bar 下方
+    if (whereBar) {
+        var r = whereBar.getBoundingClientRect();
+        var leftPx = Math.max(8, r.left + window.scrollX);
+        var topPx = r.bottom + window.scrollY + 4;
+        panel.style.left = leftPx + 'px';
+        panel.style.top = topPx + 'px';
+        panel.style.minWidth = Math.max(520, r.width - 60) + 'px';
+    }
+    // ★ 点击外部关闭
+    setTimeout(function() {
+        var closeHandler = function(e) {
+            if (!panel.contains(e.target) && (!funnelBtn || !funnelBtn.contains(e.target))) {
+                panel.remove();
+                document.removeEventListener('click', closeHandler, true);
+            }
+        };
+        document.addEventListener('click', closeHandler, true);
+    }, 80);
+}
+
+// ★ 渲染筛选面板（弹出式）
+function _renderFilterPanel(tid, cols, filters) {
+    var rows = filters.map(function(f, i) {
+        return _renderFilterRow(tid, cols, f, i, filters.length > 1);
+    }).join('');
+    return '' +
+        '<div style="padding:6px 4px;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;padding:0 4px;">' +
+                '<span style="font-size:12px;color:#888;display:inline-flex;align-items:center;gap:4px;"><svg viewBox="0 0 16 16" width="12" height="12" style="opacity:0.75;"><path d="M1 1.5h14l-5 6v6l-4-2V7.5z" fill="currentColor"/></svg>筛选</span>' +
+                '<button class="btn btn-sm" style="background:#3498db;color:#fff;" onclick="addFilterRow(\'' + tid + '\')">+ 新增条件</button>' +
+            '</div>' +
+            '<div id="' + tid + '_filter_rows">' + (rows || _renderFilterRow(tid, cols, {}, 0, false)) + '</div>' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding:4px;">' +
+                '<button class="btn btn-sm" onclick="clearAllFilters(\'' + tid + '\')">清除筛选</button>' +
+                '<div style="display:flex;gap:6px;">' +
+                    '<button class="btn btn-sm" onclick="resetFilters(\'' + tid + '\')">重置条件</button>' +
+                    '<button class="btn btn-sm" style="background:#2ecc71;color:#fff;" onclick="applyFilters(\'' + tid + '\')">应用筛选</button>' +
+                '</div>' +
+            '</div>' +
+        '</div>';
+}
+
+// ★ 渲染单行筛选
+function _renderFilterRow(tid, cols, f, idx, showAnd) {
+    var fieldOpts = cols.map(function(c) {
+        var sel = (c === f.field) ? ' selected' : '';
+        return '<option value="' + escapeAttr(c) + '"' + sel + '>' + escapeHtml(c) + '</option>';
+    }).join('');
+    var opOpts = _FILTER_OPS.map(function(op) {
+        var sel = (op.v === (f.op || '')) ? ' selected' : '';
+        return '<option value="' + op.v + '"' + sel + '>' + op.l + '</option>';
+    }).join('');
+    var isNullOp = (f.op === 'IS NULL' || f.op === 'IS NOT NULL');
+    var disableVal = isNullOp ? ' disabled' : '';
+    return '' +
+        '<div data-filter-idx="' + idx + '" style="display:flex;flex-direction:column;gap:4px;margin-bottom:4px;">' +
+            (showAnd ? '<div style="text-align:center;font-size:10px;color:#5dade2;margin:2px 0;">AND</div>' : '') +
+            '<div style="display:flex;gap:6px;align-items:center;">' +
+                '<select class="filter-field" style="flex:1;padding:5px 8px;background:transparent;border:1px solid #ccc;border-radius:4px;color:#333;outline:none;">' +
+                    '<option value="">字段</option>' + fieldOpts +
+                '</select>' +
+                '<select class="filter-op" style="flex:1;padding:5px 8px;background:transparent;border:1px solid #ccc;border-radius:4px;color:#333;outline:none;">' +
+                    opOpts +
+                '</select>' +
+                '<input class="filter-value" style="flex:1;padding:5px 8px;background:transparent;border:1px solid #ccc;border-radius:4px;color:#333;outline:none;" placeholder="值"' + disableVal + ' value="' + escapeAttr(f.value || '') + '">' +
+                '<button class="btn btn-sm" style="background:none;border:none;color:#999;font-size:14px;cursor:pointer;" onclick="removeFilterRow(\'' + tid + '\',' + idx + ')" title="删除">🗑</button>' +
+            '</div>' +
+        '</div>';
+}
+
+// ★ 添加条件
+function addFilterRow(tid) {
+    var st = _whereStates[tid]; if (!st) return;
+    if (!st.filterList) st.filterList = [];
+    st.filterList.push({field: '', op: '=', value: ''});
+    _refreshFilterModalBody(tid);
+}
+
+// ★ 删除条件
+function removeFilterRow(tid, idx) {
+    var st = _whereStates[tid]; if (!st) return;
+    if (st.filterList && st.filterList.length > idx) {
+        st.filterList.splice(idx, 1);
+    }
+    _refreshFilterModalBody(tid);
+}
+
+// ★ 关闭指定 tid 的筛选面板
+function _closeFilterPanel(tid) {
+    var p = document.getElementById(tid + '_filter_panel');
+    if (p) p.remove();
+}
+
+// ★ 重新渲染弹窗主体（保留筛选状态）
+function _refreshFilterModalBody(tid) {
+    var st = _whereStates[tid]; if (!st) return;
+    var container = document.getElementById(tid + '_filter_rows');
+    if (!container) return;
+    container.innerHTML = (_whereStates[tid].filterList || []).map(function(f, i) {
+        return _renderFilterRow(tid, st.cols || [], f, i, (st.filterList.length > 1));
+    }).join('') || _renderFilterRow(tid, st.cols || [], {}, 0, false);
+}
+
+// ★ 应用筛选（同步到服务端）
+function applyFilters(tid) {
+    var st = _whereStates[tid]; if (!st) return;
+    // ★ 从 DOM 收集当前筛选条件
+    var rows = document.querySelectorAll('#' + tid + '_filter_rows [data-filter-idx]');
+    var list = [];
+    rows.forEach(function(rowEl) {
+        var fieldSel = rowEl.querySelector('.filter-field');
+        var opSel = rowEl.querySelector('.filter-op');
+        var valInp = rowEl.querySelector('.filter-value');
+        var f = {
+            field: fieldSel ? fieldSel.value : '',
+            op: opSel ? opSel.value : '',
+            value: valInp ? valInp.value : ''
+        };
+        list.push(f);
+    });
+    st.filterList = list;
+    // ★ 转成 SQL 写入 _activeWhereSql_
+    var dbType = (window.activeConnData && activeConnData.db_type) || '';
+    var sql = _buildFilterSql(list, dbType);
+    window['_activeWhereSql_' + tid] = sql;
+    st.whereExpr = sql;
+    // ★ 也把 SQL 同步到 WHERE 输入框
+    var inp = document.getElementById(tid + '_where');
+    if (inp) inp.value = sql;
+    // ★ 更新徽标（只统计有效的：字段非空的）
+    var validCount = list.filter(function(f){return f.field && f.op;}).length;
+    _updateFunnelBadge(tid, validCount);
+    // ★ 重置分页 + 服务端刷新
+    var resetPageFn = window['_resetPage_'+tid];
+    if (resetPageFn) resetPageFn();
+    st.onRender();
+    // ★ 关闭筛选面板
+    _closeFilterPanel(tid);
+}
+
+// ★ 清除所有筛选
+function clearAllFilters(tid) {
+    var st = _whereStates[tid]; if (!st) return;
+    st.filterList = [{field: '', op: '=', value: ''}];
+    _refreshFilterModalBody(tid);
+}
+
+// ★ 重置条件（清空并移除服务端筛选，重新加载）
+function resetFilters(tid) {
+    var st = _whereStates[tid]; if (!st) return;
+    st.filterList = [];
+    window['_activeWhereSql_' + tid] = '';
+    st.whereExpr = '';
+    _updateFunnelBadge(tid, 0);
+    var inp = document.getElementById(tid + '_where');
+    if (inp) inp.value = '';
+    var resetPageFn = window['_resetPage_'+tid];
+    if (resetPageFn) resetPageFn();
+    st.onRender();
+    _closeFilterPanel(tid);
+}
+
+// ★ 通用居中弹窗（私有）
+function _showCenterModal(title, bodyHtml, btnLabel, onClose) {
+    var existing = document.getElementById('filter_center_modal');
+    if (existing) existing.remove();
+    var overlay = document.createElement('div');
+    overlay.id = 'filter_center_modal';
+    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;';
+    var modal = document.createElement('div');
+    modal.style.cssText = 'background:#fafbfc;border-radius:8px;padding:20px;min-width:480px;max-width:640px;box-shadow:0 10px 40px rgba(0,0,0,0.5);border:1px solid #d0d7e0;color:#1a1a2e;';
+    modal.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">' +
+        '<b style="font-size:14px;">' + escapeHtml(title) + '</b>' +
+        '<span style="cursor:pointer;color:#999;font-size:16px;" onclick="_closeCenterModal()">✕</span>' +
+        '</div>' + bodyHtml +
+        '<div style="text-align:right;margin-top:12px;">' +
+        '<button class="btn btn-sm" onclick="_closeCenterModal()">' + escapeHtml(btnLabel || '关闭') + '</button>' +
+        '</div>';
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(e){
+        if (e.target === overlay) _closeCenterModal();
+    });
+}
+function _closeCenterModal() {
+    var m = document.getElementById('filter_center_modal');
+    if (m) m.remove();
+}
+
 
 function getFilteredRows(tid) {
     var st = _whereStates[tid]; if (!st) return { filtered: [], indices: [], count: 0 };
@@ -1379,36 +1664,16 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         }
 
 
-        // SQL 辅助函数（用于生成 INSERT 语句）
-        function _safeIdent(name) {
-            // 简单标识符引用（反引号风格，兼容 MySQL/通用）
-            return '`' + String(name).replace(/`/g, '``') + '`';
-        }
-        function _sqlValue(v) {
-            if (v === null || v === undefined) return 'NULL';
-            if (typeof v === 'number') return String(v);
-            // 尝试识别纯数字字符串
-            var s = String(v);
-            if (s === '') return "''";
-            // 检查是否为整数或浮点数
-            if (/^-?\d+(\.\d+)?$/.test(s.trim())) return s.trim();
-            // 字符串值：单引号转义
-            return "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
-        }
-
         // 行右键菜单：复制行数据 / 复制为 INSERT SQL
         function _rowCtxHandler(e, origIdx) {
             e.preventDefault(); e.stopPropagation();
             var row = rows[origIdx];
             if (!row) return;
+            var dbType = (activeConnData && activeConnData.db_type) || 'mysql';
             // 生成制表符分隔的行文本
             var rowText = row.map(function(v){ return v===null?'NULL':String(v); }).join('\t');
-            // 生成 INSERT SQL
-            var colNames = cols.map(function(c){ return _safeIdent(c); }).join(', ');
-            var values = row.map(function(v, i){
-                return _sqlValue(v);
-            }).join(', ');
-            var sql = 'INSERT INTO ' + _safeIdent(tn) + ' (' + colNames + ') VALUES (' + values + ');';
+            // 生成 INSERT SQL（用公共函数，兼容 Oracle/PG/MSSQL，自动处理日期类型）
+            var sql = _genInsertSql(cols, row, tn, dbType, colTypes);
             showCtxMenu(e.clientX, e.clientY, [
                 {label:'📋 复制', action:function(){ copyToClipboard(rowText); }},
                 {label:'📋 复制为 INSERT 语句', action:function(){ copyToClipboard(sql); }}

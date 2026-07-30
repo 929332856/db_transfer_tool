@@ -450,6 +450,7 @@ function _initQueryEditorEvents(qid, cid, db, name) {
     }
     if (ta) {
         ta.addEventListener('input', function(){ _queryTextareaChanged(qid, ta); _syncLineGutter(qid, ta); _applySqlHighlightDebounced(qid, ta); });
+        _initAutocomplete(ta, qid, cid, db); // ★ SQL 自动补全（必须在 keydown 之前注册以优先响应 Tab/Enter）
         ta.addEventListener('keydown',function(e){
             if(e.ctrlKey&&e.key==='Enter') execQueryTab(qid);
             if(e.ctrlKey&&(e.key==='s'||e.key==='S')) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); _handleSaveQuery(qid, cid, db); }
@@ -458,11 +459,28 @@ function _initQueryEditorEvents(qid, cid, db, name) {
             if(e.ctrlKey&&(e.key==='d'||e.key==='D')) { e.preventDefault(); _editorDupLine(ta); }
             if(e.ctrlKey&&e.key==='/') { e.preventDefault(); _editorToggleComment(ta); }
             if(e.ctrlKey&&e.shiftKey&&(e.key==='K'||e.key==='k')) { e.preventDefault(); _editorDeleteLine(ta); }
-            if(e.key==='Tab') { e.preventDefault(); if(e.shiftKey) _editorOutdent(ta); else _editorIndent(ta); }
+            if(e.key==='Tab') {
+                // ★ 如果自动补全可见，让补全接管（先于缩进执行）
+                if (typeof _acState !== 'undefined' && _acState.visible && _acState.items && _acState.items.length > 0) {
+                    // 不 preventDefault，让 _initAutocomplete 的 handler 接管
+                    return;
+                }
+                e.preventDefault();
+                if(e.shiftKey) _editorOutdent(ta);
+                else _editorIndent(ta);
+            }
             if(e.key==='Escape') { var bar=document.getElementById('sql_find_bar_'+qid); if(bar && bar.style.display!=='none'){ e.preventDefault(); _closeSqlFind(qid, ta); } }
         });
-        ta.addEventListener('mouseup', function(){ updateBtnLabel(); _syncLineGutter(qid, ta); _scrollToLine(ta, _getCursorLineNo(ta)); });
-        ta.addEventListener('keyup', function(){ updateBtnLabel(); _syncLineGutter(qid, ta); });
+        ta.addEventListener('mouseup', function(){ updateBtnLabel(); _syncLineGutter(qid, ta); });
+        ta.addEventListener('keyup', function(e){
+            updateBtnLabel();
+            _syncLineGutter(qid, ta);
+            // ★ 移动光标后，自动滚动到光标位置
+            var moveKeys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','Enter'];
+            if (moveKeys.indexOf(e.key) !== -1) {
+                requestAnimationFrame(function(){ _scrollToCursor(ta); });
+            }
+        });
         ta.addEventListener('scroll', function(){
             var gutter = document.getElementById('lng_'+qid);
             if (gutter) gutter.scrollTop = ta.scrollTop;
@@ -512,7 +530,7 @@ function _syncLineGutter(qid, ta) {
     var lineH = 18; // 约等于 font-size 12 + line-height 18
     for (var i = 1; i <= lines; i++) {
         var cls = i === cursorLine ? ' class="ln-row ln-active"' : ' class="ln-row"';
-        html += '<div' + cls + ' data-line="' + i + '" onclick="_lnGutterClick(\'' + qid + '\',' + i + ')">' + i + '</div>';
+        html += '<div' + cls + ' data-line="' + i + '" onmousedown="_lnSelectLine(\'' + qid + '\',' + i + ',event)">' + i + '</div>';
     }
     gutter.innerHTML = html;
     // gutter 滚动位置跟随 textarea
@@ -527,19 +545,71 @@ function _getCursorLineNo(ta) {
     return (text.match(/\n/g) || []).length + 1;
 }
 
-/** 行号列点击：跳转光标到该行，并滚动到该行可见 */
-function _lnGutterClick(qid, lineNo) {
+/** ★ 行号拖拽选多行状态 */
+var _lnDragState = null;
+
+/** ★ 全局 mousemove：拖拽行号时扩展选区 */
+document.addEventListener('mousemove', function(e) {
+    if (!_lnDragState) return;
+    var gutter = document.getElementById('lng_' + _lnDragState.qid);
+    if (!gutter) return;
+    var lineDiv = e.target.closest && e.target.closest('[data-line]');
+    if (!lineDiv || !gutter.contains(lineDiv)) return;
+    var lineNo = parseInt(lineDiv.getAttribute('data-line'));
+    if (isNaN(lineNo) || lineNo === _lnDragState._prevLine) return;
+    _lnDragState._prevLine = lineNo;
+    var lines = _lnDragState.ta.value.split('\n');
+    var lineEnd = 0;
+    for (var i = 0; i < lineNo && i < lines.length; i++) {
+        lineEnd += lines[i].length + (i < lineNo - 1 ? 1 : 0);
+    }
+    // 从锚点行开始，到当前行结束
+    var anchor = _lnDragState.anchorStart;
+    if (lineNo >= _lnDragState.anchorLine) {
+        _lnDragState.ta.selectionStart = anchor;
+        _lnDragState.ta.selectionEnd = lineEnd;
+    } else {
+        // 向上拖拽：交换方向
+        var aboveStart = 0;
+        for (var j = 0; j < lineNo - 1 && j < lines.length; j++) {
+            aboveStart += lines[j].length + 1;
+        }
+        _lnDragState.ta.selectionStart = aboveStart;
+        _lnDragState.ta.selectionEnd = anchor + (lines[_lnDragState.anchorLine - 1] || '').length;
+    }
+    _syncLineGutter(_lnDragState.qid, _lnDragState.ta);
+}, {passive: true});
+
+/** ★ 全局 mouseup：结束行号拖拽 */
+document.addEventListener('mouseup', function(e) {
+    if (!_lnDragState) return;
+    _lnDragState = null;
+});
+
+/** 行号列 mousedown：选中整行 + 启动拖拽多选 */
+function _lnSelectLine(qid, lineNo, e) {
     var ta = document.getElementById('sq_' + qid);
     if (!ta) return;
+    e.preventDefault();
     var lines = ta.value.split('\n');
-    var pos = 0;
+    var lineStart = 0;
     for (var i = 0; i < lineNo - 1 && i < lines.length; i++) {
-        pos += lines[i].length + 1; // +1 for newline
+        lineStart += lines[i].length + 1;
     }
+    var lineEnd = lineStart + (lines[lineNo - 1] || '').length;
     ta.focus();
-    ta.selectionStart = pos;
-    ta.selectionEnd = pos;
-    _scrollToLine(ta, lineNo);
+    if (e.shiftKey) {
+        ta.selectionEnd = lineEnd;
+    } else {
+        ta.selectionStart = lineStart;
+        ta.selectionEnd = lineEnd;
+    }
+    // ★ 启动拖拽多选状态
+    _lnDragState = {
+        qid: qid, ta: ta,
+        anchorLine: lineNo, anchorStart: lineStart,
+        _prevLine: lineNo
+    };
     _syncLineGutter(qid, ta);
 }
 
@@ -557,6 +627,47 @@ function _scrollToLine(ta, lineNo) {
     } else if (targetTop + lineH > viewBottom) {
         // 行在可视区域下方 → 滚到该行底部可见
         ta.scrollTop = targetTop + lineH - viewH + 4;
+    }
+}
+
+/** 自动滚动 textarea 使光标在水平和垂直方向都可见 */
+function _scrollToCursor(ta) {
+    if (!ta) return;
+    // ★ 使用 selectionEnd（拖拽选中时光标在终点；未选中时等于 selectionStart）
+    var pos = ta.selectionEnd !== ta.selectionStart ? ta.selectionEnd : ta.selectionStart;
+    var val = ta.value;
+    var textBefore = val.substring(0, pos);
+    var lines = textBefore.split('\n');
+    var curLine = lines.length; // 光标所在行号（1-based）
+    var colInLine = lines[lines.length - 1].length; // 光标在当前行的列号
+
+    // ★ 垂直滚动：确保光标行可见
+    var lineH = 18;
+    var targetTop = (curLine - 1) * lineH;
+    var viewTop = ta.scrollTop;
+    var viewH = ta.clientHeight;
+    var viewBottom = viewTop + viewH - lineH;
+    if (targetTop < viewTop) {
+        ta.scrollTop = Math.max(0, targetTop - lineH * 2);
+    } else if (targetTop > viewBottom) {
+        ta.scrollTop = targetTop - viewH + lineH * 3;
+    }
+
+    // ★ 水平滚动：确保光标列可见（monospace 字体，Consolas 12px ≈ 7.26px/char）
+    var charW = 7.26;
+    var cursorX = colInLine * charW + 12;
+    var viewLeft = ta.scrollLeft;
+    var viewW = ta.clientWidth;
+    // 光标在行首 → 强制回到最左边
+    if (colInLine === 0 && viewLeft > 0) {
+        ta.scrollLeft = 0;
+        return;
+    }
+    var viewRight = viewLeft + viewW;
+    if (cursorX < viewLeft + 4) {
+        ta.scrollLeft = Math.max(0, cursorX - 40);
+    } else if (cursorX > viewRight - 12) {
+        ta.scrollLeft = Math.max(0, cursorX - viewW + 40);
     }
 }
 
@@ -620,8 +731,8 @@ function _applySqlHighlight(qid, ta) {
     var commentRanges = _findSqlCommentRanges(text);
     var hasComments = commentRanges.length > 0;
 
-    // ★ 无注释且非搜索：隐藏高亮层，使用原生 textarea
-    if (!isSearch && !hasComments) {
+    // ★ 无搜索：隐藏高亮层，使用原生 textarea（避免挡光标/选中高亮）
+    if (!isSearch) {
         hl.style.display = 'none';
         hl.style.zIndex = '-1';
         ta.style.color = '';
@@ -631,20 +742,11 @@ function _applySqlHighlight(qid, ta) {
         return;
     }
 
+    // ★ 仅在搜索模式下显示高亮层
     hl.style.display = '';
-    // ★ 搜索模式下高亮层在上，textarea 透明（让搜索高亮可见）
-    //    仅注释高亮时高亮层在下，textarea 正常显示（光标和选中高亮正常）
-    if (isSearch) {
-        hl.style.zIndex = '1';
-        ta.style.color = 'transparent';
-        ta.style.caretColor = '#e0e0e0';
-    } else {
-        hl.style.zIndex = '-1';
-        ta.style.color = '';
-        ta.style.caretColor = '';
-        // ★ textarea 背景设为透明，让下面的高亮层（注释着色）透上来
-        ta.style.background = 'transparent';
-    }
+    hl.style.zIndex = '1';
+    ta.style.color = 'transparent';
+    ta.style.caretColor = '#e0e0e0';
 
     // 搜索匹配
     var matches = [];
@@ -898,6 +1000,8 @@ function _doSaveQuery(qid, cid, db, qname) {
                     tab._baseLabel = qname;
                     tab.label = qname;
                     tab.content = _buildQueryEditorHtml(newQid, cid, db, sql, qname);
+                    // ★ 更新 activeObjTab 到新 ID，避免跳转到 home
+                    if (activeObjTab === 'query_' + qid) activeObjTab = 'query_' + newQid;
                     // 更新追踪状态
                     delete _queryModified[qid];
                     delete _querySavedSql[qid];

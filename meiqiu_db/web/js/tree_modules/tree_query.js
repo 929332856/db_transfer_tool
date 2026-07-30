@@ -111,28 +111,95 @@ function execQueryTab(qid) {
 /** ★ 智能 SQL 分句：处理引号内分号、中文引号等特殊情况 */
 function _smartSplitSQL(text) {
     var stmts = [];
+    if (!text) return stmts;
+    
+    // ★ 先合并 PL/SQL 块（CREATE PROCEDURE/FUNCTION/TRIGGER/PACKAGE/TYPE 或 DECLARE..BEGIN..END）
+    //    用状态机扫描，把块内部的 ; 替换为占位符，拆分后再还原
     var buf = '';
-    var inSingle = false;
-    var inDouble = false;
-    for (var i = 0; i < text.length; i++) {
+    var inSingle = false, inDouble = false;
+    var inBlockComment = false;  // /* */
+    var plBlockLevel = 0;
+    var i = 0;
+    
+    while (i < text.length) {
         var ch = text[i];
-        if (ch === '\\' && inSingle) {
-            buf += ch;
-            if (i + 1 < text.length) { buf += text[i + 1]; i++; }
-        } else if ((ch === "'" || ch === '\u2018' || ch === '\u2019') && !inDouble) {
-            inSingle = !inSingle; buf += ch;
-        } else if ((ch === '"' || ch === '\u201c' || ch === '\u201d') && !inSingle) {
-            inDouble = !inDouble; buf += ch;
-        } else if (ch === ';' && !inSingle && !inDouble) {
-            var s = buf.trim();
-            if (s && s.substring(0,2) !== '--' && s.charAt(0) !== '#') stmts.push(s);
-            buf = '';
-        } else {
-            buf += ch;
+        
+        // 处理块注释 /* */
+        if (ch === '/' && i + 1 < text.length && text[i + 1] === '*' && !inSingle && !inDouble) {
+            inBlockComment = true;
+            buf += '/*';
+            i += 2;
+            continue;
         }
+        if (inBlockComment) {
+            buf += ch;
+            if (ch === '*' && i + 1 < text.length && text[i + 1] === '/') {
+                buf += '/';
+                inBlockComment = false;
+                i += 2;
+            } else { i++; }
+            continue;
+        }
+        
+        // 处理行注释 --
+        if (ch === '-' && i + 1 < text.length && text[i + 1] === '-' && !inSingle && !inDouble && !inBlockComment) {
+            while (i < text.length && text[i] !== '\n') { buf += text[i]; i++; }
+            continue;
+        }
+        
+        // 转义
+        if (ch === '\\' && inSingle) { buf += ch; i++; if (i < text.length) { buf += text[i]; i++; } continue; }
+        
+        // 字符串
+        if ((ch === "'" || ch === '\u2018' || ch === '\u2019') && !inDouble && !inBlockComment) { inSingle = !inSingle; buf += ch; i++; continue; }
+        if ((ch === '"' || ch === '\u201c' || ch === '\u201d') && !inSingle && !inBlockComment) { inDouble = !inDouble; buf += ch; i++; continue; }
+        
+        // ★ 不在字符串/注释内，检测 PL/SQL 块关键字
+        if (!inSingle && !inDouble && !inBlockComment && ch === '\n') {
+            // 获取刚结束的这一行内容（去掉行尾空白）
+            var lastLine = buf.substring(buf.lastIndexOf('\n', buf.length - 2) + 1).trim().toUpperCase();
+            // 检测 CREATE OR REPLACE（PROCEDURE/FUNCTION/TRIGGER/PACKAGE/TYPE）
+            if (plBlockLevel === 0 && lastLine.indexOf('CREATE') !== -1 &&
+                (lastLine.indexOf('PROCEDURE') !== -1 || lastLine.indexOf('FUNCTION') !== -1 ||
+                 lastLine.indexOf('TRIGGER') !== -1 || lastLine.indexOf('PACKAGE') !== -1 ||
+                 lastLine.indexOf('TYPE') !== -1)) {
+                plBlockLevel = 1;
+            }
+            // 检测独立 BEGIN（不在字符串内、不在已开始的块内）
+            else if (plBlockLevel === 0 && (lastLine === 'BEGIN' || lastLine === 'DECLARE')) {
+                plBlockLevel = 1;
+            }
+            // 检测 END;（独立行）
+            if (plBlockLevel > 0 && /^END\s*;?\s*$/i.test(lastLine)) {
+                plBlockLevel--;
+            }
+            buf += ch;
+            i++;
+            continue;
+        }
+        
+        // ★ 分号处理
+        if (ch === ';' && !inSingle && !inDouble && !inBlockComment) {
+            if (plBlockLevel > 0) {
+                // 块内分号：替换为特殊占位符
+                buf += '\x00PLSEMI\x00';
+            } else {
+                buf += ch;
+            }
+            i++;
+            continue;
+        }
+        
+        buf += ch;
+        i++;
     }
-    var s = buf.trim();
-    if (s && s.substring(0,2) !== '--' && s.charAt(0) !== '#') stmts.push(s);
+    
+    // ★ 按 ; 拆分，然后还原占位符
+    var parts = buf.split(';');
+    for (var p = 0; p < parts.length; p++) {
+        var s = parts[p].replace(/\x00PLSEMI\x00/g, ';').trim();
+        if (s && s.substring(0,2) !== '--' && s.charAt(0) !== '#') stmts.push(s);
+    }
     return stmts;
 }
 
@@ -319,7 +386,8 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
             // ★ 结果处理函数（同步/异步共用）
             function handleResult(result) {
                 allResults[i] = result;
-                if (result && result.ok && !result.cancelled && (!result.columns || !result.columns.length) && result.total === undefined) {
+                // ★ DDL 判定：执行成功 + 没取消 + 没有列 + 没有数据行（覆盖 total 未定义/0/受影响行数 0 的情况）
+                if (result && result.ok && !result.cancelled && (!result.columns || !result.columns.length) && (!result.rows || !result.rows.length)) {
                     hasDDL = true;
                 }
                 execIdx++;
@@ -383,6 +451,12 @@ function closeQueryResults(qid) {
     var layout = document.getElementById('ql_' + qid);
     if (layout) {
         layout.classList.remove('split');
+        // ★ 重置编辑器的高度和 flex（恢复自动撑满），否则下方会留空白
+        var editorWrap = layout.querySelector('.query-editor-wrap');
+        if (editorWrap) {
+            editorWrap.style.height = '';
+            editorWrap.style.flex = '';
+        }
     }
     var resultsDiv = document.getElementById('qr_' + qid);
     if (resultsDiv) {
@@ -857,24 +931,82 @@ function _qToggleSelAll(qid) {
     }
 }
 
+// ★ 生成 INSERT SQL（兼容 MySQL/Oracle/PostgreSQL/MSSQL）
+// colTypes: 可选，{列名: 类型}，Oracle 日期列自动用 TO_TIMESTAMP 包裹
+function _genInsertSql(columns, row, tableName, dbType, colTypes) {
+    var isOra = (dbType === 'oracle');
+    var isMssql = (dbType === 'mssql');
+    var isPg = (dbType === 'postgresql');
+    // 标识符引用：Oracle 不加引号（自动转大写），PG 用双引号，MSSQL 用方括号，MySQL 用反引号
+    var fnSafe;
+    if (isOra) {
+        fnSafe = function(n){ return String(n); };
+    } else if (isMssql) {
+        fnSafe = function(n){ return '['+String(n).replace(/]/g,']]')+']'; };
+    } else if (isPg) {
+        fnSafe = function(n){ return '"'+String(n).replace(/"/g,'""')+'"'; };
+    } else {
+        fnSafe = function(n){ return '`'+String(n).replace(/`/g,'``')+'`'; };
+    }
+    // ★ 判断是否是日期类型（Oracle 需要 TO_TIMESTAMP）
+    function _isDateType(colName) {
+        if (!colTypes) return false;
+        // 先精确匹配列名
+        if (colTypes[colName]) {
+            var t = colTypes[colName].toUpperCase();
+            if (t.indexOf('DATE') !== -1 || t.indexOf('TIME') !== -1 || t.indexOf('TIMESTAMP') !== -1 || t.indexOf('INTERVAL') !== -1) return true;
+        }
+        // ★ 大小写不敏感匹配（Oracle 列名可能大小写不一致）
+        var upperName = String(colName).toUpperCase();
+        if (colTypes[upperName]) {
+            var t2 = colTypes[upperName].toUpperCase();
+            if (t2.indexOf('DATE') !== -1 || t2.indexOf('TIME') !== -1 || t2.indexOf('TIMESTAMP') !== -1 || t2.indexOf('INTERVAL') !== -1) return true;
+        }
+        return false;
+    }
+    // ★ 自动检测值是否是日期时间格式（兜底：没有 colTypes 时也能识别）
+    function _isDateValue(v) {
+        if (v === null || v === undefined) return false;
+        var s = String(v).trim();
+        // 匹配 YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD 或 YYYY/MM/DD HH:MM:SS 等
+        return /^\d{4}[-\/]\d{1,2}[-\/]\d{1,2}(\s+\d{1,2}:\d{2}(:\d{2})?)?$/.test(s);
+    }
+    // 字符串转义：Oracle/PG 用两个单引号，MySQL/MSSQL 用反斜杠+单引号
+    var fnVal;
+    if (isOra || isPg) {
+        fnVal = function(v, colName){
+            if (v===null||v===undefined) return 'NULL';
+            var s=String(v); if(s==='') return "''";
+            if(/^-?\d+(\.\d+)?$/.test(s.trim())) return s.trim();
+            // ★ Oracle 日期列：自动包裹 TO_TIMESTAMP
+            if (isOra && (_isDateType(colName) || _isDateValue(v))) {
+                return "TO_TIMESTAMP('"+s.replace(/'/g,"''")+"', 'YYYY-MM-DD HH24:MI:SS')";
+            }
+            return "'"+s.replace(/'/g,"''")+"'";
+        };
+    } else {
+        fnVal = function(v, colName){
+            if (v===null||v===undefined) return 'NULL';
+            var s=String(v); if(s==='') return "''";
+            if(/^-?\d+(\.\d+)?$/.test(s.trim())) return s.trim();
+            return "'"+s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+"'";
+        };
+    }
+    var colNames = columns.map(function(c){ return fnSafe(c); }).join(', ');
+    var values = row.map(function(v, i){ return fnVal(v, columns[i]); }).join(', ');
+    return 'INSERT INTO '+fnSafe(tableName||'table_name')+' ('+colNames+') VALUES ('+values+');';
+}
+
 /** 查询结果行右键菜单 */
 function _qRowCtx(qid, e, rowIdx) {
     e.preventDefault(); e.stopPropagation();
     var es = _qState(qid);
     var row = es.rows[rowIdx];
     if (!row) return;
+    var dbType = (es.connData && es.connData.db_type) || 'mysql';
     var displayName = es._tableName || 'table_name';
-    // 生成 INSERT SQL
-    var fnSafe = function(n){ return '`'+String(n).replace(/`/g,'``')+'`'; };
-    var fnVal = function(v){
-        if (v===null||v===undefined) return 'NULL';
-        var s=String(v); if(s==='') return "''";
-        if(/^-?\d+(\.\d+)?$/.test(s.trim())) return s.trim();
-        return "'"+s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+"'";
-    };
-    var colNames = es.columns.map(function(c){ return fnSafe(c); }).join(', ');
-    var values = row.map(function(v){ return fnVal(v); }).join(', ');
-    var sql = 'INSERT INTO '+fnSafe(displayName)+' ('+colNames+') VALUES ('+values+');';
+    var colTypes = es._colTypes || {};
+    var sql = _genInsertSql(es.columns, row, displayName, dbType, colTypes);
     var rowText = row.map(function(v){ return v===null?'NULL':String(v); }).join('\t');
     showCtxMenu(e.clientX, e.clientY, [
         {label:'📋 复制', action:function(){ copyToClipboard(rowText); }},
@@ -1178,7 +1310,7 @@ function _qRefreshData(qid, tabIdx) {
         eel.execute_sql_query(stmt, data)(function(resp){
             function handleRefreshSingle(result) {
                 if (!result || !result.ok) {
-                    if (pane) pane.innerHTML = '<div style="padding:10px;color:#e74c3c;">❌ '+(result?result.msg:'无响应')+'</div>';
+                    if (pane) pane.innerHTML = '<div class="qr-error-msg">❌ '+(result?result.msg:'无响应')+'</div>';
                     return;
                 }
                 es._multiCols[tabIdx] = result.columns || [];
@@ -1445,7 +1577,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
         var html = '';
         var r0 = results[0];
         if (!r0 || !r0.ok) {
-            html += '<div style="padding:10px 12px;color:#e74c3c;font-size:12px;background:#2a1a1a;">❌ '+escapeHtml(r0?r0.msg:'无响应')+'</div>';
+            html += '<div class="qr-error-msg">❌ '+escapeHtml(r0?r0.msg:'无响应')+'</div>';
             es.columns = []; es.rows = [];
         } else {
             es.columns = r0.columns || [];
@@ -1616,7 +1748,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
         var r2 = results[i2];
         var tabBody = '';
         if (!r2 || !r2.ok) {
-            tabBody = '<div style="padding:12px;color:#e74c3c;">❌ '+escapeHtml(r2?r2.msg:'无响应')+'</div>';
+            tabBody = '<div class="qr-error-msg">❌ '+escapeHtml(r2?r2.msg:'无响应')+'</div>';
         } else {
             var rc2 = r2.total || 0;
             if ((r2.columns||[]).length > 0) {
@@ -1867,17 +1999,10 @@ function _qMultiRowCtx(qid, tabIdx, e, rowIdx) {
     if (!rows || !cols) return;
     var row = rows[rowIdx];
     if (!row) return;
-    var fnSafe = function(n){ return '`'+String(n).replace(/`/g,'``')+'`'; };
-    var fnVal = function(v){
-        if (v===null||v===undefined) return 'NULL';
-        var s=String(v); if(s==='') return "''";
-        if(/^-?\d+(\.\d+)?$/.test(s.trim())) return s.trim();
-        return "'"+s.replace(/\\/g,'\\\\').replace(/'/g,"\\'")+"'";
-    };
-    var colNames = cols.map(function(c){ return fnSafe(c); }).join(', ');
-    var values = row.map(function(v){ return fnVal(v); }).join(', ');
+    var dbType = (es.connData && es.connData.db_type) || 'mysql';
     var displayName = (es._multiTableNames||[])[tabIdx] || 'table_name';
-    var sql = 'INSERT INTO '+fnSafe(displayName)+' ('+colNames+') VALUES ('+values+');';
+    var colTypes = es._colTypes || {};
+    var sql = _genInsertSql(cols, row, displayName, dbType, colTypes);
     var rowText = row.map(function(v){ return v===null?'NULL':String(v); }).join('\t');
     showCtxMenu(e.clientX, e.clientY, [
         {label:'📋 复制', action:function(){ copyToClipboard(rowText); }},
@@ -2150,46 +2275,42 @@ function toggleChildren(childrenId, arrowId) {
     else { el.classList.add('open'); if(ar)ar.textContent='▾'; }
 }
 
-// ★ DDL 执行后自动刷新左侧树的表列表
+// ★ DDL 执行后自动刷新左侧树的表列表（以及存储过程/函数/触发器/包等分类）
 function autoRefreshTreeTables(cid, connData, execDb, qDb) {
     if (!treeData || !treeData.connections || !cid) return;
     var conn = treeData.connections[cid];
     if (!conn) return;
     var dbType = connData.db_type || '';
-    // ★ Oracle 的 execDb 是 service_name/SID，查表必须用 schema 名；activeDatabase 是连接展开时设置的当前 schema
     var refreshDb = (dbType === 'oracle') ? (qDb || activeDatabase || '') : (execDb || qDb || '');
     // 收集所有可能的 dbKey
     var candidates = [];
     if (dbType === 'oracle') {
-        // Oracle: 用 schema 名生成 dbKey，同时也加入 username（可能大小写不同）
         if (refreshDb) candidates.push(safeBtoa(refreshDb));
         if (connData.user && safeBtoa(connData.user.toUpperCase()) !== safeBtoa(refreshDb)) candidates.push(safeBtoa(connData.user.toUpperCase()));
     } else {
         if (execDb) candidates.push(safeBtoa(execDb));
         if (qDb && qDb !== execDb) candidates.push(safeBtoa(qDb));
     }
+    // ★ 需要刷新的分类
+    var refreshCats = ['tables', 'views', 'procedures', 'functions', 'triggers', 'packages'];
     candidates.forEach(function(dbKey) {
-        var rowId = 'cat_tables_' + dbKey;
-        var el = document.getElementById(rowId);
-        if (!el) return;
-        var children = el.nextElementSibling;
-        if (!children || !children.classList.contains('tree-children')) return;
-        if (children.classList.contains('open') && children.innerHTML.trim()) {
-            // 已展开：立即刷新
-            children.innerHTML = '<div style="font-size:11px;color:#999;padding:4px 0;padding-left:36px;">🔄 刷新中...</div>';
-            loadCategoryItems(conn, refreshDb, 'tables', function(items) {
-                var itemPad = 36;
-                var h = items.map(function(it) {
-                    var n = it.name || it;
-                    return '<div class="my-conn-row" style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;" ondblclick="addTableDataTab(\x27'+escapeAttr(n)+'\x27,\x27'+escapeAttr(refreshDb)+'\x27,\x27\x27,\x27'+cid+'\x27)"><span class="my-conn-icon">📊</span>'+escapeHtml(n)+'</div>';
-                }).join('');
-                children.innerHTML = h || '<div style="padding-left:'+itemPad+'px;color:#999;font-size:11px;">（无数据）</div>';
-            }, '');
-        } else {
-            // 未展开：清空缓存，下次点击自动重新加载
-            children.innerHTML = '';
-        }
+        refreshCats.forEach(function(cat) {
+            var rowId = 'cat_' + cat + '_' + dbKey;
+            var children = document.getElementById(rowId);
+            if (!children) return;
+            var ch = children.nextElementSibling;
+            if (!ch || !ch.classList.contains('tree-children')) return;
+            if (ch.classList.contains('open') && ch.innerHTML.trim()) {
+                // ★ 复用 refreshCatItem：自动继承 pad + 右键事件绑定
+                var pad = typeof _getCatRowPad === 'function' ? _getCatRowPad(rowId) : 36;
+                refreshCatItem(cat, cid, refreshDb, '', dbKey, pad);
+            } else {
+                ch.innerHTML = '';
+            }
+        });
     });
+    // ★ 清理 console.log
+    console.log('[autoRefreshTreeTables] 完成, cid='+cid);
 }
 
 // Redis DB 节点：仅折叠/展开（不加载数据）

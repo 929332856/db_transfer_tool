@@ -33,19 +33,19 @@ class TransferEngine:
     def src_url(self) -> str:
         u = quote_plus(self.src_user)
         p = quote_plus(self.src_pwd)
-        return f"mysql+mysqldb://{u}:{p}@{self.src_host}:{self.src_port}/{self.src_db}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.src_host}:{self.src_port}/{self.src_db}?charset=utf8mb4&read_timeout=3600"
 
     @property
     def dst_url(self) -> str:
         u = quote_plus(self.dst_user)
         p = quote_plus(self.dst_pwd)
-        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}/{self.dst_db}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}/{self.dst_db}?charset=utf8mb4&read_timeout=3600"
 
     @property
     def dst_url_no_db(self) -> str:
         u = quote_plus(self.dst_user)
         p = quote_plus(self.dst_pwd)
-        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4"
+        return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4&read_timeout=3600"
 
     def _create_dst_database(self):
         tmp_engine = create_engine(self.dst_url_no_db, connect_args=_connect_args("mysql", timeout=10))
@@ -146,7 +146,7 @@ class TransferEngine:
         try:
             _progress_q.put(("log", "🔗 正在连接源库..."))
             src_engine = create_engine(self.src_url, pool_pre_ping=True,
-                                       connect_args=_connect_args("mysql", timeout=10))
+                                       connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
             with src_engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
             _progress_q.put(("log", "✅ 源库连接成功"))
@@ -154,7 +154,7 @@ class TransferEngine:
             _progress_q.put(("log", "🔗 正在连接目标库..."))
             self._create_dst_database()
             dst_engine = create_engine(self.dst_url, pool_pre_ping=True,
-                                       connect_args=_connect_args("mysql", timeout=10))
+                                       connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
             _progress_q.put(("log", "✅ 目标库连接成功"))
 
             if self.table_name:

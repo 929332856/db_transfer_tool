@@ -240,17 +240,14 @@ function closeDatabase(cid, db, dbId) {
         if (t.id === 'obj_home') return true;
         return !(t.cid === cid && t.db === db);
     });
-    // ★ 如果当前激活的 tab 已被移除，切回 home
-    var stillHasCurrentTab = objectTabs.some(function(t) { return t.id === activeObjTab; });
-    if (!stillHasCurrentTab) {
-        var homeContent2 = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
-        var homeTab2 = objectTabs.find(function(t){return t.id==='obj_home';});
-        if (!homeTab2) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent2,db:''}); }
-        else { homeTab2.content = homeContent2; }
-        activeObjTab = 'obj_home';
-        activeCatId = null;
-        renderObjectPanel();
-    }
+    // ★ 关闭数据库后强制切回 home（清空对象面板中的表/查询残留）
+    var homeContent2 = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
+    var homeTab2 = objectTabs.find(function(t){return t.id==='obj_home';});
+    if (!homeTab2) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent2,db:''}); }
+    else { homeTab2.content = homeContent2; }
+    activeObjTab = 'obj_home';
+    activeCatId = null;
+    renderObjectPanel();
 }
 
 function refreshDatabaseList(cid) {
@@ -294,8 +291,10 @@ function tableCatCtx(e, cid, db, schema) {
 
 function qLabelCtx(e, cid, db, schema) {
     e.preventDefault(); e.stopPropagation();
+    var sch = schema || '';
     showCtxMenu(e.clientX, e.clientY, [
-        {label:'📝 新建查询',action:function(){addQuery(cid, db, schema);}}
+        {label:'📂 打开查询文件夹',action:function(){clickQueries(cid, db, sch);}},
+        {label:'📝 新建查询',action:function(){addQuery(cid, db, sch);}}
     ]);
 }
 
@@ -326,7 +325,7 @@ function expandCat(cat, cid, db, dbKey, pad, schema) {
                     }
                     var dataAttrs = (cat==='tables') ? ' data-tname="'+escapeAttr(n)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+cid+'"' : '';
                     var onClick = (cat==='tables') ? ' onclick="treeTableClick(event,this)"' : '';
-                    var ctx = (cat==='tables') ? ' oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : '';
+                    var ctx = (cat==='tables') ? ' oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : (cat==='procedures' ? ' oncontextmenu="procCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : (cat==='functions'||cat==='triggers'||cat==='packages'||cat==='sequences'||cat==='views'||cat==='mviews' ? ' oncontextmenu="objectCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\''+cat+'\')"' : ''));
                     var dragAttr = (cat==='tables') ? ' draggable="true" class="my-conn-row drag-table-item tree-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ondragend="onTableDragEnd(event)"' : ' class="my-conn-row"';
                     // ★ 非表对象：双击查看源码（存储过程/函数/触发器/序列/包/物化视图）
                     var dblClick = 'addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')';
@@ -345,6 +344,15 @@ function expandCat(cat, cid, db, dbKey, pad, schema) {
 }
 
 // 通用刷新：刷新指定分类（表/视图/存储过程/函数/查询）
+
+// ★ 从 category 行 DOM 上读取真实的 padding-left（替代写死 0）
+function _getCatRowPad(rowId) {
+    var el = document.getElementById(rowId);
+    if (!el) return 56;  // 兜底
+    var s = el.getAttribute('style') || el.style.cssText || '';
+    var m = s.match(/padding-left:\s*(\d+)\s*px/i);
+    return m ? parseInt(m[1]) : 56;
+}
 function refreshCatItem(cat, cid, db, schema, dbKey, pad) {
     var rowId = 'cat_'+cat+'_'+dbKey;
     var el = document.getElementById(rowId);
@@ -372,7 +380,7 @@ function refreshCatItem(cat, cid, db, schema, dbKey, pad) {
             }
             var dataAttrs = (cat==='tables') ? ' data-tname="'+escapeAttr(n)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+cid+'"' : '';
             var onClick = (cat==='tables') ? ' onclick="treeTableClick(event,this)"' : '';
-            var ctx = (cat==='tables') ? ' oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : '';
+            var ctx = (cat==='tables') ? ' oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : (cat==='procedures' ? ' oncontextmenu="procCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')"' : (cat==='functions'||cat==='triggers'||cat==='packages'||cat==='sequences'||cat==='views'||cat==='mviews' ? ' oncontextmenu="objectCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\',\''+cat+'\')"' : ''));
             var dragAttr = (cat==='tables') ? ' draggable="true" class="my-conn-row drag-table-item tree-table-item" ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ondragend="onTableDragEnd(event)"' : ' class="my-conn-row"';
             // ★ 非表对象：双击查看源码
             var dblClick = 'addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')';
@@ -422,7 +430,7 @@ function refreshTableFolder(cid, db, schema) {
         children.classList.add('open');
         updateCatArrow(rowId, '▾');
     }
-    var pad = parseInt(el.style.paddingLeft) || 0;
+    var pad = _getCatRowPad(rowId);
     refreshTableCat(cid, db, schema||'', dbKey, pad);
 }
 
@@ -448,7 +456,7 @@ function expandQueries(cid, dbKey, pad, db, schema) {
     }
 }
 
-// 局部刷新查询目录（不改动整个连接树）
+// 局部刷新查询目录（不改动整个连接树，无感刷新不闪）
 function refreshQueriesTree(cid, db, schema) {
     var fullDb = schema ? db+'/'+schema : db;
     if (!cid || !fullDb) return;
@@ -458,19 +466,22 @@ function refreshQueriesTree(cid, db, schema) {
     if (!el) return;
     var children = el.nextElementSibling;
     if (!children || !children.classList.contains('tree-children')) return;
-    children.innerHTML = '';
+    // ★ 已展开：直接加载替换（不清空旧内容，避免闪）
     if (children.classList.contains('open')) {
         var pad = parseInt(children.getAttribute('data-pad')) || 40;
         var itemPad = pad + 20;
-        // ★ 从文件系统加载查询列表
         eel.tree_list_queries(cid, db)(function(queries) {
             children.innerHTML = (queries || []).map(function (q) {
                 return '<div class="my-conn-row" style="padding-left:'+itemPad+'px;font-size:11px;" ondblclick="openQueryInTab(\''+q.id+'\')" oncontextmenu="queryCtx2(event,\''+q.id+'\',\''+cid+'\',\''+escapeAttr(schema||'')+'\')"><span class="my-conn-icon">📄</span><span class="my-conn-name">'+escapeHtml(q.name)+'</span></div>';
             }).join('') || '<div style="padding-left:'+itemPad+'px;color:#999;font-size:11px;">（无查询）</div>';
         });
+    } else {
+        // 未展开：清空缓存，下次点击自动重新加载
+        children.innerHTML = '';
     }
     var homeTab = objectTabs.find(function(t){return t.id==='obj_home';});
-    if (homeTab && activeCatId === rowId) {
+    // ★ 只有当前真的在 home tab 上才刷新（否则会跳转到 home）
+    if (homeTab && activeObjTab === 'obj_home' && activeCatId === rowId) {
         clickQueries(cid, db, schema);
     }
 }
@@ -618,30 +629,295 @@ function viewObjectSource(objName, db, schema, cid, objType) {
     try {
         eel.db_explore_get_proc_source(conn, db, objName, objType, sch)(function(r) {
             if (!r || !r.ok) {
-                addOrUpdateTab(tabId, objName, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ ' + escapeHtml(r ? r.msg : '加载失败') + '</div>', db, cid);
+                addOrUpdateTab(tabId, objName, 'ddl', '<div class="qr-error-msg">❌ ' + escapeHtml(r ? r.msg : '加载失败') + '</div>', db, cid);
                 return;
             }
             var source = r.source || '';
             var html =
                 '<div style="display:flex;flex-direction:column;height:100%;">' +
-                '<div style="padding:6px 10px;border-bottom:1px solid #333;display:flex;align-items:center;gap:8px;flex-shrink:0;">' +
+                '<div class="ddl-toolbar" style="padding:6px 10px;border-bottom:1px solid var(--border-color,#333);display:flex;align-items:center;gap:8px;flex-shrink:0;">' +
                     '<span style="color:#5dade2;font-size:13px;">📄 ' + escapeHtml(typeLabel) + '：' + escapeHtml(objName) + '</span>' +
                     '<button class="btn btn-sm btn-blue" style="margin-left:auto;" onclick="copyObjectSource(\''+escapeAttr(tabId)+'\')">📋 复制</button>' +
                 '</div>' +
                 '<div style="flex:1;overflow:auto;padding:0;">' +
-                    '<pre id="src_pre_'+escapeAttr(tabId)+'" style="background:#0d1117;margin:0;padding:12px;font-family:Consolas,monospace;font-size:12px;color:#e0e0e0;white-space:pre-wrap;word-break:break-all;line-height:1.5;">' + escapeHtml(source) + '</pre>' +
+                    '<pre id="src_pre_'+escapeAttr(tabId)+'" class="ddl-source">' + escapeHtml(source) + '</pre>' +
                 '</div>' +
                 '</div>';
             addOrUpdateTab(tabId, objName, 'ddl', html, db, cid);
         });
     } catch(e) {
-        addOrUpdateTab(tabId, objName, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>', db, cid);
+        addOrUpdateTab(tabId, objName, 'ddl', '<div class="qr-error-msg">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>', db, cid);
     }
 }
 
 function copyObjectSource(tabId) {
     var pre = document.getElementById('src_pre_' + tabId);
     if (pre) { copyToClipboard(pre.textContent); showOkDialog('成功', '源码已复制到剪贴板'); }
+}
+
+// ★ 存储过程右键菜单（查看/编辑/测试/删除）
+function procCtx(e, procName, db, schema, cid) {
+    e.preventDefault(); e.stopPropagation();
+    var sch = schema || '';
+    showCtxMenu(e.clientX, e.clientY, [
+        {label:'👁 查看源码', action:function(){ viewObjectSource(procName, db, sch, cid, 'PROCEDURE'); }},
+        {label:'✏ 编辑源码', action:function(){
+            var conn = treeData && treeData.connections ? treeData.connections[cid] : activeConnData;
+            if (!conn) return;
+            eel.db_explore_get_proc_source(conn, db, procName, 'PROCEDURE', sch)(function(r){
+                if (!r || !r.ok) { showErrorDialog('加载失败', r ? r.msg : '未知错误'); return; }
+                // 在查询编辑器中打开
+                var tmpQid = 'new_' + Date.now();
+                _openNewQueryTab(tmpQid, cid, db);
+                setTimeout(function(){
+                    var ta = document.getElementById('sq_' + tmpQid);
+                    if (ta) {
+                        ta.value = r.source;
+                        ta.dispatchEvent(new Event('input', {bubbles:true}));
+                    }
+                }, 200);
+            });
+        }},
+        {label:'🧪 测试', action:function(){ openProcTestTab(procName, db, sch, cid); }},
+        {label:'♻ 重新编译', action:function(){
+            var conn = treeData && treeData.connections ? treeData.connections[cid] : activeConnData;
+            if (!conn) return;
+            eel.db_explore_compile_object(conn, db, procName, 'PROCEDURE', sch)(function(r){
+                if (r && r.ok) {
+                    showOkDialog('编译成功', r.msg || '已重新编译：' + procName);
+                    var safeKey = safeBtoa(db + (sch ? '/' + sch : ''));
+                    refreshCatItem('procedures', cid, db, sch, safeKey, _getCatRowPad('cat_procedures_' + safeKey));
+                } else {
+                    showErrorDialog('编译失败', r ? r.msg : '未知错误');
+                }
+            });
+        }},
+        {type:'separator'},
+        {label:'🗑 删除', action:function(){
+            showConfirmDialog('删除存储过程', '确认删除存储过程 <b>['+escapeHtml(procName)+']</b> ？删除后不可恢复！',
+                function(){
+                    var conn = treeData && treeData.connections ? treeData.connections[cid] : activeConnData;
+                    if (!conn) return;
+                    eel.db_explore_drop_object(conn, db, procName, 'PROCEDURE', sch)(function(r){
+                        if (r && r.ok) {
+                            showOkDialog('成功', '已删除：' + procName);
+                            refreshTableFolder(cid, db, sch);
+                        } else {
+                            showErrorDialog('删除失败', r ? r.msg : '未知错误');
+                        }
+                    });
+                }, function(){}, '确定', '取消');
+        }}
+    ]);
+}
+
+// ★ 通用对象右键菜单（函数/触发器/包/序列/视图/物化视图）
+function objectCtx(e, objName, db, schema, cid, objType) {
+    e.preventDefault(); e.stopPropagation();
+    var sch = schema || '';
+    var typeLabel = {procedures:'存储过程',functions:'函数',triggers:'触发器',packages:'包',sequences:'序列',views:'视图',mviews:'物化视图'}[objType] || '对象';
+    var ot = objType==='functions'?'FUNCTION':objType==='triggers'?'TRIGGER':objType==='packages'?'PACKAGE':objType==='sequences'?'SEQUENCE':objType==='views'?'VIEW':objType==='mviews'?'MVIEW':'PROCEDURE';
+    showCtxMenu(e.clientX, e.clientY, [
+        {label:'👁 查看源码', action:function(){ viewObjectSource(objName, db, sch, cid, ot); }},
+        {label:'♻ 重新编译', action:function(){
+            var conn = treeData && treeData.connections ? treeData.connections[cid] : activeConnData;
+            if (!conn) return;
+            eel.db_explore_compile_object(conn, db, objName, ot, sch)(function(r){
+                if (r && r.ok) {
+                    showOkDialog('编译成功', r.msg || '已重新编译：' + objName);
+                    var catMap = {FUNCTION:'functions', TRIGGER:'triggers', VIEW:'views', MVIEW:'mviews', SEQUENCE:'sequences', PACKAGE:'packages'};
+                    var catKey = catMap[ot] || 'procedures';
+                    var safeKey = safeBtoa(db + (sch ? '/' + sch : ''));
+                    refreshCatItem(catKey, cid, db, sch, safeKey, _getCatRowPad('cat_' + catKey + '_' + safeKey));
+                } else showErrorDialog('编译失败', r ? r.msg : '未知错误');
+            });
+        }},
+        {label:'🗑 删除', action:function(){
+            showConfirmDialog('删除'+typeLabel, '确认删除'+typeLabel+' <b>['+escapeHtml(objName)+']</b> ？',
+                function(){
+                    var conn = treeData && treeData.connections ? treeData.connections[cid] : activeConnData;
+                    if (!conn) return;
+                    eel.db_explore_drop_object(conn, db, objName, ot, sch)(function(r){
+                        if (r && r.ok) { showOkDialog('成功', '已删除：'+objName); refreshTableFolder(cid, db, sch); }
+                        else showErrorDialog('删除失败', r ? r.msg : '未知错误');
+                    });
+                }, function(){}, '确定', '取消');
+        }}
+    ]);
+}
+
+// ★ 一键编译并打开测试窗口
+function compileProcTest(tabId, procName, db, schema, cid) {
+    var sch = schema || '';
+    var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
+    if (!conn) return;
+    addOrUpdateTab(tabId, '测试：'+procName, 'ddl', '<div style="padding:20px;color:#999;">⏳ 编译中...</div>', db, cid);
+    eel.db_explore_compile_object(conn, db, procName, 'PROCEDURE', sch)(function(r2){
+        if (!r2 || !r2.ok) {
+            var errMsg = r2 ? r2.msg : '未知错误';
+            var parts = (errMsg || '').split('\n\n');
+            var header = parts[0] || '编译失败';
+            var detail = parts.slice(1).join('\n\n');
+            var html = '<div style="padding:20px;">' +
+                '<div style="color:#e74c3c;font-size:14px;font-weight:bold;margin-bottom:10px;">❌ ' + escapeHtml(header) + '</div>' +
+                (detail ? '<pre style="background:#1a1f2a;color:#f39c12;padding:12px;border-radius:4px;margin:8px 0;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.5;">' + escapeHtml(detail) + '</pre>' : '') +
+                '<div style="margin-top:14px;display:flex;gap:8px;justify-content:center;">' +
+                    '<button class="btn btn-sm" onclick="viewObjectSource(\''+escapeAttr(procName)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+escapeAttr(cid)+'\',\'PROCEDURE\')">📄 查看源码定位</button>' +
+                    '<button class="btn btn-sm btn-blue" onclick="retryCompileProcTest(\''+escapeAttr(tabId)+'\',\''+escapeAttr(procName)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+escapeAttr(cid)+'\')">♻ 重试编译</button>' +
+                '</div>' +
+                '</div>';
+            addOrUpdateTab(tabId, '测试：'+procName, 'ddl', html, db, cid);
+            return;
+        }
+        // 编译成功，重新打开测试窗口
+        openProcTestTab(procName, db, schema, cid);
+    });
+}
+
+function retryCompileProcTest(tabId, procName, db, schema, cid) {
+    compileProcTest(tabId, procName, db, schema, cid);
+}
+
+// ★ 存储过程测试窗口：上半 PL/SQL 调用块（只读参考） + 下半参数表（带勾选/类型下拉/值）
+function openProcTestTab(procName, db, schema, cid) {
+    var sch = schema || '';
+    var tabId = 'proctest_' + procName;
+    var loadingHtml = '<div style="padding:20px;color:#999;">⏳ 加载参数信息...</div>';
+    addOrUpdateTab(tabId, '测试：' + procName, 'ddl', loadingHtml, db, cid);
+    var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
+    if (!conn) { addOrUpdateTab(tabId, '测试：'+procName, 'ddl', '<div class="qr-error-msg">未找到连接信息</div>', db, cid); return; }
+    eel.db_explore_get_proc_params(conn, db, procName, sch)(function(r){
+        if (!r || !r.ok) {
+            var errMsg = escapeHtml(r ? r.msg : '加载失败');
+            // ★ 如果是 INVALID 状态，直接提供「立即编译」按钮
+            if (r && r.msg && r.msg.indexOf('INVALID') >= 0) {
+                addOrUpdateTab(tabId, '测试：'+procName, 'ddl',
+                    '<div style="padding:20px;text-align:center;color:#e67e22;">⚡ 存储过程当前为 INVALID 状态，可能因依赖表变更导致。<br/><br/>' +
+                    '<button class="btn btn-sm btn-blue" onclick="compileProcTest(\''+escapeAttr(tabId)+'\',\''+escapeAttr(procName)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+escapeAttr(cid)+'\')">♻ 立即编译并继续</button></div>', db, cid);
+            } else {
+                addOrUpdateTab(tabId, '测试：'+procName, 'ddl', '<div class="qr-error-msg">❌ ' + errMsg + '</div>', db, cid);
+            }
+            return;
+        }
+        var params = r.params || [];
+        // ★ 上方表格只展示需要输入的参数（IN / IN/OUT），纯 OUT 在下方展示
+        var inputParams = params.filter(function(p){ return p.io === 'IN' || p.io === 'IN/OUT' || p.io === 'INOUT'; });
+        var rowsHtml = inputParams.map(function(p, i){
+            var inferred = _inferProcType(p.type || '');
+            var tip = (p.io === 'IN/OUT' || p.io === 'INOUT') ? ' title="IN/OUT 参数，输出值也会在下方展示"' : '';
+            return '<tr data-name="'+escapeAttr(p.name)+'" data-io="'+escapeAttr(p.io||'IN')+'">' +
+                '<td style="padding:4px 6px;text-align:center;border:1px solid #333;width:32px;"><input type="checkbox" checked class="proc-test-check"></td>' +
+                '<td style="padding:4px 8px;border:1px solid #333;">' + escapeHtml(p.name) + '</td>' +
+                '<td style="padding:0;border:1px solid #333;width:130px;">' + _procTestTypeDropdown(inferred) + '</td>' +
+                '<td style="padding:0;border:1px solid #333;"><input class="proc-test-input" data-orig-type="'+escapeAttr(inferred)+'"' + tip + '></td>' +
+                '</tr>';
+        }).join('');
+        var plsqlBlock = _buildProcCallBlock(procName, params);
+        var html =
+            '<div class="ddl-toolbar" style="padding:6px 10px;border-bottom:1px solid #333;display:flex;align-items:center;gap:8px;flex-shrink:0;">' +
+                '<span style="color:#5dade2;font-size:13px;">🧪 测试：' + escapeHtml(procName) + '</span>' +
+                '<button class="btn btn-sm btn-blue" style="margin-left:auto;" onclick="runProcTest(\''+escapeAttr(tabId)+'\',\''+escapeAttr(procName)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')">▶ 执行</button>' +
+            '</div>' +
+            '<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;">' +
+                // 顶部 PL/SQL 调用块（只读参考）
+                '<div style="flex:1 1 0;min-height:200px;display:flex;flex-direction:column;border-bottom:1px solid #333;">' +
+                    '<div class="proc-toolbar-label" style="padding:5px 10px;font-size:11px;flex-shrink:0;border-bottom:1px solid #2a3040;">PL/SQL 调用（参考）</div>' +
+                    '<textarea readonly class="proc-plsql-block" style="flex:1;">' + escapeHtml(plsqlBlock) + '</textarea>' +
+                '</div>' +
+                // 底部参数表
+                '<div style="flex:1 1 0;min-height:220px;overflow:auto;display:flex;flex-direction:column;">' +
+                    // ★ 备注：上方只展示入参（IN / IN/OUT），纯 OUT 在下方展示
+                    '<div style="padding:6px 12px;font-size:11px;color:#888;background:#1a1f2a;border-bottom:1px solid #2a3040;">' +
+                        '<svg viewBox="0 0 16 16" width="10" height="10" style="vertical-align:middle;opacity:0.7;"><path d="M8 1l8 14H0z" fill="currentColor"/></svg> ' +
+                        '下方表格仅展示输入参数（IN / IN/OUT）。纯 OUT 参数和函数返回值会自动在「出参/返回值」中显示。' +
+                    '</div>' +
+                    '<table class="proc-test-table">' +
+                        '<thead><tr><th>启用</th><th>变量</th><th>类型</th><th>值</th></tr></thead>' +
+                        '<tbody>' + (rowsHtml || '<tr><td colspan="4" style="padding:12px;text-align:center;color:#888;">（无入参）</td></tr>') + '</tbody>' +
+                    '</table>' +
+                    '<div style="margin-top:8px;font-weight:bold;font-size:12px;padding:4px 10px;">出参/返回值：</div>' +
+                    '<div id="'+escapeAttr(tabId)+'_results" style="margin-top:6px;padding:0 10px 10px;"><div class="proc-test-result" style="color:#888;">（点击执行后查看结果）</div></div>' +
+                '</div>' +
+            '</div>';
+        addOrUpdateTab(tabId, '测试：' + procName, 'ddl', html, db, cid);
+    });
+}
+
+// ★ 根据 Oracle DATA_TYPE 推断用户类型
+function _inferProcType(oracleType) {
+    var t = (oracleType || '').toUpperCase();
+    if (t.indexOf('NUMBER') >= 0 || t.indexOf('FLOAT') >= 0 || t.indexOf('BINARY') >= 0 || t.indexOf('DECIMAL') >= 0 || t.indexOf('NUMERIC') >= 0) return 'Float';
+    if (t.indexOf('INTEGER') >= 0 || t.indexOf('INT') >= 0) return 'Integer';
+    if (t.indexOf('TIMESTAMP') >= 0) return 'Timestamp';
+    if (t.indexOf('DATE') >= 0) return 'Date';
+    return 'String';
+}
+
+// ★ 类型下拉框
+function _procTestTypeDropdown(selected) {
+    var types = ['String', 'Float', 'Integer', 'Date', 'Timestamp'];
+    var opts = types.map(function(t) {
+        return '<option value="'+t+'"' + (t === selected ? ' selected' : '') + '>' + t + '</option>';
+    }).join('');
+    return '<select class="proc-test-type" style="width:100%;background:transparent;border:none;color:#aaa;padding:4px 6px;outline:none;cursor:pointer;">' + opts + '</select>';
+}
+
+// ★ 构造 PL/SQL 调用块（参考展示）
+function _buildProcCallBlock(procName, params) {
+    if (!params || params.length === 0) {
+        return 'begin\n  --call the procedure\n  ' + procName + ';\nend;';
+    }
+    var firstIndent = '  ' + procName + '(';
+    var contIndent = ' '.repeat(firstIndent.length);
+    var lines = ['begin', '  --call the procedure'];
+    params.forEach(function(p, i) {
+        var isLast = (i === params.length - 1);
+        var prefix = i === 0 ? firstIndent : contIndent;
+        var sep = isLast ? ');' : ',';
+        lines.push(prefix + p.name + ' => :' + p.name + sep);
+    });
+    lines.push('end;');
+    return lines.join('\n');
+}
+
+// ★ 执行存储过程测试
+function runProcTest(tabId, procName, db, schema, cid) {
+    var sch = schema || '';
+    var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
+    if (!conn) return;
+    var inputs = [];
+    var rows = document.querySelectorAll('#'+tabId+' tbody tr[data-name]');
+    rows.forEach(function(row){
+        var name = row.getAttribute('data-name');
+        var io = row.getAttribute('data-io');
+        var checked = row.querySelector('.proc-test-check');
+        var typeSel = row.querySelector('.proc-test-type');
+        var input = row.querySelector('.proc-test-input');
+        inputs.push({
+            name: name,
+            io: io,
+            value: input ? input.value : '',
+            data_type: typeSel ? typeSel.value : '',
+            enabled: checked ? checked.checked : true
+        });
+    });
+    var resultDiv = document.getElementById(tabId + '_results');
+    if (resultDiv) resultDiv.innerHTML = '<div class="proc-test-result" style="color:#888;">⏳ 执行中...</div>';
+    eel.db_explore_test_proc(conn, db, procName, inputs, sch)(function(r){
+        if (!resultDiv) return;
+        if (!r || !r.ok) {
+            resultDiv.innerHTML = '<div class="qr-error-msg">❌ ' + escapeHtml(r ? r.msg : '执行失败') + '</div>';
+            return;
+        }
+        var outRows = (r.outputs || []).map(function(o){
+            return '<tr><td style="padding:4px 8px;border:1px solid #333;width:30%;">' + escapeHtml(o.name) + '</td>' +
+                '<td class="proc-test-result" style="border:1px solid #333;">' + escapeHtml(o.value === null ? 'NULL' : String(o.value)) + '</td></tr>';
+        }).join('');
+        var html = '<table class="proc-test-table" style="margin-top:4px;"><thead><tr><th>参数</th><th>值</th></tr></thead><tbody>' +
+            (outRows || '<tr><td colspan="2" class="proc-test-result" style="color:#888;">（无返回）</td></tr>') + '</tbody></table>';
+        if (r.msg) html += '<div class="proc-test-result" style="margin-top:6px;color:#2ecc71;">✅ ' + escapeHtml(r.msg) + '</div>';
+        resultDiv.innerHTML = html;
+    });
 }
 
 // PostgreSQL 数据类型

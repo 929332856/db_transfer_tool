@@ -2,6 +2,8 @@
 var _dragInfo = null; // {table_name, src_db, schema, src_cid}
 // ==================== 拖拽移动连接 ====================
 var _connDragInfo = null; // {cid, fromParent} — 当前正在拖拽的连接
+// ★ Ctrl+C/V 复制表（与拖拽逻辑一致：同库直接备份，跨库弹选择框）
+var _copyTableInfo = null; // {table_name, src_db, schema, src_cid}
 
 // 全局清理：确保拖拽结束不残留状态
 document.addEventListener('dragend', function(e) {
@@ -26,6 +28,105 @@ function onTableDragEnd(e) {
     if (el) el.classList.remove('dragging');
     _dragInfo = null;
 }
+
+// ★ Ctrl+C 复制当前选中的表（树 + 对象窗口，焦点不在可编辑元素时生效）
+function _copyTableShortcut(e) {
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'c') return;
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'TEXTAREA' || tag === 'INPUT' || (e.target && e.target.isContentEditable)) return;
+    // ★ 树中的表（.tree-table-item.tree-table-selected）
+    var sel = document.querySelector('.tree-table-item.tree-table-selected');
+    if (sel) {
+        var tn = sel.getAttribute('data-tname');
+        var db = sel.getAttribute('data-db');
+        var sch = sel.getAttribute('data-sch') || '';
+        var cid = sel.getAttribute('data-cid');
+        if (tn && cid) {
+            _copyTableInfo = { table_name: tn, src_db: db, schema: sch, src_cid: cid };
+            try { navigator.clipboard.writeText(tn); } catch(_) {}
+            showToast('已复制表：' + tn + '\n按 Ctrl+V 粘贴到当前库（同库自动备份/跨库弹出选项）', 2500);
+            e.preventDefault(); e.stopPropagation();
+            return;
+        }
+    }
+    // ★ 对象窗口中的表（.drag-table-item.table-row-selected）
+    var objRow = document.querySelector('#obj_content .drag-table-item.table-row-selected');
+    if (objRow) {
+        var tn2 = objRow.getAttribute('data-tname');
+        var db2 = objRow.getAttribute('data-db');
+        var sch2 = objRow.getAttribute('data-sch') || '';
+        var cid2 = objRow.getAttribute('data-cid');
+        if (tn2 && cid2) {
+            _copyTableInfo = { table_name: tn2, src_db: db2, schema: sch2, src_cid: cid2 };
+            try { navigator.clipboard.writeText(tn2); } catch(_) {}
+            showToast('已复制表：' + tn2 + '\n按 Ctrl+V 粘贴到当前库（同库自动备份/跨库弹出选项）', 2500);
+            e.preventDefault(); e.stopPropagation();
+            return;
+        }
+    }
+}
+
+// ★ Ctrl+V 粘贴表（同库直接备份，跨库弹出选择框）
+function _pasteTableShortcut(e) {
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'TEXTAREA' || tag === 'INPUT' || (e.target && e.target.isContentEditable)) return;
+    if (!_copyTableInfo) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    var src = _copyTableInfo;
+    var srcConn = treeData && treeData.connections ? treeData.connections[src.src_cid] : null;
+    var targetCid = src.src_cid;
+    var targetDb = activeDatabase || src.src_db;
+    var dstConn = srcConn;
+    if (!srcConn || !dstConn) { showWarnDialog('提示', '无法获取连接信息'); return; }
+
+    // 同库 → 弹出确认框让用户确认备份名（tn_YYYYMMDD_HHMMSS）
+    if (targetCid === src.src_cid && targetDb === src.src_db) {
+        var ts = new Date();
+        var pad2 = function(n){ return n < 10 ? '0'+n : ''+n; };
+        var stamp = ts.getFullYear() + pad2(ts.getMonth()+1) + pad2(ts.getDate()) + '_' + pad2(ts.getHours()) + pad2(ts.getMinutes()) + pad2(ts.getSeconds());
+        var newTn = src.table_name + '_' + stamp;
+        showConfirmDialog('备份表', '将创建备份表 <b>[' + newTn + ']</b>？',
+            function(){
+                showModal('💾','正在备份表 <b>'+escapeHtml(src.table_name)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在创建备份 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">'+escapeHtml(newTn)+'</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');
+                eel.drag_copy_table(srcConn, src.src_db, src.table_name, dstConn, targetDb, true, newTn)(function(r) {
+                    if (r && r.ok) {
+                        document.getElementById('modal_title').innerHTML = '✅ 备份完成';
+                        document.getElementById('modal_title').style.color = '#27ae60';
+                        document.getElementById('modal_msg').innerHTML = '<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">✅</div><div style="color:#ccc;font-size:14px;">已备份为：'+escapeHtml(newTn)+'</div></div>';
+                        document.getElementById('modal_btns').innerHTML = '<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';
+                        // ★ 无感刷新：表文件夹 + 对象窗口
+                        refreshTableFolder(targetCid, targetDb, '');
+                        if (activeCatId === 'cat_tables_' + safeBtoa(targetDb)) {
+                            loadCategoryItems(srcConn, targetDb, 'tables', function(items) {
+                                renderCategoryItems('cat_tables_' + safeBtoa(targetDb), items, 'tables');
+                            }, '');
+                        }
+                    } else {
+                        document.getElementById('modal_title').innerHTML = '❌ 备份失败';
+                        document.getElementById('modal_title').style.color = '#e74c3c';
+                        document.getElementById('modal_msg').innerHTML = '<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">❌</div><div style="color:#e74c3c;">'+(r?escapeHtml(r.msg):'未知错误')+'</div></div>';
+                        document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';
+                    }
+                });
+            },
+            function(){ /* 取消 */ },
+            '确定', '取消'
+        );
+        return;
+    }
+
+    // 跨库 → 弹出选择框（复用 showDragCopyDialog）
+    showDragCopyDialog(src.table_name, src.src_db, src.schema, srcConn, targetCid, targetDb, dstConn);
+}
+
+// ★ 全局 Ctrl+C/V 监听
+document.addEventListener('keydown', function(e) {
+    if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) _copyTableShortcut(e);
+    else if (e.ctrlKey && (e.key === 'v' || e.key === 'V')) _pasteTableShortcut(e);
+});
 
 function onDbDragOver(e, el, cid, db) {
     if (!_dragInfo) return;

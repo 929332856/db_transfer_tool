@@ -132,3 +132,34 @@
     // ★ 立即初始化主题（localStorage 同步读取，无延迟）
     _initTheme();
 })();
+
+// ★ 树中查询项右键代理（确保内联 oncontextmenu 正常工作，也兼容 WebView 某些版本 event 不可用）
+document.addEventListener('contextmenu', function(e) {
+    var target = e.target;
+    // 向上查找查询项行
+    while (target && target !== document) {
+        if (target.classList && target.classList.contains('my-conn-row')) {
+            var oc = target.getAttribute('oncontextmenu');
+            if (oc && oc.indexOf('queryCtx2') !== -1) {
+                e.preventDefault();
+                e.stopPropagation();
+                // 从 oncontextmenu 属性中提取参数
+                var args = oc.match(/queryCtx2\(([^)]+)\)/);
+                if (args) {
+                    var params = args[1].split(',').map(function(s){ return s.trim().replace(/^'|'$/g,''); });
+                    if (params.length >= 2) {
+                        var qid = params[1];
+                        var cid = params[2] || '';
+                        var schema = params[3] || '';
+                        if (typeof queryCtx2 === 'function') {
+                            queryCtx2(e, qid, cid, schema);
+                        }
+                    }
+                }
+                return;
+            }
+            break;
+        }
+        target = target.parentElement;
+    }
+}, true);

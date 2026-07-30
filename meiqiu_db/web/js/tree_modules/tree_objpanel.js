@@ -643,10 +643,8 @@ function _restoreTextareas(contentDiv) {
         var newTa = allSq[i];
         var cached = _textareaCache[newTa.id];
         if (cached && cached.tagName === 'TEXTAREA') {
-            // 用缓存的 textarea 替换新创建的 textarea（保留 undo 历史）
+            // 用缓存的 textarea 替换新创建的 textarea（保留 undo 历史 + 事件监听器）
             newTa.parentNode.replaceChild(cached, newTa);
-            // 同步 value（以防 DOM 重建时 HTML 中的 value 过期）
-            cached.value = (cached.value !== undefined) ? cached.value : newTa.value;
             delete _textareaCache[newTa.id];
             restored = true;
         }

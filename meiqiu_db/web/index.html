@@ -7,6 +7,11 @@
     <link rel="icon" type="image/x-icon" href="mqdb.ico">
     <!-- ★ 同步读取 localStorage 主题，必须在 CSS 加载前执行防止闪烁 -->
     <script>if(localStorage.getItem('mqdb_theme')==='light')document.documentElement.classList.add('light-theme')</script>
+    <!-- ★ 内联 body 背景色，避免加载前闪黑 -->
+    <style>
+        html,body{margin:0;padding:0;background:#1e1e2e;color:#e0e0e0}
+        html.light-theme,html.light-theme body{background:#f5f6fa;color:#1a1a2e}
+    </style>
     <link rel="stylesheet" href="css/style.css">
     <!-- ★ Flask 适配层：替代 Eel，eel.xxx()(callback) → fetch() -->
     <script src="js/eel_adapter.js"></script>
@@ -420,6 +425,7 @@
     <script src="js/tree_modules/tree_tabs.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_table.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_designer.js" charset="utf-8"></script>
+    <script src="js/tree_modules/tree_autocomplete.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_query.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_redis_panel.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_dom.js" charset="utf-8"></script>

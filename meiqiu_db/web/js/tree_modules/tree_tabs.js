@@ -145,7 +145,16 @@ function highlightTableRow() {
 
 function addOrUpdateTab(id, label, type, content, db, cid) {
     var ex = objectTabs.find(function(t){return t.id===id;});
-    if (ex) { ex.content = content; if(db!==undefined)ex.db=db; if(cid!==undefined)ex.cid=cid; }
+    if (ex) {
+        // ★ 如果 content 变了（重新打开查询），清掉旧 textarea 缓存，避免用残留的旧 DOM 覆盖新内容
+        var contentChanged = (ex.content !== content);
+        ex.content = content; if(db!==undefined)ex.db=db; if(cid!==undefined)ex.cid=cid; delete ex._cachedSql;
+        if (contentChanged) {
+            var qid = id.replace(/^query_/, '');
+            delete _textareaCache['sq_' + qid];
+            delete _textareaCache['qr_' + qid];
+        }
+    }
     else objectTabs.push({id:id,label:label,type:type,content:content,db:db||'',cid:cid||activeConnId||''});
     activeObjTab = id;
     renderObjectPanel();

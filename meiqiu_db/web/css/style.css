@@ -168,6 +168,22 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
     border-radius: 0 2px 2px 0;
     transition: opacity 0.5s;
 }
+/* ★ SQL 自动补全下拉框 */
+.ac-popup {
+    position: fixed; z-index: 9999; background: #1e2233; border: 1px solid #3a3f55;
+    border-radius: 4px; max-height: 200px; overflow-y: auto; min-width: 150px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4); display: none; font-family: Consolas, monospace;
+    font-size: 12px;
+}
+.ac-item { padding: 4px 10px; cursor: pointer; color: #c8d6e5; }
+.ac-item.ac-selected { background: #3a6fc5; color: #fff; }
+.ac-item:hover { background: #2a3a5a; }
+.ac-item.ac-selected:hover { background: #3a6fc5; }
+html.light-theme .ac-popup { background: #fff; border-color: #d0d7e0; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+html.light-theme .ac-item { color: #333; }
+html.light-theme .ac-item.ac-selected { background: #3a6fc5; color: #fff; }
+html.light-theme .ac-item:hover { background: #e8eaed; }
+html.light-theme .ac-item.ac-selected:hover { background: #3a6fc5; }
 /* ★ 方案B：执行时 textarea 选中色淡一些，让覆盖层更显眼 */
 .query-editor.exec-highlight::selection {
     background: rgba(243, 156, 18, 0.2);
@@ -255,6 +271,64 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
 .query-splitter { display: none; height: 4px; background: #333; cursor: ns-resize; flex-shrink: 0; }
 .query-splitter:hover, .query-splitter.active { background: #5dade2; }
 .query-results-wrap { display: none; overflow: auto; min-height: 0; }
+/* 查询结果错误提示（深色/浅色主题自适应） */
+.qr-error-msg { padding: 10px 12px; color: #e74c3c; font-size: 12px; background: #2a1a1a; border-left: 3px solid #e74c3c; user-select: text; cursor: text; white-space: pre-wrap; word-break: break-all; }
+html.light-theme .qr-error-msg { background: #fdecec; color: #c0392b; border-left-color: #c0392b; }
+/* ★ DDL 源码查看 - 深色/浅色主题自适应 */
+.ddl-toolbar { background: #1a1f2a; border-bottom-color: #333; }
+.ddl-source { background: #0d1117; margin: 0; padding: 12px; font-family: Consolas, monospace; font-size: 12px; color: #e0e0e0; white-space: pre-wrap; word-break: break-all; line-height: 1.5; user-select: text; -webkit-user-select: text; cursor: text; }
+html.light-theme .ddl-toolbar { background: #f5f6fa; border-bottom-color: #d0d7e0; }
+html.light-theme .ddl-source { background: #fafbfc; color: #1a1a2e; }
+/* ★ 存储过程测试窗口 */
+.proc-test-panel { padding: 12px; font-size: 12px; }
+.proc-test-table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+.proc-test-table th { background: #2a3a4a; color: #fff; padding: 6px 10px; text-align: left; font-weight: normal; font-size: 11px; border: 1px solid #333; }
+.proc-test-table td { background: #1e2233; padding: 0; border: 1px solid #333; }
+.proc-test-input { width: 100%; padding: 5px 8px; background: transparent; border: none; color: #e0e0e0; font-family: Consolas, monospace; font-size: 12px; outline: none; }
+.proc-test-result { background: #1e2233; padding: 6px 10px; color: #e0e0e0; font-family: Consolas, monospace; font-size: 12px; border: 1px solid #333; }
+/* ★ 存储过程测试：PL/SQL 调用块只读文本框 + 类型下拉 */
+.proc-plsql-block {
+    background: #1a1f2a; color: #c8d6e5; border: none;
+    padding: 10px; font-family: Consolas, monospace; font-size: 12px; line-height: 18px;
+    resize: none; outline: none; user-select: text; box-sizing: border-box;
+    display: block; width: 100%;
+}
+.proc-test-type {
+    background: transparent; color: #aaa; border: none; padding: 4px 6px; outline: none; cursor: pointer;
+    font-family: Consolas, monospace; font-size: 12px;
+}
+.proc-toolbar-label { color: #888; background: #151921; }
+html.light-theme .proc-test-table th { background: #e8eaed; color: #333; border-color: #d0d7e0; }
+html.light-theme .proc-test-table td { background: #fff; border-color: #d0d7e0; }
+html.light-theme .proc-test-input { color: #1a1a2e; }
+html.light-theme .proc-test-result { background: #fff; color: #1a1a2e; border-color: #d0d7e0; }
+html.light-theme .proc-plsql-block { background: #fafbfc; color: #1a1a2e; }
+html.light-theme .proc-test-type { color: #333; }
+html.light-theme .proc-toolbar-label { color: #555; background: #f0f2f5; }
+/* ★ 条件筛选漏斗徽标 */
+.where-funnel { position: relative; opacity: 0.85; }
+.where-funnel:hover { opacity: 1; }
+.funnel-badge { font-weight: bold; }
+html.light-theme .where-funnel { background: #ecf0f1 !important; color: #333; border: 1px solid #d0d7e0; }
+html.light-theme .where-funnel:hover { background: #d6dbdf !important; }
+/* ★ 条件筛选下拉面板（从 funnel 按钮下方弹出） */
+.filter-popover {
+    position: absolute;
+    background: #fff;
+    border: 1px solid #d0d7e0;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+    padding: 8px 6px;
+    z-index: 99999;
+    color: #1a1a2e;
+    min-width: 520px;
+    max-width: 90vw;
+}
+.filter-popover select, .filter-popover input {
+    background: #fff !important;
+    color: #1a1a2e;
+    border-color: #ccc;
+}
 /* 查询结果顶部操作栏（保存/取消/删除/导出/提示） */
 .qr-action-bar { background: #111; border-bottom: 1px solid #333; }
 .qr-action-bar .qr-tip { color: #666; }

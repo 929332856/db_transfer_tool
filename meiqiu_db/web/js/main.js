@@ -1007,6 +1007,8 @@ function _onConnResult(myToken, myCid, statusEl, data, res) {
     if (myCid !== $('sq_conn_sel').value) return;
     if (res && res.ok) {
         _sqConnected = true;
+        // ★ 连接的瞬间初始化 session id（记录最近 SQL 用）
+        if (!_dashSessionId) _dashSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
         statusEl.style.color = '#2ecc71';
         statusEl.textContent = '✅ ' + res.msg;
         $('sq_conn_status').textContent = '✅ 已连接 (' + _sqConnName + ')';
@@ -1893,48 +1895,163 @@ function dashShowTopCmds() {
             '<option value="DELETE">DELETE</option><option value="SELECT">SELECT</option></select>' +
         '<label style="font-size:11px;margin:0 8px 0 16px;">时间范围:</label>' +
         '<select id="dash_cmd_minutes" class="dash-cmd-sel" onchange="dashLoadTopCmds()">' +
-            '<option value="1">最近 1 分钟</option><option value="5">最近 5 分钟</option>' +
-            '<option value="10">最近 10 分钟</option><option value="30">最近 30 分钟</option></select>' +
-        '<button class="btn btn-sm" style="background:#5dade2;color:#fff;margin-left:8px;" onclick="dashLoadTopCmds()">查询</button>' +
+            '<option value="1">最近 1 分钟</option>' +
+            '<option value="5">最近 5 分钟</option>' +
+            '<option value="10">最近 10 分钟</option>' +
+            '<option value="30">最近 30 分钟</option>' +
+        '</select>' +
+        '<label style="font-size:11px;margin:0 8px 0 16px;">采样范围:</label>' +
+        '<button class="btn btn-sm" onclick="dashRefreshCmds()" style="background:#27ae60;color:#fff;margin-left:8px;" title="重新查询最新数据">🔄 刷新</button>' +
+        '<button class="btn btn-sm" onclick="dashResetBaseline()" style="background:#5dade2;color:#fff;margin-left:8px;" title="重置后，次数只统计本面板打开后的增量">重置计数基准</button>' +
         '</div>' +
         '<div id="dash_cmd_result" style="max-height:420px;overflow-y:auto;"></div>';
     showModal('🔍', '最近高频命令语句', html, '#5dade2',
         '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>');
-    dashLoadTopCmds();
+    // ★ 打开面板时立刻补一次 capture，让文件有数据
+    _dashCaptureRecentCmds([($('dash_cmd_type')||{}).value || 'DELETE']);
+    setTimeout(function(){ dashLoadTopCmds({force:true}); }, 300);
 }
-function dashLoadTopCmds() {
+
+function dashResetBaseline() {
+    // ★ 清空本地缓存 + 重置 sort 状态
+    _dashRowsCache = {};
+    // ★ 立即清空图表历史（折线），让图表从零开始
+    _dashPrev = null; _dashPrevTime = 0;
+    if (typeof _dashHistory === 'object') {
+        for (var k in _dashHistory) {
+            if (Array.isArray(_dashHistory[k])) _dashHistory[k] = [];
+        }
+    }
+    // ★ 重绘图表（清空后的状态）
+    if (typeof _drawLineChart === 'function' && document.getElementById('dash_chart_cmd')) {
+        _drawLineChart('dash_chart_cmd',
+            [_dashHistory.cmd_select, _dashHistory.cmd_insert, _dashHistory.cmd_update, _dashHistory.cmd_delete],
+            ['SELECT','INSERT','UPDATE','DELETE'],
+            ['#5dade2','#2ecc71','#f39c12','#e74c3c'], 'num');
+    }
+    if (typeof _drawLineChart === 'function' && document.getElementById('dash_chart_qps')) {
+        _drawLineChart('dash_chart_qps', [_dashHistory.qps], ['QPS'], ['#4f46e5'], 'num');
+    }
+    var host = document.getElementById('dash_cmd_result');
+    if (host) {
+        host.innerHTML = '<div id="dash_cmd_baseline_banner" style="padding:6px 12px;background:#2ecc7122;color:#27ae60;border-radius:4px;margin-bottom:6px;font-size:12px;">✅ 已重置：图形化折线已清空 + 临时文件已删除。等待下次图表刷新写入新数据。</div>';
+    }
+    // ★ 同时清空持久化临时文件
+    eel.dashboard_reset_recent_cmds(_dashSessionId)();
+    // ★ 立即重新捕获最新数据（让面板不要空白）
+    _dashCaptureRecentCmds(['DELETE', 'UPDATE', 'INSERT', 'SELECT']);
+}
+// ★ 当前打开面板的 session id（每次打开面板都生成新的，避免与历史会话的基线冲突）
+var _dashSessionId = null;
+
+// ★ 命令表格排序状态
+var _dashSortCol = null;
+var _dashSortDir = 'desc';
+
+// ★ 数据缓存：key 为 "cmdType|minutes"，value 为最近的 rows
+//    用于切换类型 / 排序时不重新查询，避免数字"变化"的错觉
+var _dashRowsCache = {};
+
+// ★ 真正的渲染表格（纯 DOM 构造，不查后端）
+function _dashRenderTable(rows, cmdType, bannerOuter) {
+    if (!bannerOuter) {
+        var existingBanner = document.getElementById('dash_cmd_baseline_banner');
+        bannerOuter = existingBanner ? existingBanner.outerHTML : '';
+    }
+    var sortedRows = rows.slice();
+    if (_dashSortCol) {
+        sortedRows.sort(function(a, b){
+            var va = parseFloat(a[_dashSortCol] || 0);
+            var vb = parseFloat(b[_dashSortCol] || 0);
+            return _dashSortDir === 'asc' ? va - vb : vb - va;
+        });
+    }
+    // 排序箭头
+    var arrows = {exec_count:'', total_s:''};
+    arrows[_dashSortCol || 'exec_count'] = _dashSortDir === 'asc' ? ' ▲' : ' ▼';
+    var html = '<table class="cmd-detail-table"><thead><tr>' +
+        '<th style="width:50%">SQL 语句</th>' +
+        '<th class="cmd-sortable" onclick="dashSortBy(\'exec_count\')" style="width:8%;cursor:pointer;user-select:none;">次数' + (arrows.exec_count || ' ▴') + '</th>' +
+        '<th class="cmd-sortable" onclick="dashSortBy(\'total_s\')" style="width:10%;cursor:pointer;user-select:none;">总耗时(s)' + (arrows.total_s || ' ▴') + '</th>' +
+        '<th style="width:10%">平均(s)</th><th style="width:11%">扫描行</th><th style="width:11%">返回行</th></tr></thead><tbody>';
+    sortedRows.forEach(function(row) {
+        var sql = String(row.sql_text || '').substring(0, 200);
+        var cls = cmdType === 'UPDATE' ? 'cmd-update' : (cmdType === 'DELETE' ? 'cmd-delete' : (cmdType === 'INSERT' ? 'cmd-insert' : 'cmd-select'));
+        html += '<tr><td class="cmd-sql ' + cls + '" title="' + escapeHtml(String(row.sql_text || '')) + '">' + escapeHtml(sql) + '</td>' +
+            '<td class="cmd-num">' + (row.exec_count || 0) + '</td>' +
+            '<td>' + (row.total_s || 0) + '</td>' +
+            '<td>' + (row.avg_s || 0) + '</td>' +
+            '<td>' + (row.rows_examined || 0) + '</td>' +
+            '<td>' + (row.rows_sent || 0) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    $('dash_cmd_result').innerHTML = bannerOuter + html;
+}
+
+function dashLoadTopCmds(opts) {
+    opts = opts || {};
+    var forceFetch = opts.force === true;
     var cmdType = ($('dash_cmd_type')||{}).value || 'UPDATE';
     var minutes = parseInt(($('dash_cmd_minutes')||{}).value || '1');
-    var data = {
-        host: _sqConnData.src_host, port: _sqConnData.src_port||3306,
-        user: _sqConnData.src_user, password: _sqConnData.src_pwd, db_type: 'mysql',
-    };
-    $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">⏳ 查询中...</div>';
-    eel.dashboard_get_top_cmds(data, cmdType, minutes, 30)(function(r) {
+    var cacheKey = cmdType + '|' + minutes;
+
+    // ★ 仅排序 / 切换类型：直接用缓存重渲染，不查后端
+    if (!forceFetch && _dashRowsCache[cacheKey] && _dashRowsCache[cacheKey].length) {
+        _dashRenderTable(_dashRowsCache[cacheKey], cmdType);
+        return;
+    }
+
+    // ★ 第一次 / 强制刷新：读临时文件（不查 DB）
+    // ★ 但客户端 sort 用的是本地缓存，所以从文件读出的数据 → 缓存 → 渲染
+    var cacheKey = cmdType + '|' + minutes;
+    if (!opts.silent) {
+        $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">⏳ 读取中...</div>';
+    }
+    eel.dashboard_read_recent_cmds(_dashSessionId, cmdType)(function(r) {
         if (!r || !r.ok) {
             $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#e74c3c;">❌ ' + escapeHtml((r&&r.msg)||'查询失败') + '</div>';
             return;
         }
+        if (r.rows && r.rows.length) {
+            _dashRowsCache[cacheKey] = r.rows.slice();
+            _dashRenderTable(r.rows, cmdType);
+        } else if (!r.captured_at) {
+            $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">尚无数据（请等待图表刷新一次）<br/><small style="color:#999;">' + escapeHtml(r.note||'') + '</small></div>';
+        } else {
+            $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">最近 ' + minutes + ' 分钟内没有该类型的 SQL<br/><small style="color:#999;">最近采集：' + escapeHtml(r.captured_at) + '</small></div>';
+        }
         if (!r.rows || r.rows.length === 0) {
-            $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">最近 ' + r.minutes + ' 分钟内没有该类型的 SQL</div>';
+            $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">最近 ' + minutes + ' 分钟内没有该类型的 SQL<br/><small style="color:#999;">最近采集：' + escapeHtml(r.captured_at||'') + '</small></div>';
             return;
         }
-        var html = '<table class="cmd-detail-table"><thead><tr>' +
-            '<th style="width:50%">SQL 语句</th><th style="width:8%">次数</th><th style="width:10%">总耗时(ms)</th>' +
-            '<th style="width:10%">平均(ms)</th><th style="width:11%">扫描行</th><th style="width:11%">返回行</th></tr></thead><tbody>';
-        r.rows.forEach(function(row) {
-            var sql = String(row.sql_text || '').substring(0, 200);
-            var cls = r.cmd_type === 'UPDATE' ? 'cmd-update' : (r.cmd_type === 'DELETE' ? 'cmd-delete' : (r.cmd_type === 'INSERT' ? 'cmd-insert' : 'cmd-select'));
-            html += '<tr><td class="cmd-sql ' + cls + '" title="' + escapeHtml(String(row.sql_text || '')) + '">' + escapeHtml(sql) + '</td>' +
-                '<td class="cmd-num">' + (row.exec_count || 0) + '</td>' +
-                '<td>' + (row.total_ms || 0) + '</td>' +
-                '<td>' + (row.avg_ms || 0) + '</td>' +
-                '<td>' + (row.rows_examined || 0) + '</td>' +
-                '<td>' + (row.rows_sent || 0) + '</td></tr>';
-        });
-        html += '</tbody></table>';
-        $('dash_cmd_result').innerHTML = html;
+        // ★ 缓存 rows by cmdType + minutes
+        _dashRowsCache[cacheKey] = r.rows.slice();
+        _dashRenderTable(r.rows, cmdType);
     });
+}
+
+// ★ 点击表头：仅在内存中重排，不查后端
+function dashSortBy(col) {
+    if (_dashSortCol === col) {
+        _dashSortDir = _dashSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        _dashSortCol = col;
+        _dashSortDir = 'desc';
+    }
+    var cmdType = ($('dash_cmd_type')||{}).value || 'UPDATE';
+    var minutes = parseInt(($('dash_cmd_minutes')||{}).value || '1');
+    var cacheKey = cmdType + '|' + minutes;
+    if (_dashRowsCache[cacheKey]) {
+        _dashRenderTable(_dashRowsCache[cacheKey], cmdType);
+    }
+}
+
+// ★ 手动刷新：清掉对应 cmdType/minutes 的缓存并重新查后端
+function dashRefreshCmds() {
+    var cmdType = ($('dash_cmd_type')||{}).value || 'UPDATE';
+    var minutes = parseInt(($('dash_cmd_minutes')||{}).value || '1');
+    delete _dashRowsCache[cmdType + '|' + minutes];
+    dashLoadTopCmds({force: true});
 }
 
 /** 手动刷新仪表盘 */
@@ -1964,6 +2081,20 @@ function dashboardRefresh() {
             _dashStatusVars = r.status_vars;
             renderDashStatus();
         }
+        // ★ 每次图表刷新，同时把 4 种 cmd_type 的最近 SQL 写到临时文件
+        _dashCaptureRecentCmds(['DELETE', 'UPDATE', 'INSERT', 'SELECT']);
+    });
+}
+
+// ★ 把当前连接 + cmd_type 发到后端捕获 → 后端查 history_long → 写文件
+//   不阻塞图表刷新（异步）
+function _dashCaptureRecentCmds(types) {
+    if (!_sqConnData) { console.log('[dash] capture skipped:_sqConnData null'); return; }
+    if (!_dashSessionId) { console.log('[dash] capture skipped:_dashSessionId null'); return; }
+    types.forEach(function(ct){
+        try {
+            eel.dashboard_capture_top_cmds(_sqConnData, _dashSessionId, ct, 1, 20)();
+        } catch(e) { console.error('[dash] capture err:', e); }
     });
 }
 
@@ -2119,23 +2250,18 @@ function _drawLineChart(canvasId, series, labels, colors, unit) {
         ctx.fillText(ago + 's', px, mt + plotH + 4);
     }
 
-    // 绘制每条曲线
-    for (var s = 0; s < series.length; s++) {
+    // ★ 先画填充区（从后往前画，后画的在上面）——防止 fill 覆盖 line
+    for (var s = series.length - 1; s >= 0; s--) {
         var data = series[s];
         if (data.length < 2) continue;
         var color = colors[s];
-        // 计算每个数据点的 x,y 坐标（避免在循环里重复算）
         var pts = [];
         for (var i = 0; i < data.length; i++) {
             var x = ml + plotW * (i / (DASH_MAX_POINTS - 1));
-            // 钳制 y 在画布范围内（避免 maxV 估算过小导致 y 越界）
             var ratio = data[i] / maxV;
-            if (ratio > 1) ratio = 1;
-            if (ratio < 0) ratio = 0;
-            var y = mt + plotH * (1 - ratio);
-            pts.push({x: x, y: y, v: data[i]});
+            if (ratio > 1) ratio = 1; if (ratio < 0) ratio = 0;
+            pts.push({x: x, y: mt + plotH * (1 - ratio), v: data[i]});
         }
-        // 填充区（仅在有非零值时填充，否则只画折线）
         var hasNonZero = false;
         for (var k = 0; k < data.length; k++) { if (data[k] > 0) { hasNonZero = true; break; } }
         if (hasNonZero) {
@@ -2144,15 +2270,27 @@ function _drawLineChart(canvasId, series, labels, colors, unit) {
             for (var i = 0; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
             ctx.lineTo(pts[pts.length - 1].x, mt + plotH);
             ctx.closePath();
-            ctx.fillStyle = color + '22';  // ~13% 透明
+            ctx.fillStyle = color + '18';  // ~10% 透明，更轻
             ctx.fill();
         }
-        // 折线
+    }
+    // ★ 再画折线（确保 line 始终在 fill 上方可见）
+    for (var s = 0; s < series.length; s++) {
+        var data = series[s];
+        if (data.length < 2) continue;
+        var color = colors[s];
+        var pts = [];
+        for (var i = 0; i < data.length; i++) {
+            var x = ml + plotW * (i / (DASH_MAX_POINTS - 1));
+            var ratio = data[i] / maxV;
+            if (ratio > 1) ratio = 1; if (ratio < 0) ratio = 0;
+            pts.push({x: x, y: mt + plotH * (1 - ratio), v: data[i]});
+        }
         ctx.beginPath();
         ctx.moveTo(pts[0].x, pts[0].y);
         for (var i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
         ctx.strokeStyle = color;
-        ctx.lineWidth = 1.6;
+        ctx.lineWidth = 1.8;
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
         ctx.stroke();

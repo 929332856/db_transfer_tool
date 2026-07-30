@@ -79,11 +79,17 @@ def start_webview(port):
         height=860,
         resizable=True,
         min_size=(900, 600),
+        background_color='#f5f6fa',  # ★ 避免加载时闪黑：设置浅色背景色
         **({'icon': icon_path} if icon_path else {}),
     )
     webview.start()
     # 窗口关闭后清理
     print("[app] 窗口已关闭，清理中...")
+    try:
+        from modules.dashboard_cmds import clean_recent_cmds_tmp
+        clean_recent_cmds_tmp()
+    except Exception:
+        pass
     os._exit(0)
 
 

@@ -63,11 +63,13 @@ ASYNC_FUNCTIONS = {
     'slow_query_get_detail', 'slow_query_get_running', 'slow_query_enable',
     'slow_query_get_databases', 'slow_query_kill_processlist',
     'dashboard_get_metrics',
+    'dashboard_capture_top_cmds',
     'replication_get_status',
-    'dashboard_get_top_cmds',
+    'dashboard_get_top_cmds', 'dashboard_reset_top_cmds_baseline',
     'get_database_info', 'get_connection_info',
     'db_explore_get_databases', 'db_explore_get_schemas',
     'db_explore_get_tables', 'db_explore_get_views', 'db_explore_get_procedures',
+    'db_explore_get_proc_source', 'db_explore_get_proc_params', 'db_explore_test_proc', 'db_explore_drop_object', 'db_explore_compile_object',
     'execute_sql_query',
 }
 
@@ -184,7 +186,10 @@ def register_routes(app):
         if callable(obj):
             exposed_funcs[name] = obj
 
-    print(f"[routes] 发现 {len(exposed_funcs)} 个函数")
+    with open('logs/routes_debug.log', 'w', encoding='utf-8') as _f:
+        _f.write(f"[routes] 发现 {len(exposed_funcs)} 个函数\n")
+        for _fn in sorted(exposed_funcs.keys()):
+            _f.write(f"  [routes]   {_fn}\n")
 
     registered = 0
     for func_name, func in exposed_funcs.items():

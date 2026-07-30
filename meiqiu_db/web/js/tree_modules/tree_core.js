@@ -61,11 +61,11 @@ var DB_ICONS = {
     'redis':      '📦'
 };
 var DB_DEFAULTS = {
-    'mysql':      {port:'3306'},
-    'ob-mysql':   {port:'2881'},
-    'oracle':     {port:'1521'},
-    'postgresql': {port:'5432'},
-    'mssql':      {port:'1433'},
+    'mysql':      {port:'3306', user:'root'},
+    'ob-mysql':   {port:'2881', user:'root'},
+    'oracle':     {port:'1521', user:'system'},
+    'postgresql': {port:'5432', user:'postgres'},
+    'mssql':      {port:'1433', user:'sa'},
     'redis':      {port:'6379'}
 };
 

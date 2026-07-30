@@ -15,7 +15,7 @@ try:
 except ImportError:
     pass
 
-def _connect_args(db_type='mysql', timeout=10):
+def _connect_args(db_type='mysql', timeout=10, read_timeout=None):
     """返回 create_engine 的 connect_args，MySQL 禁用 SSL
     注意：oracledb 不支持 connect_timeout 参数，Oracle 不使用此参数
     """
@@ -26,6 +26,8 @@ def _connect_args(db_type='mysql', timeout=10):
     if db_type in ('mysql', 'ob-mysql'):
         # mysqlclient (MySQLdb) 用 ssl=False 禁用 SSL（不是 pymysql 的 ssl_disabled）
         args["ssl"] = False
+        if read_timeout:
+            args["read_timeout"] = read_timeout
     return args
 
 # ==================== 表操作 ====================

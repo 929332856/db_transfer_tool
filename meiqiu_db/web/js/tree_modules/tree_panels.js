@@ -302,7 +302,7 @@ function catRow(cat, icon, cid, db, dbKey, pad, clickFn, ctxFn, schema) {
     if (cat === 'tables') {
         dropAttrs = ' ondragover="onDbDragOver(event,this)" ondragleave="onDbDragLeave(event,this)" ondrop="onTableFolderDrop(event,this,\''+cid+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\')"';
     }
-    return '<div class="my-conn-row tree-subcat cat-row" id="'+rowId+'" style="padding-left:'+pad+'px" onclick="'+clickFn+'('+clickArgs+');highlightCat(\''+rowId+'\')"'+ctx+dropAttrs+'>' +
+    return '<div class="my-conn-row tree-subcat cat-row" id="'+rowId+'" style="padding-left:'+pad+'px" onclick="'+clickFn+'('+clickArgs+');highlightCat(\''+rowId+'\')" ondblclick="'+expandFn+'('+expandArgs+');event.stopPropagation();"'+ctx+dropAttrs+'>' +
         '<span class="arrow" id="ar_'+rowId+'" onclick="event.stopPropagation();'+expandFn+'('+expandArgs+')">▸</span>' +
         icon+' ' + catLabel + refreshBtn +
         '</div><div class="tree-children" id="ch_'+rowId+'"'+extraAttrs+'></div>';
@@ -320,3 +320,5 @@ function highlightRow(el) {
     }
 }
 function highlightCat(rowId) { highlightRow(document.getElementById(rowId)); }
+
+

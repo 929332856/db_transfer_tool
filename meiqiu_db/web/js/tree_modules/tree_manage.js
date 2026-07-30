@@ -258,9 +258,10 @@ function selectType(el) {
     el.classList.add('selected');
     var dbType = el.getAttribute('data-val');
     document.getElementById('cf_type').value = dbType;
-    // 自动设置默认端口
+    // 自动设置默认端口和用户名
     var defs = DB_DEFAULTS[dbType] || {port:'3306'};
     document.getElementById('cf_port').value = defs.port;
+    document.getElementById('cf_user').value = defs.user || '';
     // 显示/隐藏 Oracle 连接方式选择
     var oraRow = document.getElementById('cf_ora_row');
     if (oraRow) { oraRow.style.display = (dbType === 'oracle') ? '' : 'none'; }
@@ -291,7 +292,7 @@ function showConnDialog(pid, editCid) {
     h += '<div class="form-row"><label>名称</label><input id="cf_name" value="'+escapeHtml(cd.name||'')+'"></div>';
     h += '<div class="form-row"><label>主机</label><input id="cf_host" value="'+escapeHtml(cd.host||'')+'"></div>';
     h += '<div class="form-row"><label>端口</label><input id="cf_port" value="'+escapeHtml(cd.port||defs.port)+'"></div>';
-    h += '<div class="form-row"><label>用户名</label><input id="cf_user" value="'+escapeHtml(cd.user||'')+'"></div>';
+    h += '<div class="form-row"><label>用户名</label><input id="cf_user" value="'+escapeHtml(cd.user||defs.user||'')+'"></div>';
     h += '<div class="form-row"><label>密码</label><input type="password" id="cf_pwd" value="'+escapeHtml(cd.pwd||'')+'"></div>';
     h += '<div class="form-row"><label>数据库</label><input id="cf_db" value="'+escapeHtml(cd.db||'')+'"></div>';
     // ★ 环境颜色标识（6个预设 + 无色 + 自定义吸管）
