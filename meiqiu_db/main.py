@@ -71,14 +71,36 @@ def start_webview(port):
         except Exception:
             time.sleep(0.3)
 
-    webview.create_window(
+    window = webview.create_window(
         "MQDB",
         url,
         width=1280,
         height=860,
         resizable=True,
         min_size=(900, 600),
+        hidden=True,  # ★ 先隐藏，等页面渲染完成再显示，避免闪黑
     )
+
+    # ★ 暴露给前端 JS 调用：页面就绪后显示窗口
+    def show_window():
+        window.show()
+
+    try:
+        window.expose(show_window)
+    except Exception:
+        pass
+
+    # ★ 安全兆底：如果 JS 没有触发，3秒后强制显示
+    def _fallback_show():
+        time.sleep(3)
+        try:
+            window.show()
+        except Exception:
+            pass
+
+    import threading
+    threading.Thread(target=_fallback_show, daemon=True).start()
+
     webview.start()
     print("[main] 窗口已关闭，退出")
     os._exit(0)

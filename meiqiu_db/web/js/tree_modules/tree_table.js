@@ -260,7 +260,9 @@ function openFilterModal(tid) {
         var topPx = r.bottom + window.scrollY + 4;
         panel.style.left = leftPx + 'px';
         panel.style.top = topPx + 'px';
-        panel.style.minWidth = Math.max(520, r.width - 60) + 'px';
+        // ★ 紧凑尺寸：默认 360px，刚好放下 字段/操作符/值 三个控件，不再撑满整行
+        panel.style.minWidth = '360px';
+        panel.style.maxWidth = '560px';
     }
     // ★ 点击外部关闭
     setTimeout(function() {

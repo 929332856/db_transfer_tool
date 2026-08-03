@@ -38,15 +38,17 @@ html, body { height: 100%; font-family: "Microsoft YaHei", "Segoe UI", sans-seri
     padding: 4px 12px; font-size: 12px;
     font-family: "Microsoft YaHei", sans-serif;
     cursor: pointer; transition: color .2s;
+    outline: none;
 }
-.top-import-btn:hover { color: #ddd; }
+.top-import-btn:hover, .top-import-btn:focus { color: #ddd; outline: none; }
 .top-toolbar-btn {
     background: transparent; color: #888; border: none;
     padding: 4px 12px; font-size: 12px;
     font-family: "Microsoft YaHei", sans-serif;
     cursor: pointer; transition: color .2s;
+    outline: none;
 }
-.top-toolbar-btn:hover { color: #ddd; }
+.top-toolbar-btn:hover, .top-toolbar-btn:focus { color: #ddd; outline: none; }
 
 .top-import-dropdown {
     display: none; position: absolute; top: 100%; left: 0;
@@ -531,7 +533,8 @@ textarea { resize: vertical; min-height: 80px; font-size: 12px; line-height: 1.5
 .data-pager button:disabled { opacity: 0.4; cursor: not-allowed; }
 .data-pager select { background: #333; color: #ccc; border: 1px solid #555; border-radius: 3px; padding: 2px 6px; font-size: 10px; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-table { border-collapse: collapse; font-size: 11px; font-family: Consolas, monospace; width: max-content; min-width: 100%; }
+/* ★ 表格字体：使用现代等宽字体（Mac/Win 都有好的本地字体） */
+table { border-collapse: collapse; font-size: 12px; font-family: "JetBrains Mono", "Cascadia Code", "Fira Code", "SF Mono", "Consolas", "Menlo", monospace; width: max-content; min-width: 100%; font-feature-settings: "calt" 0; }
 thead th { background: #222; color: var(--text-primary); padding: 5px 8px; text-align: left; font-weight: bold; position: sticky; top: 0; z-index: 1; white-space: nowrap; border-bottom: 1px solid #484848; }
 tbody td { padding: 3px 8px; white-space: nowrap; max-width: 400px; overflow: hidden; text-overflow: ellipsis; }
 tbody tr:nth-child(even) { background: #1a1a1a; }
@@ -959,13 +962,27 @@ html.light-theme .conn-color-dot { box-shadow: 0 0 0 1px rgba(0,0,0,0.15); }
 /* 可编辑单元格 */
 .editable-cell {
     width: 100%; min-width: 80px; border: none; background: transparent;
-    color: inherit; font-size: inherit; font-family: inherit; padding: 2px 4px;
-    outline: 1px solid transparent; border-radius: 2px;
+    color: inherit; font-size: inherit; font-family: inherit; padding: 0 2px;
+    outline: 1px solid transparent; border-radius: 0;
+    height: auto; line-height: 1.4;
+    -webkit-appearance: none; appearance: none;
+    box-shadow: none; margin: 0;
+    display: block;
 }
 .editable-cell:focus {
-    outline: 1.5px solid #f39c12; background: rgba(243,156,18,0.08);
+    outline: 1.5px solid #f39c12; background: rgba(243,156,18,0.12);
 }
 .editable-cell:hover { background: rgba(255,255,255,0.03); }
+/* ★ 紧凑数据表格：去掉行间灰色块和 input 视觉噪音 */
+.data-table-scroll tbody td,
+.query-results-wrap tbody td,
+.exp-table-container tbody td { padding: 1px 4px; }
+.data-table-scroll tbody td.row-sel-grip,
+.query-results-wrap tbody td.row-sel-grip,
+.exp-table-container tbody td.row-sel-grip { padding: 3px 2px; }
+.data-table-scroll .editable-cell,
+.query-results-wrap .editable-cell,
+.exp-table-container .editable-cell { padding: 0 2px; margin: 0; box-shadow: none; background: transparent; }
 
 /* 列筛选 */
 .col-filter-icon { display: inline-block; vertical-align: middle; transition: opacity 0.2s; }
@@ -1097,23 +1114,16 @@ html.light-theme .conn-color-dot { box-shadow: 0 0 0 1px rgba(0,0,0,0.15); }
     font-size: 12px; font-weight: bold; white-space: nowrap;
 }
 
-/* ========== 滚动条 ========== */
-::-webkit-scrollbar { width: 5px; height: 5px; }
+/* ========== 滚动条（统一 12px 风格，track 透明，浅色主题用浅灰 thumb） ========== */
+::-webkit-scrollbar { width: 12px; height: 12px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #888; border-radius: 6px; }
 ::-webkit-scrollbar-thumb:hover { background: #555; }
+::-webkit-scrollbar-corner { background: transparent; }
 
-/* SQL 编辑器 / 结果区加大滚动条，避免误触 */
-.query-editor::-webkit-scrollbar { width: 8px; height: 10px; }
-.query-editor::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
-.query-editor::-webkit-scrollbar-thumb:hover { background: #777; }
-.query-editor::-webkit-scrollbar-corner { background: transparent; }
-
-.query-results-wrap::-webkit-scrollbar { width: 8px; height: 8px; }
-.query-results-wrap::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
-.query-results-wrap::-webkit-scrollbar-thumb:hover { background: #777; }
-.query-results-wrap .exp-table-container::-webkit-scrollbar { width: 8px; height: 8px; }
-.query-results-wrap .exp-table-container::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+/* 浅色主题：滚动条 thumb 用更浅的灰色 */
+html.light-theme ::-webkit-scrollbar-thumb { background: #c4c4c4; }
+html.light-theme ::-webkit-scrollbar-thumb:hover { background: #999; }
 
 /* ========== Redis 键列表表格 ========== */
 .redis-key-list-table tbody td { cursor: default !important; max-width: 200px; }

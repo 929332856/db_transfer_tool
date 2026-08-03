@@ -1025,8 +1025,16 @@ function _onConnResult(myToken, myCid, statusEl, data, res) {
         if (typeof _dashSubtab !== 'undefined' && _dashSubtab === 'dash') {
             _dashPrev = null; _dashPrevTime = 0;
             for (var k in _dashHistory) _dashHistory[k] = [];
-            dashboardRefresh();
-            changeDashInterval();
+            // ★ 连接仪表盘时先记录基线（回调确保基线设好后再刷新）
+            if (_sqConnData && _dashSessionId) {
+                eel.dashboard_capture_baseline(_dashSessionId, _sqConnData)(function() {
+                    dashboardRefresh();
+                    changeDashInterval();
+                });
+            } else {
+                dashboardRefresh();
+                changeDashInterval();
+            }
         }
     } else {
         _sqConnected = false;
@@ -1620,7 +1628,16 @@ function switchSqSubtab(name) {
         $('dash_view').style.display = '';
         $('repl_view').style.display = 'none';
         requestAnimationFrame(function() { _redrawDashCharts(); });
-        if (_sqConnected) { dashboardRefresh(); changeDashInterval(); }
+        if (_sqConnected) {
+            // ★ 切换到仪表盘 tab 时先捕获基线，回调确保基线设好后再刷新
+            if (_sqConnData && _dashSessionId) {
+                eel.dashboard_capture_baseline(_dashSessionId, _sqConnData)(function() {
+                    dashboardRefresh(); changeDashInterval();
+                });
+            } else {
+                dashboardRefresh(); changeDashInterval();
+            }
+        }
         else { $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5">请先在上方选择并连接数据库</div>'; }
     } else if (name === 'repl') {
         sqBody.style.display = 'none';
@@ -1907,9 +1924,14 @@ function dashShowTopCmds() {
         '<div id="dash_cmd_result" style="max-height:420px;overflow-y:auto;"></div>';
     showModal('🔍', '最近高频命令语句', html, '#5dade2',
         '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>');
-    // ★ 打开面板时立刻补一次 capture，让文件有数据
-    _dashCaptureRecentCmds([($('dash_cmd_type')||{}).value || 'DELETE']);
-    setTimeout(function(){ dashLoadTopCmds({force:true}); }, 300);
+    // ★ 打开面板：确保初始快照存在（已有则后端自动跳过），然后实时查询
+    if (_sqConnData && _dashSessionId) {
+        eel.dashboard_capture_baseline(_dashSessionId, _sqConnData)(function() {
+            dashLoadTopCmds({force:true});
+        });
+    } else {
+        dashLoadTopCmds({force:true});
+    }
 }
 
 function dashResetBaseline() {
@@ -1934,12 +1956,13 @@ function dashResetBaseline() {
     }
     var host = document.getElementById('dash_cmd_result');
     if (host) {
-        host.innerHTML = '<div id="dash_cmd_baseline_banner" style="padding:6px 12px;background:#2ecc7122;color:#27ae60;border-radius:4px;margin-bottom:6px;font-size:12px;">✅ 已重置：图形化折线已清空 + 临时文件已删除。等待下次图表刷新写入新数据。</div>';
+        host.innerHTML = '<div id="dash_cmd_baseline_banner" style="padding:6px 12px;background:#2ecc7122;color:#27ae60;border-radius:4px;margin-bottom:6px;font-size:12px;">✅ 已重置：计数从当前时刻重新开始累计。</div>';
     }
-    // ★ 同时清空持久化临时文件
-    eel.dashboard_reset_recent_cmds(_dashSessionId)();
-    // ★ 立即重新捕获最新数据（让面板不要空白）
-    _dashCaptureRecentCmds(['DELETE', 'UPDATE', 'INSERT', 'SELECT']);
+    // ★ 重置快照历史 + 重建初始快照（从当前时刻重新开始累计）
+    eel.dashboard_reset_recent_cmds(_dashSessionId, _sqConnData)(function() {
+        // ★ 后端已完成重置，重新查询当前面板（此时增量为 0，属正常）
+        dashLoadTopCmds({force:true, silent:true});
+    });
 }
 // ★ 当前打开面板的 session id（每次打开面板都生成新的，避免与历史会话的基线冲突）
 var _dashSessionId = null;
@@ -2001,30 +2024,37 @@ function dashLoadTopCmds(opts) {
         return;
     }
 
-    // ★ 第一次 / 强制刷新：读临时文件（不查 DB）
-    // ★ 但客户端 sort 用的是本地缓存，所以从文件读出的数据 → 缓存 → 渲染
-    var cacheKey = cmdType + '|' + minutes;
     if (!opts.silent) {
-        $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">⏳ 读取中...</div>';
+        $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">⏳ 查询中...</div>';
     }
+
+    // ★ 实时采集：按选中的时间范围计算窗口增量，capture 接口直接返回 rows
+    if (_sqConnData && _dashSessionId) {
+        eel.dashboard_capture_top_cmds(_sqConnData, _dashSessionId, cmdType, minutes, 20)(function(r) {
+            if (!r || !r.ok) {
+                $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#e74c3c;">❌ ' + escapeHtml((r&&r.msg)||'查询失败') + '</div>';
+                return;
+            }
+            if (!r.rows || r.rows.length === 0) {
+                $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">最近 ' + minutes + ' 分钟内没有该类型的 SQL（从连接/重置时刻起统计）</div>';
+                return;
+            }
+            _dashRowsCache[cacheKey] = r.rows.slice();
+            _dashRenderTable(r.rows, cmdType);
+        });
+        return;
+    }
+
+    // ★ 兜底：无连接信息时读临时文件
     eel.dashboard_read_recent_cmds(_dashSessionId, cmdType)(function(r) {
         if (!r || !r.ok) {
             $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#e74c3c;">❌ ' + escapeHtml((r&&r.msg)||'查询失败') + '</div>';
             return;
         }
-        if (r.rows && r.rows.length) {
-            _dashRowsCache[cacheKey] = r.rows.slice();
-            _dashRenderTable(r.rows, cmdType);
-        } else if (!r.captured_at) {
-            $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">尚无数据（请等待图表刷新一次）<br/><small style="color:#999;">' + escapeHtml(r.note||'') + '</small></div>';
-        } else {
-            $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">最近 ' + minutes + ' 分钟内没有该类型的 SQL<br/><small style="color:#999;">最近采集：' + escapeHtml(r.captured_at) + '</small></div>';
-        }
         if (!r.rows || r.rows.length === 0) {
             $('dash_cmd_result').innerHTML = '<div style="text-align:center;padding:20px;color:#888;">最近 ' + minutes + ' 分钟内没有该类型的 SQL<br/><small style="color:#999;">最近采集：' + escapeHtml(r.captured_at||'') + '</small></div>';
             return;
         }
-        // ★ 缓存 rows by cmdType + minutes
         _dashRowsCache[cacheKey] = r.rows.slice();
         _dashRenderTable(r.rows, cmdType);
     });
@@ -2673,6 +2703,19 @@ function onDgLocalFileSelected(e) {
 // ========== 选项 / 设置弹窗 ==========
 var _settingsData = { theme: 'dark' };
 
+// ★ 启动时同步 localStorage 主题到 settings.json（确保下次启动背景色正确）
+(function() {
+    var lsTheme = localStorage.getItem('mqdb_theme');
+    if (lsTheme) {
+        _settingsData.theme = lsTheme;
+        setTimeout(function() {
+            if (typeof eel !== 'undefined' && eel.settings_save) {
+                eel.settings_save(_settingsData)(function(){});
+            }
+        }, 1000);
+    }
+})();
+
 /** 打开设置弹窗 */
 function openSettings() {
     // 先从后端获取当前设置
@@ -2861,7 +2904,7 @@ function _saveSettings() {
     }
 }
 
-/** 应用当前主题（即时切换 + 同步 localStorage 防闪烁） */
+/** 应用当前主题（即时切换 + 同步 localStorage 防闪烁 + 同步 settings.json 供启动读取） */
 function _applyTheme() {
     var htmlEl = document.documentElement;
     if (_settingsData.theme === 'light') {
@@ -2870,6 +2913,10 @@ function _applyTheme() {
     } else {
         htmlEl.classList.remove('light-theme');
         localStorage.setItem('mqdb_theme', 'dark');
+    }
+    // ★ 同步到 settings.json，供 PyWebView 启动时读取背景色
+    if (typeof eel !== 'undefined' && eel.settings_save) {
+        eel.settings_save(_settingsData)(function(){});
     }
 }
 

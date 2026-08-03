@@ -15,7 +15,14 @@
     <link rel="stylesheet" href="css/style.css">
     <!-- ★ Flask 适配层：替代 Eel，eel.xxx()(callback) → fetch() -->
     <script src="js/eel_adapter.js"></script>
-    <script></script>
+    <script>
+        // ★ 页面渲染完成后通知 PyWebView 显示窗口（消除启动闪黑）
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.pywebview && window.pywebview.api && window.pywebview.api.show_window) {
+                window.pywebview.api.show_window();
+            }
+        });
+    </script>
 </head>
 <body>
 

@@ -708,6 +708,30 @@ function _afterContentUpdate(targetTab, contentDiv) {
             var bindSortFn = window['_bindSort_'+tid2];
             if (bindSortFn) setTimeout(function(){ bindSortFn(); }, 50);
             // ★ 分页按钮使用内联 onclick，无需重新绑定
+            // ★ 重新初始化列宽拖拽（切 tab 后 innerHTML 重建，拖拽手柄丢失）
+            setTimeout(function(){
+                var wrap2 = document.getElementById(tid2);
+                if (wrap2 && typeof _initResultColResize === 'function') {
+                    // ★ 重置 thead 上的标记，允许重新初始化
+                    var th2 = wrap2.querySelector('table.exp-table thead');
+                    if (th2) th2.removeAttribute('data-colresize');
+                    _initResultColResize(wrap2, null);
+                }
+                // ★ 同步漏斗徽标（DOM 重建后徽标元素回到 display:none，根据 filterList 恢复）
+                var st2 = _whereStates[tid2];
+                if (st2 && typeof _updateFunnelBadge === 'function') {
+                    var fl = st2.filterList || [];
+                    var valid = 0;
+                    for (var fi = 0; fi < fl.length; fi++) {
+                        if (fl[fi] && fl[fi].field && fl[fi].op) valid++;
+                    }
+                    _updateFunnelBadge(tid2, valid);
+                }
+                // ★ 回填 WHERE 输入框内容（切 tab 后 innerHTML 重建，input value 丢失）
+                var whereInp = document.getElementById(tid2 + '_where');
+                var savedWhere = (st2 && st2.whereExpr) ? st2.whereExpr : (window['_activeWhereSql_' + tid2] || '');
+                if (whereInp && savedWhere) whereInp.value = savedWhere;
+            }, 60);
         }
     }
     if (targetTab.type === 'query') {
