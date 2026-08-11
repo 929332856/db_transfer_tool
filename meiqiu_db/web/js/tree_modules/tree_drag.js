@@ -1,5 +1,5 @@
 // ==================== 拖拽复制表 ====================
-var _dragInfo = null; // {table_name, src_db, schema, src_cid}
+var _dragInfo = null; // {table_name, table_names, src_db, schema, src_cid}
 // ==================== 拖拽移动连接 ====================
 var _connDragInfo = null; // {cid, fromParent} — 当前正在拖拽的连接
 // ★ Ctrl+C/V 复制表（与拖拽逻辑一致：同库直接备份，跨库弹选择框）
@@ -18,9 +18,25 @@ document.addEventListener('dragend', function(e) {
 });
 
 function onTableDragStart(e, tn, db, schema, cid) {
-    _dragInfo = { table_name: tn, src_db: db, schema: schema || '', src_cid: cid };
+    var selected = [];
+    // 只收集与当前拖拽表来自同一连接/数据库/schema 的选中项，避免把其他列表的选择一起带走。
+    document.querySelectorAll('.tree-table-item.tree-table-selected, #obj_content .drag-table-item.table-row-selected').forEach(function(el) {
+        if (el.getAttribute('data-cid') !== String(cid || '') ||
+            el.getAttribute('data-db') !== String(db || '') ||
+            (el.getAttribute('data-sch') || '') !== (schema || '')) return;
+        var name = el.getAttribute('data-tname');
+        if (name && selected.indexOf(name) < 0) selected.push(name);
+    });
+    if (selected.indexOf(tn) < 0) selected.unshift(tn);
+    _dragInfo = {
+        table_name: tn,
+        table_names: selected,
+        src_db: db,
+        schema: schema || '',
+        src_cid: cid
+    };
     e.dataTransfer.effectAllowed = 'copy';
-    e.dataTransfer.setData('text/plain', tn);
+    e.dataTransfer.setData('text/plain', selected.join('\n'));
 }
 
 function onTableDragEnd(e) {
@@ -90,7 +106,7 @@ function _pasteTableShortcut(e) {
         var newTn = src.table_name + '_' + stamp;
         showConfirmDialog('备份表', '将创建备份表 <b>[' + newTn + ']</b>？',
             function(){
-                showModal('💾','正在备份表 <b>'+escapeHtml(src.table_name)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在创建备份 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">'+escapeHtml(newTn)+'</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');
+                showModal('💾','正在备份表 <b>'+escapeHtml(src.table_name)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在创建备份 <code class="code-inline">'+escapeHtml(newTn)+'</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');
                 eel.drag_copy_table(srcConn, src.src_db, src.table_name, dstConn, targetDb, true, newTn)(function(r) {
                     if (r && r.ok) {
                         document.getElementById('modal_title').innerHTML = '✅ 备份完成';
@@ -99,6 +115,8 @@ function _pasteTableShortcut(e) {
                         document.getElementById('modal_btns').innerHTML = '<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';
                         // ★ 无感刷新：表文件夹 + 对象窗口
                         refreshTableFolder(targetCid, targetDb, '');
+                        // 备份表创建完成后，刷新当前对象窗口中的表列表，避免新表不显示。
+                        setTimeout(function(){ refreshObjPanel(); }, 500);
                         if (activeCatId === 'cat_tables_' + safeBtoa(targetDb)) {
                             loadCategoryItems(srcConn, targetDb, 'tables', function(items) {
                                 renderCategoryItems('cat_tables_' + safeBtoa(targetDb), items, 'tables');
@@ -150,9 +168,14 @@ function onDbDrop(e, el, targetCid, targetDb) {
     var dstConn = treeData && treeData.connections ? treeData.connections[targetCid] : null;
 
     if (!srcConn || !dstConn) { showWarnDialog('提示', '无法获取连接信息'); _dragInfo = null; return; }
+    if (srcCid === targetCid && src.src_db === targetDb) {
+        showWarnDialog('提示', '不能将表导入到自身所在的目标库');
+        _dragInfo = null;
+        return;
+    }
 
-    // 弹出选择框：仅结构 或 结构+数据
-    showDragCopyDialog(src.table_name, src.src_db, src.schema, srcConn, targetCid, targetDb, dstConn);
+    // 弹出选择框：仅结构 或 结构+数据；支持 Ctrl 多选的表批量导入
+    showDragCopyDialog(src.table_names || [src.table_name], src.src_db, src.schema, srcConn, targetCid, targetDb, dstConn);
     _dragInfo = null;
 }
 
@@ -174,21 +197,32 @@ function onTableFolderDrop(e, el, targetCid, targetDb, targetSchema) {
 
     if (!srcConn || !dstConn) { showWarnDialog('提示', '无法获取连接信息'); _dragInfo = null; return; }
 
-    showDragCopyDialog(src.table_name, src.src_db, src.schema, srcConn, targetCid, targetDb, dstConn);
+    showDragCopyDialog(src.table_names || [src.table_name], src.src_db, src.schema, srcConn, targetCid, targetDb, dstConn);
     _dragInfo = null;
 }
 
-function showDragCopyDialog(tn, srcDb, schema, srcConn, targetCid, targetDb, dstConn) {
+function showDragCopyDialog(tableNames, srcDb, schema, srcConn, targetCid, targetDb, dstConn) {
+    var names = Array.isArray(tableNames) ? tableNames.filter(function(n){ return !!n; }) : [tableNames];
+    if (!names.length) return;
+    var titleName = names.length === 1 ? names[0] : (names.length + ' 张表');
     document.getElementById('modal_icon').innerHTML = '📋';
-    document.getElementById('modal_title').textContent = '复制表：' + tn;
-    document.getElementById('modal_msg').innerHTML = '<div>从：<b>' + escapeHtml(srcConn.name||srcConn.host) + '</b> / ' + escapeHtml(srcDb) + '</div><div style="margin-top:4px;">到：<b>' + escapeHtml(dstConn.name||dstConn.host) + '</b> / ' + escapeHtml(targetDb) + '</div>';
+    document.getElementById('modal_title').textContent = '导入表：' + titleName;
+    var listHtml = names.length > 1
+        ? '<div style="margin-top:8px;max-height:90px;overflow:auto;color:#aaa;font-size:11px;">' + names.map(function(n){ return '• ' + escapeHtml(n); }).join('<br>') + '</div>'
+        : '';
+    document.getElementById('modal_msg').innerHTML = '<div>源库：<b>' + escapeHtml(srcConn.name||srcConn.host) + '</b> / ' + escapeHtml(srcDb) + '</div><div style="margin-top:4px;">目标库：<b>' + escapeHtml(dstConn.name||dstConn.host) + '</b> / ' + escapeHtml(targetDb) + '</div>' + listHtml +
+        '<label style="display:flex;align-items:center;gap:7px;margin-top:12px;font-size:12px;cursor:pointer;">' +
+        '<input type="checkbox" id="drag_drop_existing" style="width:15px;height:15px;">' +
+        '<span>导入前删除目标库中同名表（只删除目标库，不会删除源库）</span></label>';
     document.getElementById('modal_btns').innerHTML = '<button class="btn btn-blue" style="font-size:12px;" onclick="startDragCopy2(false)">📐 仅表结构</button><button class="btn btn-green" style="font-size:12px;" onclick="startDragCopy2(true)">📊 结构 + 数据</button>';
     document.getElementById('modal_overlay').classList.add('show');
 
     window.startDragCopy2 = function(copyData) {
+        var dropExistingEl = document.getElementById('drag_drop_existing');
+        var dropExisting = !!(dropExistingEl && dropExistingEl.checked);
         document.getElementById('modal_icon').innerHTML = '⏳';
-        document.getElementById('modal_title').textContent = '复制中...';
-        document.getElementById('modal_msg').innerHTML = '<div class="progress-bar" style="margin:8px 0;height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;"><div id="drag_copy_bar" class="progress-fill" style="width:0%;height:100%;background:#4CAF50;border-radius:4px;transition:width 0.3s;"></div></div><div id="drag_copy_status" style="font-size:11px;color:#888;">正在连接...</div><button class="btn btn-sm" style="margin-top:8px;background:#e74c3c;color:#fff;font-size:10px;" onclick="cancelDragCopy()">⏹ 取消</button>';
+        document.getElementById('modal_title').textContent = '导入中...';
+        document.getElementById('modal_msg').innerHTML = '<div class="progress-bar" style="margin:8px 0;height:8px;background:#e0e0e0;border-radius:4px;overflow:hidden;"><div id="drag_copy_bar" class="progress-fill" style="width:0%;height:100%;background:#4CAF50;border-radius:4px;transition:width 0.3s;"></div></div><div id="drag_copy_table_status" style="margin-top:10px;font-size:13px;font-weight:600;color:#4CAF50;">准备导入...</div><div id="drag_copy_status" style="margin-top:5px;font-size:11px;color:#888;">正在连接...</div><button class="btn btn-sm" style="margin-top:8px;background:#e74c3c;color:#fff;font-size:10px;" onclick="cancelDragCopy()">⏹ 取消</button>';
         document.getElementById('modal_btns').innerHTML = '';
 
         var done = false;
@@ -219,6 +253,16 @@ function showDragCopyDialog(tn, srcDb, schema, srcConn, targetCid, targetDb, dst
                                 lastProgress = d.percent;
                             }
                         }
+                        var tableSt = document.getElementById('drag_copy_table_status');
+                        if (d.table_index && d.table_total && d.table_name) {
+                            if (tableSt) {
+                                tableSt.textContent = d.committed
+                                    ? '第 ' + d.table_index + '/' + d.table_total + ' 张表已导入并提交：' + d.table_name
+                                    : ((d.status && d.status.indexOf('结构已提交') >= 0)
+                                        ? '第 ' + d.table_index + '/' + d.table_total + ' 张表处理完成：' + d.table_name
+                                        : '正在导入第 ' + d.table_index + '/' + d.table_total + ' 张表：' + d.table_name);
+                            }
+                        }
                         if (st && d.status) st.textContent = d.status;
                         // ★ 只要收到任意消息就刷新心跳时间（不管 percent 是否变化）
                         lastProgressTime = Date.now();
@@ -234,7 +278,7 @@ function showDragCopyDialog(tn, srcDb, schema, srcConn, targetCid, targetDb, dst
             }
         }, 200);
 
-        eel.drag_copy_table(srcConn, srcDb, tn, dstConn, targetDb, copyData)(function(r) {
+        eel.drag_copy_tables(srcConn, srcDb, names, dstConn, targetDb, copyData, dropExisting)(function(r) {
             if (done) return;
             done = true;
             clearInterval(pollTimer);
@@ -246,10 +290,10 @@ function showDragCopyDialog(tn, srcDb, schema, srcConn, targetCid, targetDb, dst
             setTimeout(function() {
                 document.getElementById('modal_overlay').classList.remove('show');
                 if (r && r.ok) {
-                    showOkDialog('复制成功', r.msg);
+                    showOkDialog('导入成功', r.msg);
                     setTimeout(function(){ refreshTableFolder(targetCid, targetDb, ''); }, 500);
                 } else {
-                    showErrorDialog('复制失败', r ? r.msg : '无响应');
+                    showErrorDialog(r && r.precheck ? '导入前检查' : '导入失败', r ? r.msg : '无响应');
                 }
             }, 400);
         });

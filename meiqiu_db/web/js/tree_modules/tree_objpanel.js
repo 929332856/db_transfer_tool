@@ -135,7 +135,12 @@ function setupObjectPanelDrop() {
         var srcConn = treeData && treeData.connections ? treeData.connections[src.src_cid] : null;
         var dstConn = treeData && treeData.connections ? treeData.connections[activeConnId] : null;
         if (!srcConn || !dstConn) return;
-        showDragCopyDialog(src.table_name, src.src_db, src.schema, srcConn, activeConnId, activeDatabase, dstConn);
+        if (src.src_cid === activeConnId && src.src_db === activeDatabase) {
+            showWarnDialog('提示', '不能将表导入到自身所在的目标库');
+            _dragInfo = null;
+            return;
+        }
+        showDragCopyDialog(src.table_names || [src.table_name], src.src_db, src.schema, srcConn, activeConnId, activeDatabase, dstConn);
         _dragInfo = null;
     });
 }
@@ -147,7 +152,8 @@ function _updateTabBar() {
     var h = '';
     objectTabs.forEach(function(t){
         var cls = t.id===activeObjTab?'obj-tab active':'obj-tab';
-        var icon = t.type==='ddl'?'🔧 ':t.type==='data'?'📊 ':t.type==='query'?'📝 ':'📋 ';
+        var icon = t.type==='ddl'?'🔧 ':t.type==='data'?((window.MQ_ICON&&window.MQ_ICON.table)||'📊')+' ':t.type==='query'?'📝 ':'📋 ';
+        var ctxAttr = t.id === 'obj_home' ? ' oncontextmenu="event.preventDefault();event.stopPropagation()"' : ' oncontextmenu="objTabContextMenu(event,\''+escapeAttr(t.id)+'\')"';
         var tipAttr = '';
         if (t.type === 'data' || t.type === 'ddl' || t.type === 'query') {
             var info = _buildTabTipInfo(t);
@@ -155,7 +161,7 @@ function _updateTabBar() {
                 tipAttr = ' data-tip-conn="'+escapeAttr(info.conn)+'" data-tip-folder="'+escapeAttr(info.folder)+'" data-tip-db="'+escapeAttr(info.db)+'" data-tip-name="'+escapeAttr(info.name)+'"';
             }
         }
-        h += '<span class="'+cls+'" data-tabid="'+t.id+'"'+tipAttr+' onclick="switchObjTab(\''+t.id+'\')" onmouseenter="_showTabTip(event,this)" onmouseleave="_hideTabTip()">'+icon+escapeHtml(t.label);
+        h += '<span class="'+cls+'" data-tabid="'+t.id+'"'+tipAttr+ctxAttr+' onclick="switchObjTab(\''+t.id+'\')" onmouseenter="_showTabTip(event,this)" onmouseleave="_hideTabTip()">'+icon+escapeHtml(t.label);
         if(t.id!=='obj_home') h += '<span class="tab-close" onclick="event.stopPropagation();closeTab(\''+t.id+'\')">✕</span>';
         h += '</span>';
     });
@@ -177,7 +183,8 @@ function renderObjectPanel() {
     var h = '';
     objectTabs.forEach(function(t){
         var cls = t.id===activeObjTab?'obj-tab active':'obj-tab';
-        var icon = t.type==='ddl'?'🔧 ':t.type==='data'?'📊 ':t.type==='query'?'📝 ':'📋 ';
+        var icon = t.type==='ddl'?'🔧 ':t.type==='data'?((window.MQ_ICON&&window.MQ_ICON.table)||'📊')+' ':t.type==='query'?'📝 ':'📋 ';
+        var ctxAttr = t.id === 'obj_home' ? ' oncontextmenu="event.preventDefault();event.stopPropagation()"' : ' oncontextmenu="objTabContextMenu(event,\''+escapeAttr(t.id)+'\')"';
         var tipAttr = '';
         // ★ data/ddl/query 类型的 tab 添加悬停提示（连接/分组/数据库/表）
         if (t.type === 'data' || t.type === 'ddl' || t.type === 'query') {
@@ -186,7 +193,7 @@ function renderObjectPanel() {
                 tipAttr = ' data-tip-conn="'+escapeAttr(info.conn)+'" data-tip-folder="'+escapeAttr(info.folder)+'" data-tip-db="'+escapeAttr(info.db)+'" data-tip-name="'+escapeAttr(info.name)+'"';
             }
         }
-        h += '<span class="'+cls+'" data-tabid="'+t.id+'"'+tipAttr+' onclick="switchObjTab(\''+t.id+'\')" onmouseenter="_showTabTip(event,this)" onmouseleave="_hideTabTip()">'+icon+escapeHtml(t.label);
+        h += '<span class="'+cls+'" data-tabid="'+t.id+'"'+tipAttr+ctxAttr+' onclick="switchObjTab(\''+t.id+'\')" onmouseenter="_showTabTip(event,this)" onmouseleave="_hideTabTip()">'+icon+escapeHtml(t.label);
         if(t.id!=='obj_home') h += '<span class="tab-close" onclick="event.stopPropagation();closeTab(\''+t.id+'\')">✕</span>';
         h += '</span>';
     });
@@ -282,7 +289,7 @@ function renderObjectPanel() {
                         };
                         sqlTa.addEventListener('mouseup', updateBtnLabel);
                         sqlTa.addEventListener('keyup', updateBtnLabel);
-                        sqlTa.addEventListener('input', function(){ _queryTextareaChanged(qidX, sqlTa); });
+                        sqlTa.addEventListener('input', function(){ _queryTextareaChanged(qidX, sqlTa); _syncLineGutter(qidX, sqlTa); });
                         // ★ 重新绑定 Ctrl+Enter 执行和 Ctrl+S 保存
                         var curTab = objectTabs.find(function(t){ return t.id === 'query_' + qidX; });
                         var cid2 = curTab ? curTab.cid : '';
@@ -292,6 +299,11 @@ function renderObjectPanel() {
                             if(e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); _handleSaveQuery(qidX, cid2, qdb2); }
                         });
                         updateBtnLabel();
+                        // 内容从缓存 textarea 恢复后，重新生成新建的行号栏。
+                        if (typeof _syncLineGutter === 'function') {
+                            _syncLineGutter(qidX, sqlTa);
+                            requestAnimationFrame(function(){ _syncLineGutter(qidX, sqlTa); });
+                        }
                     }, 0);
                 })(qid3, wasRunningRP);
                 // ★ 恢复查询结果：优先从结构化数据重新渲染（最可靠），其次从缓存 HTML 恢复
@@ -341,6 +353,8 @@ function renderObjectPanel() {
         collapseOverflowTabs();
         highlightTableRow();
         setupObjectPanelDrop();
+        // ★ 重建后重新应用对象面板搜索（保留用户搜索状态）
+        _restoreObjSearch();
         // 为所有 query layout 重新绑定分隔线拖动
         var layouts = contentDiv ? contentDiv.querySelectorAll('.query-layout') : [];
         for (var li = 0; li < layouts.length; li++) {
@@ -402,8 +416,12 @@ function _setQueryModified(qid, modified) {
     }
 }
 
+// ★ 对象面板搜索关键词缓存（CV/刷新重建后重新应用过滤）
+var _objSearchKw = '';
+
 function filterObjectTable() {
     var kw = (document.getElementById('obj_search')||{}).value||'';
+    _objSearchKw = kw;
 
     // ★ Redis 面板：服务端搜索，遍历所有 key
     if (_redisPanelCtx && activeObjTab === 'obj_home') {
@@ -443,6 +461,23 @@ function filterObjectTable() {
     }
 }
 
+// ★ 重建对象面板后恢复搜索关键词并重新过滤（CV 表/刷新后不丢搜索状态）
+function _restoreObjSearch() {
+    if (activeObjTab !== 'obj_home') return;
+    var input = document.getElementById('obj_search');
+    if (!input) return;
+    if (!_objSearchKw) return;
+    input.value = _objSearchKw;
+    filterObjectTable();
+}
+
+// ★ 切换其他库/分类时清空对象面板搜索（避免旧关键词过滤到新库的表）
+function clearObjSearch() {
+    _objSearchKw = '';
+    var input = document.getElementById('obj_search');
+    if (input) input.value = '';
+}
+
 var _redisSearchTimer = null;
 // 服务端搜索：用 SCAN + match pattern 遍历全部 key
 function _redisDoServerSearch(cid, dbIdx, dbId, kw) {
@@ -476,7 +511,86 @@ function _redisDoServerSearch(cid, dbIdx, dbId, kw) {
     });
 }
 
+function objTabContextMenu(e, tabId) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!tabId || tabId === 'obj_home') return;
+
+    var tabIndex = objectTabs.findIndex(function(t) { return t.id === tabId; });
+    if (tabIndex < 0) return;
+
+    var closeLeft = objectTabs.slice(0, tabIndex).filter(function(t) { return t.id !== 'obj_home'; }).map(function(t) { return t.id; });
+    var closeRight = objectTabs.slice(tabIndex + 1).filter(function(t) { return t.id !== 'obj_home'; }).map(function(t) { return t.id; });
+    var closeOthers = objectTabs.filter(function(t) { return t.id !== 'obj_home' && t.id !== tabId; }).map(function(t) { return t.id; });
+    var menu = [
+        {label:'关闭当前 Tab', action:function(){_closeTabGroup([tabId]);}}
+    ];
+    if (closeLeft.length) menu.push({label:'关闭左侧 Tab', action:function(){_closeTabGroup(closeLeft);}});
+    if (closeRight.length) menu.push({label:'关闭右侧 Tab', action:function(){_closeTabGroup(closeRight);}});
+    if (closeOthers.length) menu.push({label:'关闭其他 Tab', action:function(){_closeTabGroup(closeOthers);}});
+    showCtxMenu(e.clientX, e.clientY, menu);
+}
+
+function _closeTabGroup(tabIds) {
+    var ids = (tabIds || []).filter(function(id, index, arr) {
+        return id && id !== 'obj_home' && arr.indexOf(id) === index && objectTabs.some(function(t) { return t.id === id; });
+    });
+    if (!ids.length) return;
+
+    var modified = ids.map(function(id) {
+        var m = id.match(/^query_(.+)$/);
+        if (!m || !_queryModified[m[1]]) return null;
+        var tab = objectTabs.find(function(t) { return t.id === id; });
+        return tab ? (tab._baseLabel || tab.label || id) : id;
+    }).filter(Boolean);
+
+    var doClose = function() { _closeTabGroupInternal(ids); };
+    if (modified.length) {
+        showConfirmDialog(
+            '关闭标签页',
+            '<div>以下 Tab 有未保存修改：</div><div style="margin-top:8px;color:#f39c12;">' + escapeHtml(modified.join('、')) + '</div><div style="margin-top:8px;">关闭后将丢失这些修改，是否继续？</div>',
+            doClose,
+            null,
+            '关闭',
+            '取消'
+        );
+        return;
+    }
+    doClose();
+}
+
+function _closeTabGroupInternal(tabIds) {
+    var closing = {};
+    tabIds.forEach(function(id) { closing[id] = true; });
+    var wasActive = activeObjTab;
+    var activeIndex = objectTabs.findIndex(function(t) { return t.id === wasActive; });
+    var nextActive = null;
+
+    if (closing[wasActive]) {
+        for (var i = activeIndex - 1; i >= 0; i--) {
+            if (!closing[objectTabs[i].id] && objectTabs[i].id !== 'obj_home') {
+                nextActive = objectTabs[i].id;
+                break;
+            }
+        }
+        if (!nextActive) {
+            for (var j = activeIndex + 1; j < objectTabs.length; j++) {
+                if (!closing[objectTabs[j].id]) {
+                    nextActive = objectTabs[j].id;
+                    break;
+                }
+            }
+        }
+    }
+
+    tabIds.forEach(function(id) { _closeTabInternal(id, true); });
+    if (nextActive && objectTabs.some(function(t) { return t.id === nextActive; })) activeObjTab = nextActive;
+    else if (!objectTabs.some(function(t) { return t.id === activeObjTab; })) activeObjTab = 'obj_home';
+    renderObjectPanel();
+}
+
 function closeTab(tabId) {
+    if (!tabId || tabId === 'obj_home') return;
     // ★ 关闭前检查是否有未保存的修改
     var qidMatch = tabId.match(/^query_(.+)$/);
     if (qidMatch) {
@@ -540,7 +654,7 @@ function _doSaveQueryAndClose(qid, cid, db, qname, oldTabId) {
 }
 
 // ★ 内部关闭逻辑（不检查修改）
-function _closeTabInternal(tabId) {
+function _closeTabInternal(tabId, skipRender) {
     // ★ 关闭 tab 时强制隐藏 tab 悬浮提示（避免提示卡残留）
     _hideTabTip();
     // 清理该 tab 对应的 splitter 绑定标记
@@ -576,7 +690,7 @@ function _closeTabInternal(tabId) {
     }
     objectTabs = objectTabs.filter(function(t){return t.id!==tabId;});
     activeObjTab = objectTabs.length ? objectTabs[objectTabs.length-1].id : 'obj_home';
-    renderObjectPanel();
+    if (!skipRender) renderObjectPanel();
 }
 
 function switchObjTab(tabId) {
@@ -781,7 +895,7 @@ function _afterContentUpdate(targetTab, contentDiv) {
                     };
                     sqlTa.addEventListener('mouseup', updateBtnLabel);
                     sqlTa.addEventListener('keyup', updateBtnLabel);
-                    sqlTa.addEventListener('input', function(){ _queryTextareaChanged(qidX, sqlTa); });
+                    sqlTa.addEventListener('input', function(){ _queryTextareaChanged(qidX, sqlTa); _syncLineGutter(qidX, sqlTa); });
                     var curTab = objectTabs.find(function(t){ return t.id === 'query_' + qidX; });
                     var cid2 = curTab ? curTab.cid : '';
                     var qdb2 = curTab ? curTab.db : '';
@@ -790,6 +904,11 @@ function _afterContentUpdate(targetTab, contentDiv) {
                         if(e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); _handleSaveQuery(qidX, cid2, qdb2); }
                     });
                     updateBtnLabel();
+                    // 内容从缓存 textarea 恢复后，重新生成新建的行号栏。
+                    if (typeof _syncLineGutter === 'function') {
+                        _syncLineGutter(qidX, sqlTa);
+                        requestAnimationFrame(function(){ _syncLineGutter(qidX, sqlTa); });
+                    }
                 }, 0);
             })(qid3, wasRunning);
             var es = _queryEditStates[qid3];
@@ -845,22 +964,46 @@ function _afterContentUpdate(targetTab, contentDiv) {
 // ==================== 表名内联重命名（对象面板） ====================
 var _objPanelRenameState = null; // { tr, oldName, db, schema, cid, nameCell }
 var _objPanelLastSelect = null;
+var _objPanelRangeAnchor = null;  // Shift 范围选择的起点
 
 // 对象面板表行点击：选择 / 再次点击进入重命名
 function objPanelTableClick(e, tr) {
     if (_objPanelRenameState) return; // 正在重命名中，忽略
-    // 高亮当前行
-    document.querySelectorAll('#obj_content .exp-table tbody tr').forEach(function(r) {
-        r.classList.remove('table-row-selected');
-    });
-    tr.classList.add('table-row-selected');
+    var multi = !!(e.ctrlKey || e.metaKey);
+    var range = !!e.shiftKey;
+    var tbody = tr && tr.parentElement;
+    var rows = tbody ? Array.prototype.filter.call(tbody.children, function(row) {
+        return row.classList && row.classList.contains('drag-table-item');
+    }) : [tr];
+    var anchorIndex = rows.indexOf(_objPanelRangeAnchor);
+    var targetIndex = rows.indexOf(tr);
+    var hasRange = range && anchorIndex >= 0 && targetIndex >= 0;
+    // Shift 点击选择连续表行；Ctrl/Command 点击继续支持追加/取消单行。
+    if (hasRange) {
+        document.querySelectorAll('#obj_content .exp-table tbody tr.drag-table-item').forEach(function(r) { r.classList.remove('table-row-selected'); });
+        document.querySelectorAll('.tree-table-item').forEach(function(d) { d.classList.remove('tree-table-selected'); });
+        var from = Math.min(anchorIndex, targetIndex), to = Math.max(anchorIndex, targetIndex);
+        rows.slice(from, to + 1).forEach(function(row) { row.classList.add('table-row-selected'); });
+    } else if (!multi) {
+        document.querySelectorAll('#obj_content .exp-table tbody tr.drag-table-item').forEach(function(r) {
+            r.classList.remove('table-row-selected');
+        });
+        document.querySelectorAll('.tree-table-item').forEach(function(d) {
+            d.classList.remove('tree-table-selected');
+        });
+        tr.classList.add('table-row-selected');
+    } else {
+        tr.classList.toggle('table-row-selected');
+    }
 
-    if (_objPanelLastSelect === tr) {
+    if (!range) _objPanelRangeAnchor = tr;
+    // 多选/范围选择时不触发二次点击重命名。
+    if (!multi && !range && _objPanelLastSelect === tr) {
         // 同一行再次点击 → 进入重命名模式
         _startObjPanelRename(tr);
         _objPanelLastSelect = null;
     } else {
-        _objPanelLastSelect = tr;
+        _objPanelLastSelect = (multi || range) ? null : tr;
     }
 }
 

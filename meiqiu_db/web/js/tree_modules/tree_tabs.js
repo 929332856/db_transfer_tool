@@ -85,7 +85,7 @@ function showCollapsedTabs(e) {
     hidden.forEach(function(tabId) {
         var tab = objectTabs.find(function(t) { return t.id === tabId; });
         if (!tab) return;
-        var icon = tab.type === 'ddl' ? '🔧 ' : tab.type === 'data' ? '📊 ' : tab.type === 'query' ? '📝 ' : '📋 ';
+        var icon = tab.type === 'ddl' ? '🔧 ' : tab.type === 'data' ? ((window.MQ_ICON&&window.MQ_ICON.table)||'📊')+' ' : tab.type === 'query' ? '📝 ' : '📋 ';
         var item = document.createElement('div');
         item.style.cssText = 'padding:7px 16px;font-size:12px;color:#ccc;white-space:nowrap;display:flex;align-items:center;';
         item.innerHTML = '<span style="flex:1;">' + icon + escapeHtml(tab.label) + '</span>' +

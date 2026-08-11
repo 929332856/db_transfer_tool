@@ -2,6 +2,7 @@
 function clickTableCat(cid, db, schema) { _activeObjCat='tables'; _activeObjSchema=schema||''; clickCat(cid, db, 'tables', schema||''); }
 function clickCat(cid, db, cat, schema) {
     _redisPanelCtx = null; // 切换到非 Redis 面板
+    clearObjSearch(); // ★ 切换其他库的表分类时清空搜索
     var conn = treeData.connections[cid];
     if (!conn) return;
     activeConnId = cid; activeConnData = conn; activeDatabase = db;
@@ -21,6 +22,7 @@ function clickCat(cid, db, cat, schema) {
 
 function clickQueries(cid, db, schema) {
     _redisPanelCtx = null;
+    clearObjSearch(); // ★ 切换其他库的查询时清空搜索
     var sch = schema || '';
     _activeObjCat = 'queries'; _activeObjSchema = sch;
     var fullDb = sch ? db+'/'+sch : db;
@@ -96,6 +98,7 @@ function clickOraSchema(cid, db, schema) {
 }
 function clickOraUsers(cid, db) {
     _redisPanelCtx = null;
+    clearObjSearch(); // ★ 切换其他库用户时清空搜索
     var conn = treeData.connections[cid];
     if (!conn) return;
     activeConnId = cid; activeConnData = conn; activeDatabase = db;

@@ -1,4 +1,55 @@
 // ==================== 表操作 ====================
+function _runCancelableTableOperation(kind, conn, db, tn, sch, cid) {
+    var opId = 'table_op_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+    var isDelete = kind === 'delete';
+    var sql = (isDelete ? 'DROP TABLE ' : 'TRUNCATE TABLE ') + '`' + db + '`.`' + tn + '`';
+    var actionName = isDelete ? '删除表' : '截断表';
+    var html = '<div style="text-align:center;padding:12px 0;">' +
+        '<div style="font-size:28px;margin-bottom:10px;">⏳</div>' +
+        '<div style="color:#aaa;font-size:12px;">正在执行 <code class="code-inline">' + escapeHtml(sql) + '</code></div>' +
+        '<div id="table_op_status" style="color:#888;font-size:11px;margin-top:10px;">正在等待数据库响应...</div>' +
+        '</div>';
+    showModal('⏳', '正在' + actionName, html, '#e67e22',
+        '<button class="btn btn-red btn-sm" id="table_op_cancel_btn" onclick="_cancelCurrentTableOperation()">⏹ 取消执行</button>');
+
+    window._currentTableOperation = {opId: opId, done: false};
+    window._cancelCurrentTableOperation = function() {
+        var st = window._currentTableOperation;
+        if (!st || st.done) return;
+        var btn = document.getElementById('table_op_cancel_btn');
+        if (btn) { btn.disabled = true; btn.textContent = '正在终止...'; }
+        var status = document.getElementById('table_op_status');
+        if (status) status.textContent = '正在终止该 SQL 对应的数据库进程...';
+        eel.cancel_table_operation(opId)(function() {});
+    };
+
+    var call = isDelete
+        ? eel.table_delete(conn, db, tn, sch, opId)
+        : eel.table_truncate(conn, db, tn, sch, opId);
+    call(function(r) {
+        var st = window._currentTableOperation;
+        if (st) st.done = true;
+        window._cancelCurrentTableOperation = null;
+        if (r && r.cancelled) {
+            document.getElementById('modal_icon').textContent = '⏹';
+            document.getElementById('modal_title').textContent = actionName + '已取消';
+            document.getElementById('modal_title').style.color = '#f39c12';
+            document.getElementById('modal_msg').innerHTML = '<div style="text-align:center;padding:18px 0;color:#f39c12;">已终止本次 SQL 执行。</div>';
+            document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';
+        } else if (r && r.ok) {
+            hideModal();
+            showOkDialog('成功', r.msg);
+            // 删除和截断都会改变对象面板中表的行数/数据长度，成功后统一刷新。
+            // 延迟一点等待数据库提交及元数据可见，避免面板读到旧值。
+            setTimeout(function(){ refreshTableFolder(cid, db, sch); refreshObjPanel(); }, 500);
+        } else {
+            hideModal();
+            showErrorDialog(actionName + '失败', r ? r.msg : '无响应');
+        }
+        window._currentTableOperation = null;
+    });
+}
+
 function tableCtx(e, tn, db, schema, cid) {
     e.preventDefault(); e.stopPropagation();
     var sch = schema || '';
@@ -7,16 +58,16 @@ function tableCtx(e, tn, db, schema, cid) {
         {label:'📄 打开表',action:function(){addTableDataTab(tn,db,sch,cid);}},
         {label:'📄 查看DDL',action:function(){showTableDDLDialog(tn,db,sch,cid,conn);}},
         {label:'🔧 设计表',action:function(){addTableDDLTab(tn,db,sch,cid);}},
-        {label:'✏️ 重命名',action:function(){showInputDialog('重命名表','新表名：',function(newName){if(!newName||!newName.trim()||newName.trim()===tn)return;eel.table_rename(conn,db,tn,newName.trim(),sch)(function(r){if(r&&r.ok){showOkDialog('成功',r.msg);setTimeout(function(){refreshTableFolder(cid,db,sch);},500);}else showErrorDialog('失败',r?r.msg:'');});},tn);}},
+        {label:'✏️ 重命名',action:function(){showInputDialog('重命名表','新表名：',function(newName){if(!newName||!newName.trim()||newName.trim()===tn)return;eel.table_rename(conn,db,tn,newName.trim(),sch)(function(r){if(r&&r.ok){showOkDialog('成功',r.msg);setTimeout(function(){refreshTableFolder(cid,db,sch);refreshObjPanel();},500);}else showErrorDialog('失败',r?r.msg:'');});},tn);}},
         '---',
         {label:'📤 导出向导',action:function(){showExportWizard(cid,db,sch,tn);}},
-        {label:'💾 备份表',action:function(){var backupName=tn+'_'+(new Date().toISOString().slice(5,7)+new Date().toISOString().slice(8,10)+'_'+new Date().getHours());showConfirmDialog('备份表','将创建备份表 <b>['+backupName+']</b>？',function(){showModal('💾','正在备份表 <b>'+escapeHtml(tn)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在执行 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">CREATE TABLE ... LIKE ...</code><br>和 <code style="background:#1a1a1a;padding:2px 6px;border-radius:3px;">INSERT INTO ... SELECT ...</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');eel.table_backup(conn,db,tn,sch)(function(r){if(r&&r.ok){document.getElementById('modal_title').innerHTML='✅ 备份完成';document.getElementById('modal_title').style.color='#27ae60';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">✅</div><div style="color:#ccc;font-size:14px;">'+escapeHtml(r.msg)+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';// ★ 无感刷新：表文件夹 + 对象窗口
+        {label:'💾 备份表',action:function(){var backupName=tn+'_'+(new Date().toISOString().slice(5,7)+new Date().toISOString().slice(8,10)+'_'+new Date().getHours());showConfirmDialog('备份表','将创建备份表 <b>['+backupName+']</b>？',function(){showModal('💾','正在备份表 <b>'+escapeHtml(tn)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在执行 <code class="code-inline">CREATE TABLE ... LIKE ...</code><br>和 <code class="code-inline">INSERT INTO ... SELECT ...</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');eel.table_backup(conn,db,tn,sch)(function(r){if(r&&r.ok){document.getElementById('modal_title').innerHTML='✅ 备份完成';document.getElementById('modal_title').style.color='#27ae60';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">✅</div><div style="color:#ccc;font-size:14px;">'+escapeHtml(r.msg)+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';// ★ 无感刷新：表文件夹 + 对象窗口
 refreshTableFolder(cid,db,sch);if(activeCatId==='cat_tables_'+safeBtoa(db)){loadCategoryItems(conn,db,'tables',function(items){renderCategoryItems('cat_tables_'+safeBtoa(db),items,'tables');},'');}}else{document.getElementById('modal_title').innerHTML='❌ 备份失败';document.getElementById('modal_title').style.color='#e74c3c';document.getElementById('modal_msg').innerHTML='<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">❌</div><div style="color:#e74c3c;">'+(r?escapeHtml(r.msg):'未知错误')+'</div></div>';document.getElementById('modal_btns').innerHTML='<button class="btn btn-gray btn-sm" onclick="hideModal()">关闭</button>';}});});}},
         '---',
         {label:'🗑 清空表',action:function(){showConfirmDialog('确认','清空表 ['+tn+']？',function(){eel.table_clear(conn,db,tn,sch)(function(r){showOkDialog(r&&r.ok?'成功':'失败',r?r.msg:'');});});}},
-        {label:'✂️ 截断表',action:function(){showConfirmDialog('确认','截断表 ['+tn+']？',function(){eel.table_truncate(conn,db,tn,sch)(function(r){showOkDialog(r&&r.ok?'成功':'失败',r?r.msg:'');});});}},
+        {label:'✂️ 截断表',action:function(){showConfirmDialog('确认','截断表 ['+tn+']？',function(){_runCancelableTableOperation('truncate',conn,db,tn,sch,cid);});}},
         '---',
-        {label:'❌ 删除表',action:function(){showConfirmDialog('危险','删除表 ['+tn+']？不可恢复！',function(){eel.table_delete(conn,db,tn,sch)(function(r){if(r&&r.ok){showOkDialog('成功',r.msg);setTimeout(function(){refreshTableFolder(cid,db,sch);},500);}else showErrorDialog('失败',r?r.msg:'');});});}}
+        {label:'❌ 删除表',action:function(){showConfirmDialog('危险','删除表 ['+tn+']？不可恢复！',function(){_runCancelableTableOperation('delete',conn,db,tn,sch,cid);});}}
     ]);
 }
 
@@ -40,7 +91,14 @@ function compileWhereFn(whereExpr, cols) {
     var expr = whereExpr.trim();
     if (!expr) return function() { return true; };
     var colMap = {};
-    cols.forEach(function(c, i) { colMap[c.toLowerCase()] = i; });
+    cols.forEach(function(c, i) {
+        var name = c.toLowerCase();
+        colMap[name] = i;
+        // 兼容 WHERE 栏中常见的字段引用方式：server_soc、`server_soc`、"server_soc"、[server_soc]
+        colMap['`' + name + '`'] = i;
+        colMap['"' + name + '"'] = i;
+        colMap['[' + name + ']'] = i;
+    });
 
     // 按 AND 拆分
     var parts = String(expr).split(/\s+AND\s+/i);
@@ -133,6 +191,11 @@ function getWhereState(tid) { return _whereStates[tid]; }
 
 function applyWhere(tid) {
     var st = _whereStates[tid]; if (!st) return;
+    var pendingFn = window['_hasPendingEdits_' + tid];
+    if (pendingFn && pendingFn()) {
+        showWarnDialog('请先处理待保存修改', '当前表还有未保存的修改，请先点击“保存”或“取消修改”后再筛选。');
+        return;
+    }
     var inp = document.getElementById(tid + '_where');
     var whereExpr = inp ? inp.value.trim() : '';
     st.whereExpr = whereExpr;
@@ -149,6 +212,11 @@ function applyWhere(tid) {
 }
 
 function clearWhere(tid) {
+    var pendingFn = window['_hasPendingEdits_' + tid];
+    if (pendingFn && pendingFn()) {
+        showWarnDialog('请先处理待保存修改', '当前表还有未保存的修改，请先点击“保存”或“取消修改”后再清除筛选。');
+        return;
+    }
     var inp = document.getElementById(tid + '_where');
     if (inp) inp.value = '';
     var st = _whereStates[tid]; if (!st) return;
@@ -361,6 +429,11 @@ function _refreshFilterModalBody(tid) {
 
 // ★ 应用筛选（同步到服务端）
 function applyFilters(tid) {
+    var pendingFn = window['_hasPendingEdits_' + tid];
+    if (pendingFn && pendingFn()) {
+        showWarnDialog('请先处理待保存修改', '当前表还有未保存的修改，请先点击“保存”或“取消修改”后再筛选。');
+        return;
+    }
     var st = _whereStates[tid]; if (!st) return;
     // ★ 从 DOM 收集当前筛选条件
     var rows = document.querySelectorAll('#' + tid + '_filter_rows [data-filter-idx]');
@@ -405,6 +478,11 @@ function clearAllFilters(tid) {
 
 // ★ 重置条件（清空并移除服务端筛选，重新加载）
 function resetFilters(tid) {
+    var pendingFn = window['_hasPendingEdits_' + tid];
+    if (pendingFn && pendingFn()) {
+        showWarnDialog('请先处理待保存修改', '当前表还有未保存的修改，请先点击“保存”或“取消修改”后再重置筛选。');
+        return;
+    }
     var st = _whereStates[tid]; if (!st) return;
     st.filterList = [];
     window['_activeWhereSql_' + tid] = '';
@@ -478,26 +556,43 @@ function updateWhereCount(tid, filteredCount, totalCount) {
     }
 }
 
+// ★ 生成唯一的表数据/表设计 tab id（含连接 cid + 库名，避免不同库同名表共用同一个 tab）
+function _tblTabId(prefix, tn, db, cid) {
+    var raw = (tn || '') + '|' + (db || '') + '|' + (cid || '');
+    return prefix + '_' + raw.replace(/[^a-zA-Z0-9_]/g, '_');
+}
+
+// ★ 同名表（不同库/连接）时，label 追加库名以便区分
+function _tblTabLabel(tn, tabId, db, type) {
+    var dup = objectTabs.find(function(t) {
+        return t.type === type && t.id !== tabId && t.label === tn;
+    });
+    return dup ? (tn + ' [' + (db || '?') + ']') : tn;
+}
+
 function addTableDataTab(tn, db, schema, cid) {
     var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
     var sch = schema || '';
     var theDb = db || activeDatabase;
     var theCid = cid || activeConnId || '';
+    // ★ 唯一 tab id：连接 + 库名 + 表名（同名表不同库 → 各自独立 tab）
+    var tabId = _tblTabId('data', tn, theDb, theCid);
+    var label = _tblTabLabel(tn, tabId, theDb, 'data');
     // ★ 防御：连接信息为空时直接报错
     if (!conn || !conn.host) {
-        addOrUpdateTab('data_'+tn, tn, 'data', '<div style="padding:20px;color:#e74c3c;">❌ 未找到连接信息，请先在左侧树中选择数据库后再试</div>', theDb, theCid);
+        addOrUpdateTab(tabId, label, 'data', '<div style="padding:20px;color:#e74c3c;">❌ 未找到连接信息，请先在左侧树中选择数据库后再试</div>', theDb, theCid);
         return;
     }
     // ★ 大表优化：首次打开只取 50 行（快速预览），点"加载全部"再全量查询
-    addOrUpdateTab('data_'+tn, tn, 'data', '<div style="padding:20px;color:#999;">⏳ 正在加载数据（前50行）...</div>', theDb, theCid);
+    addOrUpdateTab(tabId, label, 'data', '<div style="padding:20px;color:#999;">⏳ 正在加载数据（前50行）...</div>', theDb, theCid);
     
     try {
         eel.table_preview_data_fast(conn, theDb, tn, sch, '', '')(function(r){
-            if(!r||!r.ok){addOrUpdateTab('data_'+tn,tn,'data','<div style="padding:20px;color:#e74c3c;">❌ '+(r?r.msg:'')+'</div>',theDb,theCid);return;}
+            if(!r||!r.ok){addOrUpdateTab(tabId,label,'data','<div style="padding:20px;color:#e74c3c;">❌ '+(r?r.msg:'')+'</div>',theDb,theCid);return;}
             _buildTableDataUI(tn, conn, sch, r, theDb, theCid);
         });
     } catch(e) {
-        addOrUpdateTab('data_'+tn, tn, 'data', '<div style="padding:20px;color:#e74c3c;">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>', theDb, theCid);
+        addOrUpdateTab(tabId, label, 'data', '<div style="padding:20px;color:#e74c3c;">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>', theDb, theCid);
     }
 }
 
@@ -628,8 +723,11 @@ function _initCellOverflowTooltip(tid) {
 
 /** 构建/更新表格数据 UI（加载全量数据，支持客户端分页） */
 function _buildTableDataUI(tn, conn, sch, r, db, cid) {
-        if(!r||!r.ok){addOrUpdateTab('data_'+tn,tn,'data','<div style="padding:20px;color:#e74c3c;">❌ '+(r?r.msg:'')+'</div>',db,cid);return;}
-        var tid = 'tbl_data_' + tn.replace(/[^a-zA-Z0-9]/g,'_');
+        if(!r||!r.ok){addOrUpdateTab(_tblTabId('data',tn,db,cid),_tblTabLabel(tn,_tblTabId('data',tn,db,cid),db,'data'),'data','<div style="padding:20px;color:#e74c3c;">❌ '+(r?r.msg:'')+'</div>',db,cid);return;}
+        // ★ 唯一 tab/tid：连接 + 库名 + 表名（不同库同名表 → 各自独立 tab，不互相覆盖状态）
+        var tabId = _tblTabId('data', tn, db, cid);
+        var label = _tblTabLabel(tn, tabId, db, 'data');
+        var tid = 'tbl_data_' + ((db||'') + '|' + (cid||'') + '|' + tn).replace(/[^a-zA-Z0-9_]/g,'_');
         var cols = r.columns || [];
         var rows = r.rows || [];
         var comments = r.comments || {};
@@ -766,7 +864,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 var typeLen = cType ? cType.length : 0;
                 var colMinWidth = typeLen > 25 ? (typeLen > 35 ? 220 : 180) : (typeLen > 12 ? 140 : 90);
                 // ★ 三行布局：字段名 / 字段类型 / 字段注释，排序+筛选图标在右侧居中
-                h+='<th class="sortable-th" data-ci="'+ci+'" data-orig="'+escapeAttr(c)+'" style="user-select:none;min-width:'+colMinWidth+'px;" oncontextmenu="colHeaderCtx(event,\''+escapeAttr(c)+'\',\''+escapeAttr(cType||'')+'\',\''+escapeAttr(cmt||'')+'\');">';
+                var colSelectedCls = _selectedCols[ci] ? ' col-selected' : '';
+                h+='<th class="sortable-th'+colSelectedCls+'" data-ci="'+ci+'" data-orig="'+escapeAttr(c)+'" style="user-select:none;min-width:'+colMinWidth+'px;" onclick="window[\'_colHeaderClick_'+tid+'\'](event,'+ci+')" oncontextmenu="colHeaderCtx(event,\''+escapeAttr(c)+'\',\''+escapeAttr(cType||'')+'\',\''+escapeAttr(cmt||'')+'\');">';
                 h+='<div class="th-content">';
                 h+='<div class="th-line th-line-name">'+escapeHtml(c)+'</div>';
                 if (cType) h+='<div class="th-line th-line-type">'+escapeHtml(cType)+'</div>';
@@ -775,7 +874,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 else h+='<div class="th-line th-line-cmt"></div>';
                 h+='</div>';
                 h+='<div class="th-icons">';
-                h+='<span class="col-filter-icon" data-ci="'+ci+'" title="筛选此列" style="cursor:pointer;font-size:13px;opacity:'+filterOpacity+';color:#aaa;" onclick="event.stopPropagation();window[\'_toggleColFilter_'+tid+'\']('+ci+',this)">⏳</span>';
+                h+='<span class="col-filter-wrap"><span class="col-filter-icon" data-ci="'+ci+'" title="筛选此列" style="cursor:pointer;font-size:13px;opacity:'+filterOpacity+';color:#aaa;" onclick="event.stopPropagation();window[\'_toggleColFilter_'+tid+'\']('+ci+',this)">'+(window.MQ_ICON&&window.MQ_ICON.funnel||'⏳')+'</span><span class="col-filter-badge" data-ci="'+ci+'" style="display:'+(hasFilter?'inline-flex':'none')+';">1</span></span>';
                 h+='<span class="sort-icon" data-ci="'+ci+'" title="点击排序" style="cursor:pointer;display:inline-block;width:20px;text-align:center;font-size:12px;color:#888;" onclick="event.stopPropagation();window[\'_sortClickIcon_'+tid+'\']('+ci+')">'+sortIcon+'</span>';
                 h+='</div>';
                 h+='</th>';
@@ -794,6 +893,13 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         var _selectedRows = {};
         // 上一次点击的原始行索引（用于 shift 范围选择）
         var _lastClickedIdx = -1;
+        // 列选择状态：点击字段名单选，Ctrl 多选，Shift 选择连续字段。
+        var _selectedCols = {};
+        var _lastClickedCol = -1;
+        // WPS 风格的单元格选区：key 为“原始行索引:列索引”。
+        var _selectedCells = {};
+        var _cellAnchor = null;
+        var _cellPointer = null;
         // ★ 暴露引用供全局点击清除
         window['_selRows_'+tid] = _selectedRows;
         window['_lastClk_'+tid] = _lastClickedIdx;
@@ -816,14 +922,46 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         var _changedCells = {}; // key: "originalRowIdx:colIdx" → {old,new,colName,origRow,columns}
         var _editing = false;
 
+        function hasPendingEdits() {
+            return Object.keys(_changedCells).length > 0;
+        }
+
+        function guardPendingEdits(action) {
+            if (!hasPendingEdits()) return false;
+            showWarnDialog('请先处理待保存修改',
+                '当前表还有未保存的修改，请先点击“保存”或“取消修改”后再' + action + '。');
+            return true;
+        }
+
         function cellChanged(origRowIdx, colIdx, colName, newVal, oldVal) {
-            var key = origRowIdx + ':' + colIdx;
-            if (String(newVal) !== String(oldVal)) {
-                var origRow = rows[origRowIdx];
-                _changedCells[key] = {rowIdx: origRowIdx, colIdx: colIdx, colName: colName,
-                    oldVal: oldVal, newVal: newVal, origRow: origRow, columns: cols};
-            } else {
-                delete _changedCells[key];
+            // 当前行已经在多选集合中时，把本次修改同步到所有选中行；
+            // 选中集合为空或当前行未选中时，只修改当前行。
+            var selected = getSelectedOriginalIndices();
+            var targets = (selected.length > 1 && _selectedRows[origRowIdx]) ? selected : [origRowIdx];
+            targets.forEach(function(rowIdx) {
+                var key = rowIdx + ':' + colIdx;
+                var oldCell = _changedCells[key];
+                var original = rows[rowIdx] || [];
+                var baseOld = oldCell ? oldCell.oldVal : original[colIdx];
+                if (baseOld === null || baseOld === undefined) baseOld = 'NULL';
+                if (String(newVal) !== String(baseOld)) {
+                    _changedCells[key] = {rowIdx: rowIdx, colIdx: colIdx, colName: colName,
+                        oldVal: baseOld, newVal: newVal, origRow: original, columns: cols};
+                } else {
+                    delete _changedCells[key];
+                }
+            });
+            // 同步更新当前可见页中其它选中行的输入框，滚动/翻页后仍由 _changedCells 恢复。
+            var tbody = document.getElementById(tid + '_tbody');
+            if (tbody && targets.length > 1) {
+                tbody.querySelectorAll('input.editable-cell[data-ci="' + colIdx + '"]').forEach(function(input) {
+                    var oi = parseInt(input.getAttribute('data-orig-idx'), 10);
+                    if (_selectedRows[oi]) {
+                        input.value = String(newVal);
+                        var td = input.parentNode;
+                        if (td) td.classList.add('cell-modified');
+                    }
+                });
             }
             updateSaveBtn();
         }
@@ -841,31 +979,43 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             var pg = getPageRows();
             var tbody = document.getElementById(tid+'_tbody');
             if (!tbody) return;
-            if (_editing) return;
+            // ★ 编辑中阻止 re-render 以保护 input 焦点，但若 tbody 为空（DOM 被重建，如切换 tab 回来），仍需渲染一次
+            if (_editing && tbody.children.length > 0) return;
             var h = '';
             pg.rows.forEach(function(row, ri){
                 var origIdx = pg.indices[ri]; // 原始 rows 中的索引
                 var isSel = !!_selectedRows[origIdx];
                 var gripCls = isSel ? 'row-sel-grip selected' : 'row-sel-grip';
                 var rowCls = isSel ? ' class="row-selected"' : '';
-                h += '<tr data-ri="'+ri+'" data-orig-idx="'+origIdx+'"'+rowCls+'>';
+                h += '<tr data-ri="'+ri+'" data-orig-idx="'+origIdx+'"'+rowCls+' ' +
+                    'onclick="window[\'_rowDataClick_'+tid+'\'](event,'+origIdx+')">';
                 // 行选择格：点击选中/取消，右键菜单；▲ 只有 grip 格子才能选中行
                 h += '<td class="'+gripCls+'" data-orig-idx="'+origIdx+'" ' +
-                    'onclick="window[\'_rowGripClick_'+tid+'\'](this,'+origIdx+')" ' +
+                    'onclick="event.stopPropagation();window[\'_rowGripClick_'+tid+'\'](this,'+origIdx+')" ' +
                     'oncontextmenu="window[\'_rowCtx_'+tid+'\'](event,'+origIdx+')" ' +
                     'title="左键选择/取消选择行 | 右键菜单">'+(origIdx+1)+'</td>';
                 row.forEach(function(v,ci){
-                    var val = v===null ? 'NULL' : String(v);
+                    // ★ 若该单元格在 _changedCells 中（用户修改过），渲染时使用 newVal 并标记（切回 tab 后保留修改）
+                    var ckey = origIdx + ':' + ci;
+                    var chCell = _changedCells[ckey];
+                    var displayV = chCell ? chCell.newVal : v;
+                    var isModified = !!chCell;
+                    var val = displayV===null || displayV===undefined ? 'NULL' : String(displayV);
                     var cType = getCType(cols[ci]);
-                    var isLongText = _shouldShowExpandBtn(cType, v);
+                    var isLongText = _shouldShowExpandBtn(cType, displayV);
+                    var modCls = isModified ? ' cell-modified' : '';
+                    var colCls = _selectedCols[ci] ? ' col-selected' : '';
+                    var cellCls = _selectedCells[origIdx + ':' + ci] ? ' cell-selected' : '';
                     if (isLongText) {
                         var uid = tid + '_txt_' + origIdx + '_' + ci;
                         // ★ 把文本存到全局对象，避免内联 JS 的转义问题
                         window._textPopupData[uid] = { text: val, col: cols[ci] };
-                        h += '<td class="cell-with-icon">' +
-                            '<input class="editable-cell" data-ri="'+ri+'" data-ci="'+ci+'" data-col="'+escapeAttr(cols[ci])+'" ' +
+                        h += '<td data-orig-idx="'+origIdx+'" data-ci="'+ci+'" class="cell-with-icon'+modCls+colCls+cellCls+'">' +
+                            '<input class="editable-cell" data-ri="'+ri+'" data-orig-idx="'+origIdx+'" data-ci="'+ci+'" data-col="'+escapeAttr(cols[ci])+'" ' +
                             'value="'+escapeAttr(val)+'" ' +
+                            'onmousedown="window[\'_cellMouseDown_'+tid+'\'](event,'+origIdx+','+ci+')" onclick="event.stopPropagation()" ' +
                             'onfocus="this._oldVal=this.value" ' +
+                            'onkeydown="window[\'_cellKeyDown_'+tid+'\'](event,this)" ' +
                             'onchange="window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)" ' +
                             'onblur="if(this.value!==this._oldVal){window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)}" ' +
                             'spellcheck="false" autocomplete="off">' +
@@ -874,9 +1024,11 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                             'title="查看完整文本">📄</span>' +
                             '</td>';
                     } else {
-                        h += '<td><input class="editable-cell" data-ri="'+ri+'" data-ci="'+ci+'" data-col="'+escapeAttr(cols[ci])+'" ' +
+                        h += '<td data-orig-idx="'+origIdx+'" data-ci="'+ci+'"'+ ((modCls || colCls || cellCls) ? ' class="'+(modCls+colCls+cellCls).trim()+'"' : '') +'><input class="editable-cell" data-ri="'+ri+'" data-orig-idx="'+origIdx+'" data-ci="'+ci+'" data-col="'+escapeAttr(cols[ci])+'" ' +
                             'value="'+escapeAttr(val)+'" ' +
+                            'onmousedown="window[\'_cellMouseDown_'+tid+'\'](event,'+origIdx+','+ci+')" onclick="event.stopPropagation()" ' +
                             'onfocus="this._oldVal=this.value" ' +
+                            'onkeydown="window[\'_cellKeyDown_'+tid+'\'](event,this)" ' +
                             'onchange="window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)" ' +
                             'onblur="if(this.value!==this._oldVal){window[\'_cellChanged_'+tid+'\']('+origIdx+','+ci+',\''+escapeAttr(cols[ci])+'\',this.value,this._oldVal)}" ' +
                             'spellcheck="false" autocomplete="off"></td>';
@@ -890,6 +1042,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             updatePagerInfo();
             // 更新全选按钮状态（基于当前页的行）
             updateSelAllCheckbox(pg);
+            // ★ 同步保存/取消按钮状态（DOM 重建后模板硬编码的"保存 (0)"会掩盖真实的修改数）
+            updateSaveBtn();
         }
 
         function updateSelAllCheckbox(f) {
@@ -908,6 +1062,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
 
         // 列筛选：构建 SQL WHERE 发送到服务端（全表筛选）
         function applyColFilters() {
+            if (guardPendingEdits('筛选')) return;
             var hasFilter = false;
             for (var ci in _colFilters) {
                 if (_colFilters[ci] && _colFilters[ci].trim() !== '') { hasFilter = true; break; }
@@ -963,6 +1118,9 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 var ci = parseInt(icon.getAttribute('data-ci'));
                 var hasFilter = _colFilters[ci] && _colFilters[ci].trim() !== '';
                 icon.style.opacity = hasFilter ? '1' : '0.3';
+                var parent = icon.parentElement;
+                var badge = parent ? parent.querySelector('.col-filter-badge') : null;
+                if (badge) badge.style.display = hasFilter ? 'inline-flex' : 'none';
             });
         }
 
@@ -1097,7 +1255,9 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 if (_changedCells.hasOwnProperty(k)) {
                     var ch = _changedCells[k];
                     changes.push({col: ch.colName, newVal: String(ch.newVal),
-                        origRow: (ch.origRow||[]).map(function(v){return v===null?'NULL':String(v);}),
+                        rowIdx: ch.rowIdx,
+                        // 保留真正的 null，避免后端无法区分 NULL 和文本 "NULL"。
+                        origRow: (ch.origRow||[]).map(function(v){return v===null?null:String(v);}),
                         columns: ch.columns || cols});
                 }
             }
@@ -1148,6 +1308,27 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             render();
         }
 
+        // ★ 导出当前表数据（按当前已加载的行，支持筛选/排序后的实际数据）
+        function exportTableData() {
+            if (!cols || !cols.length) { showWarnDialog('提示', '没有可导出的数据'); return; }
+            if (!rows || !rows.length) { showWarnDialog('提示', '当前表无数据'); return; }
+            // ★ 导出的是当前已加载的 rows（按当前筛选/排序），不是仅当前页
+            if (typeof _qsExportState === 'undefined') {
+                showWarnDialog('提示', '导出向导未就绪，请刷新页面');
+                return;
+            }
+            _qsExportState = {
+                step: 1, fmt: 'csv', tableName: tn, path: '',
+                rowCount: rows.length, totalBytes: 0,
+                results: { columns: cols.slice(), rows: rows.map(function(r) { return r.slice(); }) },
+                written: 0, pct: 0, done: false, error: null, resultInfo: null
+            };
+            if (typeof _qsExportLogs !== 'undefined') _qsExportLogs = [];
+            if (typeof _showExportStep1 === 'function') _showExportStep1();
+            else showWarnDialog('提示', '导出向导函数未就绪，请刷新页面');
+        }
+        window['_exportTableData_' + tid] = exportTableData;
+
         // 删除选中行
         function doDeleteRows() {
             var selIndices = getSelectedOriginalIndices();
@@ -1157,7 +1338,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 var origRow = rows[oi];
                 if (!origRow) return;
                 rowsData.push({
-                    origRow: origRow.map(function(v){return v===null?'NULL':String(v);}),
+                    origRow: origRow.map(function(v){return v===null?null:String(v);}),
                     columns: cols
                 });
             });
@@ -1202,9 +1383,292 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         window['_cancelEdit_' + tid] = cancelEdit;
         window['_cellChanged_' + tid] = cellChanged;
         window['_doDelete_' + tid] = doDeleteRows;
-        // 行选择格点击：单选/Shift多选 / ▲ 再点已选中行则取消全部
-        window['_rowGripClick_' + tid] = function(gripEl, origIdx) {
-            var evt = window.event;
+
+        function _cellKey(origIdx, colIdx) {
+            return String(origIdx) + ':' + String(colIdx);
+        }
+
+        function _updateCellHighlights(_tid) {
+            var root = document.getElementById(_tid);
+            if (!root) return;
+            root.querySelectorAll('td[data-orig-idx][data-ci]').forEach(function(td) {
+                var key = _cellKey(td.getAttribute('data-orig-idx'), td.getAttribute('data-ci'));
+                td.classList.toggle('cell-selected', !!_selectedCells[key]);
+            });
+        }
+
+        function _clearCellSelection(clearColumns) {
+            _selectedCells = {};
+            _cellAnchor = null;
+            _cellPointer = null;
+            if (clearColumns) {
+                _selectedCols = {};
+                _lastClickedCol = -1;
+                _updateColumnHighlights(tid);
+            }
+            _updateCellHighlights(tid);
+        }
+
+        function _setCellRange(from, to, additive) {
+            if (!from || !to) return;
+            if (!additive) _selectedCells = {};
+            var rowFrom = Math.min(from.row, to.row);
+            var rowTo = Math.max(from.row, to.row);
+            var colFrom = Math.min(from.col, to.col);
+            var colTo = Math.max(from.col, to.col);
+            for (var ri = rowFrom; ri <= rowTo; ri++) {
+                for (var ci = colFrom; ci <= colTo; ci++) {
+                    _selectedCells[_cellKey(ri, ci)] = true;
+                }
+            }
+            _selectedCols = {};
+            _lastClickedCol = -1;
+            _updateColumnHighlights(tid);
+            _updateCellHighlights(tid);
+        }
+
+        function _cellAtPoint(x, y) {
+            var el = document.elementFromPoint(x, y);
+            var td = el && el.closest ? el.closest('td[data-orig-idx][data-ci]') : null;
+            var root = document.getElementById(tid);
+            if (!td || !root || !root.contains(td)) return null;
+            return {
+                row: parseInt(td.getAttribute('data-orig-idx'), 10),
+                col: parseInt(td.getAttribute('data-ci'), 10)
+            };
+        }
+
+        function _cellMouseDown(evt, origIdx, colIdx) {
+            if (evt && evt.button !== undefined && evt.button !== 0) return;
+            window._activeGridSelectionTid = tid;
+            var cell = {row: Number(origIdx), col: Number(colIdx)};
+            var isShift = !!(evt && evt.shiftKey);
+            var isCtrl = !!(evt && (evt.ctrlKey || evt.metaKey));
+            if (isShift && _cellAnchor) {
+                _setCellRange(_cellAnchor, cell, false);
+            } else if (isCtrl) {
+                var key = _cellKey(origIdx, colIdx);
+                if (_selectedCells[key]) delete _selectedCells[key];
+                else _selectedCells[key] = true;
+                _cellAnchor = cell;
+                _selectedCols = {};
+                _lastClickedCol = -1;
+                _updateColumnHighlights(tid);
+                _updateCellHighlights(tid);
+            } else {
+                _setCellRange(cell, cell, false);
+                _cellAnchor = cell;
+            }
+            _cellPointer = {
+                anchor: _cellAnchor || cell,
+                startX: evt ? evt.clientX : 0,
+                startY: evt ? evt.clientY : 0,
+                dragging: false
+            };
+        }
+
+        function _cellMouseMove(evt) {
+            if (!_cellPointer || !evt || !(evt.buttons & 1)) return;
+            var cell = _cellAtPoint(evt.clientX, evt.clientY);
+            if (!cell) return;
+            var anchor = _cellPointer.anchor;
+            if (cell.row === anchor.row && cell.col === anchor.col) return;
+            _cellPointer.dragging = true;
+            _setCellRange(anchor, cell, false);
+            if (window.getSelection) window.getSelection().removeAllRanges();
+            evt.preventDefault();
+        }
+
+        function _cellMouseUp() {
+            _cellPointer = null;
+        }
+
+        function _selectedCellText() {
+            var byRow = {};
+            Object.keys(_selectedCells).forEach(function(key) {
+                var p = key.split(':');
+                var ri = parseInt(p[0], 10), ci = parseInt(p[1], 10);
+                if (!byRow[ri]) byRow[ri] = [];
+                byRow[ri].push(ci);
+            });
+            var rowIds = Object.keys(byRow).map(Number).sort(function(a,b){return a-b;});
+            return rowIds.map(function(ri) {
+                var colIds = byRow[ri].sort(function(a,b){return a-b;});
+                var minCol = colIds[0], maxCol = colIds[colIds.length - 1];
+                var values = [];
+                for (var ci = minCol; ci <= maxCol; ci++) {
+                    var ch = _changedCells[_cellKey(ri, ci)];
+                    var value = ch ? ch.newVal : (rows[ri] ? rows[ri][ci] : '');
+                    values.push(value === null || value === undefined ? 'NULL' : String(value));
+                }
+                return values.join('\t');
+            }).join('\n');
+        }
+
+        function _selectedColumnIds() {
+            return Object.keys(_selectedCols).map(Number).sort(function(a,b){return a-b;});
+        }
+
+        function _selectedColumnText() {
+            var colIds = _selectedColumnIds();
+            return rows.map(function(row, ri) {
+                return colIds.map(function(ci) {
+                    var ch = _changedCells[_cellKey(ri, ci)];
+                    var value = ch ? ch.newVal : (row ? row[ci] : '');
+                    return value === null || value === undefined ? 'NULL' : String(value);
+                }).join('\t');
+            }).join('\n');
+        }
+
+        function _applyPastedCells(text) {
+            if (!_cellAnchor || text === undefined || text === null) return;
+            var lines = String(text).replace(/\r/g, '').split('\n');
+            if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+            var startRow = _cellAnchor.row, startCol = _cellAnchor.col;
+            var pasted = [];
+            var matrix = lines.map(function(line) { return line.split('\t'); });
+            var selectedCoords = Object.keys(_selectedCells).map(function(key) {
+                var p = key.split(':');
+                return {row: parseInt(p[0], 10), col: parseInt(p[1], 10)};
+            });
+
+            // 选中多个单元格后粘贴一个值：把同一个值写入整个选区。
+            // 这是表格软件中最常用的批量填充行为。
+            var targets = [];
+            if (selectedCoords.length > 1 && matrix.length === 1 && matrix[0].length === 1) {
+                targets = selectedCoords.map(function(cell) {
+                    return {row: cell.row, col: cell.col, value: matrix[0][0]};
+                });
+            } else {
+                matrix.forEach(function(vals, rOffset) {
+                    vals.forEach(function(value, cOffset) {
+                        targets.push({row: startRow + rOffset, col: startCol + cOffset, value: value});
+                    });
+                });
+            }
+            targets.forEach(function(target) {
+                var ri = target.row, ci = target.col;
+                var input = document.querySelector('#' + tid + ' input.editable-cell[data-orig-idx="' + ri + '"][data-ci="' + ci + '"]');
+                if (!input || ci >= cols.length) return;
+                var oldValue = input.value;
+                input.value = target.value;
+                input._oldVal = oldValue;
+                cellChanged(ri, ci, cols[ci], target.value, oldValue);
+                pasted.push({row: ri, col: ci});
+            });
+            if (pasted.length) {
+                _selectedCells = {};
+                pasted.forEach(function(cell) { _selectedCells[_cellKey(cell.row, cell.col)] = true; });
+                _updateCellHighlights(tid);
+            }
+        }
+
+        function _applyPastedColumns(text) {
+            var colIds = _selectedColumnIds();
+            if (!colIds.length || text === undefined || text === null) return;
+            var lines = String(text).replace(/\r/g, '').split('\n');
+            if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+            var matrix = lines.map(function(line) { return line.split('\t'); });
+            var pasted = [];
+
+            function applyValue(ri, ci, value) {
+                var input = document.querySelector('#' + tid + ' input.editable-cell[data-orig-idx="' + ri + '"][data-ci="' + ci + '"]');
+                if (!input || ci >= cols.length) return;
+                var oldValue = input.value;
+                input.value = value;
+                input._oldVal = oldValue;
+                cellChanged(ri, ci, cols[ci], value, oldValue);
+                pasted.push({row: ri, col: ci});
+            }
+
+            // 单个值填充所有选中列的所有已加载行。
+            if (matrix.length === 1 && matrix[0].length === 1) {
+                rows.forEach(function(_, ri) {
+                    colIds.forEach(function(ci) { applyValue(ri, ci, matrix[0][0]); });
+                });
+            } else {
+                // 多行/多列内容从当前数据的第一行开始，按选中列顺序填充。
+                matrix.forEach(function(values, ri) {
+                    if (ri >= rows.length) return;
+                    colIds.forEach(function(ci, colOffset) {
+                        if (values.length === 1 && colIds.length > 1) {
+                            applyValue(ri, ci, values[0]);
+                        } else if (values[colOffset] !== undefined) {
+                            applyValue(ri, ci, values[colOffset]);
+                        }
+                    });
+                });
+            }
+            if (pasted.length) _updateCellHighlights(tid);
+        }
+
+        function _cellKeyDown(evt, input) {
+            if (!evt) return;
+            var isCtrl = evt.ctrlKey || evt.metaKey;
+            if (isCtrl && String(evt.key).toLowerCase() === 'c' && Object.keys(_selectedCells).length) {
+                // 输入框内用户明确拖选了部分文字时，保留浏览器原生复制行为。
+                if (input && input.selectionStart !== input.selectionEnd && Object.keys(_selectedCells).length === 1) return;
+                evt.preventDefault();
+                copyToClipboard(_selectedCellText());
+                return;
+            }
+            // 选中单元格后直接输入时替换整个单元格内容，符合表格软件习惯。
+            if (!isCtrl && !evt.altKey && input && String(evt.key).length === 1 &&
+                input.selectionStart === input.selectionEnd) {
+                input.setSelectionRange(0, input.value.length);
+            }
+        }
+
+        function _cellDocumentKeyDown(evt) {
+            if (window._activeGridSelectionTid !== tid) return;
+            var colIds = _selectedColumnIds();
+            if (!colIds.length || !evt || !(evt.ctrlKey || evt.metaKey)) return;
+            var key = String(evt.key).toLowerCase();
+            if (key === 'c') {
+                evt.preventDefault();
+                copyToClipboard(_selectedColumnText());
+            }
+        }
+
+        // 使用浏览器原生 paste 事件读取剪贴板内容。
+        // 不主动调用 navigator.clipboard.readText()，避免触发浏览器的剪贴板权限询问。
+        function _cellDocumentPaste(evt) {
+            if (window._activeGridSelectionTid !== tid || !evt || !evt.clipboardData) return;
+            var text = evt.clipboardData.getData('text/plain');
+            if (text === undefined || text === null) return;
+            var colIds = _selectedColumnIds();
+            if (!colIds.length && !_cellAnchor) return;
+            evt.preventDefault();
+            if (colIds.length) _applyPastedColumns(text);
+            else _applyPastedCells(text);
+        }
+
+        function _cellDocumentMouseDown(evt) {
+            var root = document.getElementById(tid);
+            if (!root) return;
+            if (!root.contains(evt.target)) {
+                if (Object.keys(_selectedCells).length || Object.keys(_selectedCols).length) {
+                    _clearCellSelection(true);
+                }
+                return;
+            }
+            var td = evt.target.closest ? evt.target.closest('td[data-orig-idx][data-ci]') : null;
+            if (td && !evt.target.closest('.editable-cell')) {
+                _cellMouseDown(evt, parseInt(td.getAttribute('data-orig-idx'), 10), parseInt(td.getAttribute('data-ci'), 10));
+            } else if (!td && !(evt.target.closest && evt.target.closest('th[data-ci]'))) {
+                _clearCellSelection(true);
+            }
+        }
+
+        window['_cellMouseDown_' + tid] = _cellMouseDown;
+        window['_cellKeyDown_' + tid] = _cellKeyDown;
+        document.addEventListener('mousedown', _cellDocumentMouseDown);
+        document.addEventListener('mousemove', _cellMouseMove);
+        document.addEventListener('mouseup', _cellMouseUp);
+        document.addEventListener('keydown', _cellDocumentKeyDown);
+        document.addEventListener('paste', _cellDocumentPaste);
+        // 行选择：普通点击单选，Ctrl 多选，Shift 选择范围；数据单元格也可作为点击目标。
+        function _selectRowByEvent(evt, origIdx) {
             var isShift = evt && evt.shiftKey;
             var isCtrl = evt && (evt.ctrlKey || evt.metaKey);
 
@@ -1236,7 +1700,56 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             _updateRowHighlights(tid);
             updateDeleteBtn();
             updateSelAllCheckbox(null);
+        }
+        window['_rowGripClick_' + tid] = function(gripEl, origIdx) {
+            _selectRowByEvent(window.event, origIdx);
         };
+        window['_rowDataClick_' + tid] = function(evt, origIdx) {
+            var target = evt && evt.target;
+            var tag = target && target.tagName ? target.tagName.toUpperCase() : '';
+            // 编辑多选行时点击其中一个 input 不要把其它选中行清掉。
+            if (!((evt && (evt.ctrlKey || evt.metaKey || evt.shiftKey))) &&
+                tag === 'INPUT' && _selectedRows[origIdx] && getSelectedOriginalIndices().length > 1) {
+                return;
+            }
+            _selectRowByEvent(evt, origIdx);
+        };
+        window['_colHeaderClick_' + tid] = function(evt, colIdx) {
+            _clearCellSelection(false);
+            window._activeGridSelectionTid = tid;
+            var isShift = evt && evt.shiftKey;
+            var isCtrl = evt && (evt.ctrlKey || evt.metaKey);
+            if (isShift && _lastClickedCol >= 0) {
+                var from = Math.min(_lastClickedCol, colIdx);
+                var to = Math.max(_lastClickedCol, colIdx);
+                _selectedCols = {};
+                for (var ci2 = from; ci2 <= to; ci2++) _selectedCols[ci2] = true;
+            } else if (isCtrl) {
+                if (_selectedCols[colIdx]) delete _selectedCols[colIdx];
+                else _selectedCols[colIdx] = true;
+                _lastClickedCol = colIdx;
+            } else {
+                _selectedCols = {};
+                _selectedCols[colIdx] = true;
+                _lastClickedCol = colIdx;
+            }
+            _updateColumnHighlights(tid);
+        };
+        function _updateColumnHighlights(_tid) {
+            var root = document.getElementById(_tid + '_tbody');
+            if (!root) return;
+            root.querySelectorAll('td[data-ci]').forEach(function(td) {
+                var ci3 = parseInt(td.getAttribute('data-ci'), 10);
+                if (_selectedCols[ci3]) td.classList.add('col-selected');
+                else td.classList.remove('col-selected');
+            });
+            var table = root.parentNode;
+            if (table) table.querySelectorAll('thead th.sortable-th[data-ci]').forEach(function(th) {
+                var ci4 = parseInt(th.getAttribute('data-ci'), 10);
+                if (_selectedCols[ci4]) th.classList.add('col-selected');
+                else th.classList.remove('col-selected');
+            });
+        }
         window['_toggleSelAll_' + tid] = function() {
             var pg = getPageRows();
             var allSel = pg.indices.length > 0 && pg.indices.every(function(oi){ return !!_selectedRows[oi]; });
@@ -1269,8 +1782,9 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         }
         window['_toggleColFilter_' + tid] = toggleColFilter;
 
+        window['_hasPendingEdits_' + tid] = hasPendingEdits;
         registerWhereState(tid, cols, rows, sortRef, function(){_serverReload();}, colTypes);
-        _tabIdToTid['data_'+tn] = tid;
+        _tabIdToTid[tabId] = tid;
         // ★ 暴露本地 render（仅重新绘制 DOM，不请求服务端），供 renderObjectPanel 切换 tab 时使用
         window['_renderLocal_'+tid] = render;
 
@@ -1346,6 +1860,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         var _lastGoPageTs = 0; // ★ 防抖时间戳，防止重复绑定导致一次点击触发多次 goPage
         var _pageLoading = false; // ★ 防止并发翻页请求
         function goPage(dir) {
+            if (guardPendingEdits('翻页')) return;
             // ★ 防抖：重复绑定会让一次 click 触发多次 goPage（offset 跳两页），120ms 内忽略后续调用
             var now = Date.now();
             if (now - _lastGoPageTs < 120) return;
@@ -1446,6 +1961,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         }
 
         function changePageSize() {
+            if (guardPendingEdits('调整每页行数')) return;
             var newSize = parseInt((document.getElementById(tid+'_psize')||{}).value) || 50;
             // ★ 切 pageSize 时如果新页大小超出已加载行数，从服务端拉取
             if (newSize > rows.length && !_allLoaded) {
@@ -1464,6 +1980,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
 
         // ★ 刷新按钮：重新从数据库加载数据（只取前50行，支持取消）
         function refreshTableData() {
+            if (guardPendingEdits('刷新数据')) return;
             // ★ 防止重复刷新
             if (_refreshing) return;
             _refreshing = true;
@@ -1566,8 +2083,9 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             '<button class="btn btn-sm" id="'+tid+'_save_btn" onclick="window[\'_doSave_'+tid+'\']()" disabled style="background:#2ecc71;color:#fff;font-size:10px;">💾 保存 (0)</button>' +
             '<button class="btn btn-sm" id="'+tid+'_cancel_btn" onclick="window[\'_cancelEdit_'+tid+'\']()" disabled style="background:#e74c3c;color:#fff;font-size:10px;">↩ 取消修改</button>' +
             '<span style="flex:1;"></span>' +
+            '<button class="btn btn-sm" id="'+tid+'_export_btn" onclick="window[\'_exportTableData_'+tid+'\']()" style="background:#27ae60;color:#fff;font-size:10px;" title="导出当前表数据（按当前页面筛选/排序）">📥 导出</button>' +
             '<button class="btn btn-sm" id="'+tid+'_del_btn" onclick="window[\'_doDelete_'+tid+'\']()" disabled style="background:#e74c3c;color:#fff;font-size:10px;">🗑 删除 (0)</button>' +
-            '<span style="font-size:10px;color:#666;">选中行后点击删除预览SQL</span></div>';
+            '<span style="font-size:10px;color:#666;">点击数据行选择；Ctrl 多选；点击字段名可选择整列</span></div>';
         h += '<div class="data-table-scroll"><table class="exp-table"><thead>';
         h += buildTh();
         h += '</thead><tbody id="'+tid+'_tbody"></tbody></table></div>';
@@ -1586,7 +2104,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
             '</div>';
         h += '</div>';
 
-        addOrUpdateTab('data_'+tn, tn, 'data', h, db, cid);
+        addOrUpdateTab(tabId, label, 'data', h, db, cid);
 
         // ★ 分页按钮已使用内联 onclick（不依赖动态绑定，DOM 重建后不丢失）
         // 这里仅初始化分页状态 + tooltip
@@ -1610,6 +2128,7 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
         // ★ 服务端排序：始终去后端查 50 条，按 order_col/order_dir 排序
         function clientSort(ci) {
             try {
+                if (guardPendingEdits('排序')) return;
                 if (sortRef.col === ci) {
                     // 同一列：升序(1) → 降序(-1) → 恢复原序(col=-1)
                     if (sortRef.dir === 1) { sortRef.dir = -1; }
@@ -1737,7 +2256,7 @@ function cancelDataSort(cancelKey, tid) {
                             h += '<div class="th-line th-line-cmt"></div>';
                             h += '</div>';
                             h += '<div class="th-icons">';
-                            h += '<span class="col-filter-icon" data-ci="'+ci+'" style="cursor:pointer;font-size:12px;opacity:0.25;color:#aaa;" onclick="event.stopPropagation();window[\'_toggleColFilter_'+tid+'\']('+ci+',this)">⏳</span>';
+                            h += '<span class="col-filter-wrap"><span class="col-filter-icon" data-ci="'+ci+'" style="cursor:pointer;font-size:12px;opacity:0.25;color:#aaa;" onclick="event.stopPropagation();window[\'_toggleColFilter_'+tid+'\']('+ci+',this)">'+(window.MQ_ICON&&window.MQ_ICON.funnel||'⏳')+'</span><span class="col-filter-badge" data-ci="'+ci+'" style="display:none;">1</span></span>';
                             h += '<span class="sort-icon" data-ci="'+ci+'" title="点击排序" style="cursor:pointer;display:inline-block;width:20px;text-align:center;font-size:11px;color:#888;" onclick="event.stopPropagation();window[\'_sortClickIcon_'+tid+'\']('+ci+')">'+sortIcon+'</span>';
                             h += '</div></th>';
                         });
@@ -1753,22 +2272,24 @@ function cancelDataSort(cancelKey, tid) {
 function addTableDDLTab(tn, db, schema, cid) {
     var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
     var sch = schema || '';
-    var tabId = 'ddl_' + tn;
     // ★ 关键：立即捕获 db 值（禁止在回调里再用 activeDatabase 兜底，防止全局变量竞态）
     var theDb = db || activeDatabase;
     var theCid = cid || activeConnId || '';
+    // ★ 唯一 tab id：连接 + 库名 + 表名（同名表不同库 → 各自独立 tab）
+    var tabId = _tblTabId('ddl', tn, theDb, theCid);
+    var label = _tblTabLabel(tn, tabId, theDb, 'ddl');
     // ★ 防御：连接信息为空时直接报错，避免卡在"加载中"
     if (!conn || !conn.host) {
-        addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 未找到连接信息，请先在左侧树中选择数据库后再试</div>', theDb, theCid);
+        addOrUpdateTab(tabId, label, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 未找到连接信息，请先在左侧树中选择数据库后再试</div>', theDb, theCid);
         return;
     }
-    addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#999;">⏳ 加载表设计...</div>', theDb, theCid);
+    addOrUpdateTab(tabId, label, 'ddl', '<div style="padding:20px;color:#999;">⏳ 加载表设计...</div>', theDb, theCid);
 
     try {
         eel.table_get_design_info(conn, theDb, tn, sch)(function(r) {
             try {
                 if (!r || !r.ok) {
-                    addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ ' + (r ? escapeHtml(r.msg) : '加载失败，请检查连接') + '</div>', theDb, theCid);
+                    addOrUpdateTab(tabId, label, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ ' + (r ? escapeHtml(r.msg) : '加载失败，请检查连接') + '</div>', theDb, theCid);
                     return;
                 }
                 var design = r.design || {columns:[], indexes:[], foreign_keys:[], table_options:{}};
@@ -1781,12 +2302,12 @@ function addTableDDLTab(tn, db, schema, cid) {
                 }
                 buildDesignerUI(tabId, tn, design);
             } catch(e) {
-                addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 渲染失败: ' + escapeHtml(String(e)) + '</div>', theDb, theCid);
+                addOrUpdateTab(tabId, label, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 渲染失败: ' + escapeHtml(String(e)) + '</div>', theDb, theCid);
             }
         });
     } catch(e) {
         // ★ eel 调用本身抛异常（如函数未注册等）
-        addOrUpdateTab(tabId, tn, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>', theDb, theCid);
+        addOrUpdateTab(tabId, label, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ 调用失败: ' + escapeHtml(String(e)) + '</div>', theDb, theCid);
     }
 }
 
@@ -1907,7 +2428,8 @@ function buildDesignerUI(tabId, tn, design) {
     var _ds = window._tableDesigns && window._tableDesigns[tabId];
     var _ddb = _ds ? _ds.db || '' : '';
     var _dcid = _ds ? _ds.cid || '' : '';
-    addOrUpdateTab(tabId, tn, 'ddl', html, _ddb, _dcid);
+    var _label2 = _tblTabLabel(tn, tabId, _ddb, 'ddl');
+    addOrUpdateTab(tabId, _label2, 'ddl', html, _ddb, _dcid);
 }
 
 function buildFieldRow(i, c, dataTypes) {

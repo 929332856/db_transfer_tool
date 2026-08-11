@@ -219,7 +219,12 @@ function _acApply(ta, tabKey) {
     _acHide();
     // ★ 清除防抖定时器，避免重新触发下拉框
     if (_acState._triggerTimer) { clearTimeout(_acState._triggerTimer); _acState._triggerTimer = null; }
-    // ★ 不再 dispatch input 事件，否则会重新触发下拉框
+    // ★ 这里是代码修改 textarea.value，不会自动触发 input；手动同步编辑器状态和行号。
+    if (typeof _queryTextareaChanged === 'function') _queryTextareaChanged(ta.id.replace(/^sq_/, ''), ta);
+    if (typeof _syncLineGutter === 'function') _syncLineGutter(ta.id.replace(/^sq_/, ''), ta);
+    if (typeof _applySqlHighlightDebounced === 'function') {
+        _applySqlHighlightDebounced(ta.id.replace(/^sq_/, ''), ta);
+    }
 }
 
 function _acHide() {

@@ -13,6 +13,32 @@ function appendLog(msg) {
     logBox.scrollTop = logBox.scrollHeight;
 }
 
+/** 复制全部传输日志（CV 报错内容） */
+function copySyncLog() {
+    var text = logBox ? logBox.innerText || logBox.textContent || '' : '';
+    if (!text) { showWarnDialog('提示', '日志为空'); return; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+            appendLog('📋 已复制日志到剪贴板');
+        }, function() {
+            _fallbackCopy(text);
+        });
+    } else {
+        _fallbackCopy(text);
+    }
+}
+
+function _fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); appendLog('📋 已复制日志到剪贴板'); }
+    catch (e) { showWarnDialog('提示', '复制失败，请手动选中日志后 Ctrl+C'); }
+    document.body.removeChild(ta);
+}
+
 // ========== 弹窗 ==========
 function showModal(icon, title, msg, iconColor, btns) {
     $('modal_icon').textContent = icon;
@@ -35,7 +61,11 @@ function showModal(icon, title, msg, iconColor, btns) {
     $('modal_btns').innerHTML = btns;
     $('modal_overlay').classList.add('show');
 }
-function hideModal() { $('modal_overlay').classList.remove('show'); }
+function hideModal() {
+    $('modal_overlay').classList.remove('show');
+    var box = $('modal_box');
+    if (box) box.classList.remove('wide-modal', 'tall-modal');
+}
 
 function showOkDialog(title, msg, icon, iconColor, callback) {
     icon = icon || '✅';
@@ -48,8 +78,32 @@ function showOkDialog(title, msg, icon, iconColor, callback) {
     }, 10);
 }
 function showErrorDialog(title, msg, callback) {
-    showOkDialog(title, msg, '❌', '#e74c3c', callback);
+    window._lastErrorDialogText = String(msg == null ? '' : msg);
+    showModal('❌', title, window._lastErrorDialogText, '#e74c3c',
+        '<button class="btn btn-blue" id="modal_copy_error_btn">📋 复制错误</button>' +
+        '<button class="btn btn-gray" id="modal_ok_btn">确定</button>');
+    setTimeout(function(){
+        var copyBtn = $('modal_copy_error_btn');
+        if (copyBtn) copyBtn.onclick = function(){
+            var text = window._lastErrorDialogText || '';
+            if (typeof copyToClipboard === 'function') {
+                copyToClipboard(text);
+            } else {
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed'; ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.focus(); ta.select();
+                try { document.execCommand('copy'); } catch (e) {}
+                document.body.removeChild(ta);
+            }
+            copyBtn.textContent = '✅ 已复制';
+        };
+        var okBtn = $('modal_ok_btn');
+        if (okBtn) okBtn.onclick = function(){ hideModal(); if (callback) callback(); };
+    }, 10);
 }
+
 function showWarnDialog(title, msg) {
     showOkDialog(title, msg, '💡', '#f39c12');
 }
@@ -69,7 +123,12 @@ function collectForm(prefix) {
         dst_pwd:  $(prefix+'dst_pwd').value.trim(),
         dst_db:   $(prefix+'dst_db').value.trim(),
         table_name: $('table_name').value.trim(),
-        batch_size: parseInt($('sync_batch_size').value) || 0
+        batch_size: parseInt($('sync_batch_size').value) || 0,
+        // ★ 多表并行传输开关（勾选后多张表同时传，每表独立连接）
+        parallel: !!(document.getElementById('sync_parallel') && document.getElementById('sync_parallel').checked),
+        // ★ 从选择框的 dataset 中读取 db_type（用于测试连接）
+        src_db_type: ($(prefix + 'src_conn_sel') || {}).dataset.dbType || 'mysql',
+        dst_db_type: ($(prefix + 'dst_conn_sel') || {}).dataset.dbType || 'mysql'
     };
 }
 
@@ -81,11 +140,20 @@ function fillForm(p, prefix) {
     $(prefix+'src_user').value = p.src_user || '';
     $(prefix+'src_pwd').value  = p.src_pwd  || '';
     $(prefix+'src_db').value   = p.src_db   || '';
+    // ★ 恢复 db_type
+    var srcSel = $(prefix + 'src_conn_sel');
+    if (srcSel) srcSel.dataset.dbType = p.src_db_type || 'mysql';
     $(prefix+'dst_host').value = p.dst_host || '';
     $(prefix+'dst_port').value = p.dst_port || '3306';
     $(prefix+'dst_user').value = p.dst_user || '';
     $(prefix+'dst_pwd').value  = p.dst_pwd  || '';
     $(prefix+'dst_db').value   = p.dst_db   || '';
+    // ★ 恢复 db_type
+    var dstSel = $(prefix + 'dst_conn_sel');
+    if (dstSel) dstSel.dataset.dbType = p.dst_db_type || 'mysql';
+    // ★ 恢复并行传输开关状态
+    var pe = document.getElementById(prefix + 'parallel');
+    if (pe) pe.checked = !!p.parallel;
 }
 
 function clearSide(side, prefix) {
@@ -266,7 +334,7 @@ function testConnection(side, prefix) {
     const label = side === 'src' ? '源库' : '目标库';
     const statusEl = $(prefix + 'test_' + side + '_status');
 
-    if (side === 'src' && (!data.src_host || !data.src_user || !data.src_db)) {
+    if (side === 'src' && (!data.src_host || !data.src_user)) {
         if (!data.src_host) setTestStatus(statusEl, '⚠️ 请填写源库 IP/主机', '#f39c12');
         else if (!data.src_user) setTestStatus(statusEl, '⚠️ 请填写源库用户名', '#f39c12');
         else setTestStatus(statusEl, '⚠️ 请填写源库数据库名', '#f39c12');
@@ -332,10 +400,73 @@ function startTransfer() {
             function () { doStartTransfer(data); });
         return;
     }
-    doStartTransfer(data);
+    // ★ 填写了表名（可能多表）：先检查目标库哪些表已存在，提示用户选择处理方式
+    var tbls = data.table_name.split(',').map(function (t) { return t.trim(); }).filter(function (t) { return t; });
+    if (!tbls.length) { doStartTransfer(data); return; }
+    _checkTargetTablesAndConfirm(data, tbls);
 }
 
-function doStartTransfer(data) {
+function _checkTargetTablesAndConfirm(data, tbls) {
+    $('btn_start').disabled = true;
+    var checkData = { dst_host: data.dst_host, dst_port: data.dst_port, dst_user: data.dst_user, dst_pwd: data.dst_pwd, dst_db: data.dst_db, dst_db_type: data.dst_db_type, tables: tbls };
+    _eelAutoAsync(eel.check_target_tables(checkData), function (r) {
+        $('btn_start').disabled = false;
+        if (!r || !r.ok) {
+            showWarnDialog('提示', '无法连接目标库检查表存在性：' + ((r && r.msg) || '未知错误'));
+            return;
+        }
+        var existing = r.existing || [];
+        var missing = r.missing || [];
+        if (!existing.length) {
+            // 目标库没有这些表 → 正常传输
+            doStartTransfer(data);
+            return;
+        }
+        var hasMissing = missing.length > 0;
+        // ★ 三个选择：third=只同步不存在的表 / cancel=取消 / confirm=删除存在的表并同步
+        // 用全局函数让弹窗的 third 按钮执行我们的逻辑
+        window._syncThirdAction = function () {
+            if (hasMissing) {
+                doStartTransfer(data, missing);
+            } else {
+                showWarnDialog('提示', '没有需要同步的表（所有目标表都已存在）');
+            }
+        };
+        if (!hasMissing && existing.length === tbls.length) {
+            // 所有表都已存在 → 三个按钮中「只同步不存在的表」不可用，但保留提示
+            showConfirmDialog('目标表已存在',
+                '<div style="text-align:left;font-size:12px;line-height:1.8;">目标库 [<b>' + escapeHtml(data.dst_db) + '</b>] 中以下表已存在：<br><b style="color:#e74c3c;">' + existing.map(escapeHtml).join(', ') + '</b><br><br>请选择如何处理：</div>',
+                function () { _doSyncDropExisting(data); },   // confirm=删除已存在并同步全部
+                function () {},                                      // 取消
+                '删除存在的表并同步',                                // confirm 按钮文案
+                '取消',
+                '只同步不存在的表');                                  // third：只同步缺失（但无缺失）
+        } else {
+            showConfirmDialog('目标库存在部分表',
+                '<div style="text-align:left;font-size:12px;line-height:1.8;">目标库 [<b>' + escapeHtml(data.dst_db) + '</b>] 中以下表<b style="color:#e67e22;">已存在</b>：<br><b style="color:#e74c3c;">' + existing.map(escapeHtml).join(', ') + '</b><br><br>还有 ' + missing.length + ' 张表不存在。请选择：</div>',
+                function () { _doSyncDropExisting(data); },     // confirm=删除已存在并同步全部
+                function () {},                                        // 取消
+                '删除存在的表并同步',                                  // confirm 按钮文案
+                '取消',
+                '只同步不存在的表');                                    // third：只同步 missing
+        }
+        // 弹窗初始化后绑定 third 按钮执行「只同步不存在的表」
+        setTimeout(function () {
+            var third = $('modal_third_btn');
+            if (third) third.onclick = function () {
+                hideModal();
+                if (window._syncThirdAction) window._syncThirdAction();
+            };
+        }, 60);
+    });
+}
+
+function _doSyncDropExisting(data) {
+    // 删除目标已存在的表并同步全部（drop_existing=true）
+    doStartTransfer(data, null, true);
+}
+
+function doStartTransfer(data, onlyTables, dropExisting) {
     $('btn_start').disabled = true;
     $('btn_stop').disabled = false;
     _transferTargetPct = 0;
@@ -343,6 +474,9 @@ function doStartTransfer(data) {
     progressFill.style.width = '0%';
     progressText.textContent = '就绪';
     logBox.innerHTML = '';
+    // ★ 传输控制：onlyTables 指定只同步的表列表；dropExisting 控制是否删除目标已存在表
+    if (onlyTables) data.tables = onlyTables;
+    if (typeof dropExisting === 'boolean') data.drop_existing = dropExisting;
     // ★ 启动进度条平滑动画（每 100ms 追一步）
     _startTransferAnim();
     eel.start_transfer(data)(function () {
@@ -355,7 +489,8 @@ function stopTransfer() {
     _stopTransferAnim();
     resetTransferBtns();
     appendLog('⏸ 用户手动停止传输');
-    eel.stop_transfer()();
+    // 传入空回调，避免 Flask 适配层返回后因 callback 未定义产生前端异常。
+    eel.stop_transfer()(function () {});
 }
 
 function resetTransferBtns() {
@@ -868,6 +1003,7 @@ var _sqConnToken = 0;      // ★ 每次连接递增，旧连接的回调自动�
 var _sqSource = 'ps';      // 数据来源：'ps'=performance_schema聚合 / 'log'=slow_log原始日志
 var _sqSortKey = null;     // 当前排序列名
 var _sqSortDir = 'desc';   // 当前排序方向：'asc' | 'desc'
+var _sqToday = false;     // 是否只看今天
 
 /** 填充慢SQL面板的连接下拉列表（从 treeData.connections 读取） */
 function refreshSqConnSelector() {
@@ -885,7 +1021,7 @@ function refreshSqConnSelector() {
         }
         conns.sort(function(a, b) { return (a.name || '').localeCompare(b.name || ''); });
         conns.forEach(function(c) {
-            var icon = (typeof DB_ICONS !== 'undefined' && DB_ICONS[c.db_type]) ? DB_ICONS[c.db_type] : ({mysql:'🐬','ob-mysql':'🌊','postgresql':'🐘','oracle':'🔴','mssql':'🟢','redis':'📦'}[c.db_type] || '🗄');
+            var icon = (typeof DB_ICONS !== 'undefined' && DB_ICONS[c.db_type]) ? DB_ICONS[c.db_type] : ({mysql:'🐬','ob-mysql':'🌊','postgresql':'🐘','oracle':'🔴','mssql':'🟢','redis':'🗃'}[c.db_type] || '🗄');
             var label = escapeHtml(c.name) + ' (' + escapeHtml(c.host) + ':' + escapeHtml(c.port) + ')';
             html += '<option value="' + c.id + '">' + icon + ' ' + label + '</option>';
         });
@@ -920,6 +1056,9 @@ function onSqConnChange() {
     if (!cid) {
         _sqConnData = null;
         _sqConnected = false;
+        _sqToday = false; // 重置今日筛选
+        var todayBtn = $('sq_btn_today');
+        if (todayBtn) { todayBtn.textContent = '📅 今天'; todayBtn.style.background = '#555'; }
         $('sq_conn_status').textContent = '未连接';
         $('sq_conn_status').style.color = '#888';
         $('sq_status_badge').textContent = '--';
@@ -1168,19 +1307,31 @@ function slowQueryRefresh() {
     var isLog = _sqSource === 'log';
     var colspan = isLog ? '9' : '9';
 
-    // 显示加载中
+    // 加载中
     $('sq_tbody').innerHTML =
         '<tr><td colspan="' + colspan + '" class="sq-empty">⏳ 正在查询全库慢SQL数据...</td></tr>';
+
+    // ★ 只看今天：计算当天日期范围
+    var startTime = '', endTime = '';
+    if (_sqToday) {
+        var today = new Date();
+        var y = today.getFullYear();
+        var m = String(today.getMonth() + 1).padStart(2, '0');
+        var d = String(today.getDate()).padStart(2, '0');
+        var dateStr = y + '-' + m + '-' + d;
+        startTime = dateStr + ' 00:00:00';
+        endTime = dateStr + ' 23:59:59';
+    }
 
     // 根据来源选择不同接口
     if (_sqSource === 'log') {
         // 慢日志模式：从 mysql.slow_log 读取历史原始日志
-        eel.slow_query_get_log(data, '', '', 200)(function(res) {
+        eel.slow_query_get_log(data, startTime, endTime, 200)(function(res) {
             renderSlowQueryLogTable(res);
         });
     } else {
         // 聚合统计模式：从 performance_schema 读取
-        eel.slow_query_get_list(data, '', '', 200)(function(res) {
+        eel.slow_query_get_list(data, startTime, endTime, 200)(function(res) {
             renderSlowQueryTable(res);
         });
     }
@@ -1206,6 +1357,20 @@ function sqSort(key) {
     if (window._sqRows) renderSlowQueryTable({ok: true, rows: window._sqRows});
 }
 
+/** 排序：PS聚合统计 - 日期字符串 */
+function sqSortDate(key) {
+    if (_sqSortKey === key) {
+        _sqSortDir = _sqSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        _sqSortKey = key;
+        _sqSortDir = 'desc';
+    }
+    document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
+    var arrow = $('sq_sort_' + key);
+    if (arrow) arrow.textContent = _sqSortDir === 'asc' ? ' ▲' : ' ▼';
+    if (window._sqRows) renderSlowQueryTable({ok: true, rows: window._sqRows});
+}
+
 /** 排序：慢日志模式 */
 function sqSortLog(key) {
     if (_sqSortKey === key) {
@@ -1218,6 +1383,31 @@ function sqSortLog(key) {
     var arrow = $('sq_sort_' + key);
     if (arrow) arrow.textContent = _sqSortDir === 'asc' ? ' ▲' : ' ▼';
     if (window._sqRows) renderSlowQueryLogTable({ok: true, rows: window._sqRows});
+}
+
+/** 排序：慢日志 - 日期字符串 */
+function sqSortLogDate(key) {
+    if (_sqSortKey === key) {
+        _sqSortDir = _sqSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        _sqSortKey = key;
+        _sqSortDir = 'desc';
+    }
+    document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
+    var arrow = $('sq_sort_' + key);
+    if (arrow) arrow.textContent = _sqSortDir === 'asc' ? ' ▲' : ' ▼';
+    if (window._sqRows) renderSlowQueryLogTable({ok: true, rows: window._sqRows});
+}
+
+/** ★ 切换「只看今天」筛选 */
+function toggleSqToday() {
+    _sqToday = !_sqToday;
+    var btn = $('sq_btn_today');
+    if (btn) {
+        btn.textContent = _sqToday ? '📅 ✓今天' : '📅 今天';
+        btn.style.background = _sqToday ? '#5dade2' : '#555';
+    }
+    slowQueryRefresh();
 }
 
 /** 渲染慢查询排行表格（全局，不按数据库过滤） */
@@ -1233,9 +1423,35 @@ function renderSlowQueryTable(res) {
 
     var rows = (res.rows || []).slice();  // 复制一份用于排序
 
+    // ★ 只看今天：后端已按时间窗口返回真实当日数据（time_window=true）时，
+    //   数字即当天的，无需再次过滤；若后端回退到累计表（time_window=false），
+    //   则按 LAST_SEEN 日期前缀过滤行，但累计数字无法还原当天值，保留原样。
+    if (_sqToday && !res.time_window) {
+        var today = new Date();
+        var ty = today.getFullYear();
+        var tm = String(today.getMonth() + 1).padStart(2, '0');
+        var td = String(today.getDate()).padStart(2, '0');
+        var todayPrefix = ty + '-' + tm + '-' + td;
+        rows = rows.filter(function(r) {
+            var ls = r.last_seen || r.LAST_SEEN || '';
+            return typeof ls === 'string' && ls.substring(0, 10) === todayPrefix;
+        });
+    }
+
     // 前端排序
     if (_sqSortKey) {
+        var isDateSort = (_sqSortKey === 'last_seen' || _sqSortKey === 'LAST_SEEN' || _sqSortKey === 'start_time');
         rows.sort(function(a, b) {
+            if (isDateSort) {
+                // 日期字符串排序（ISO 格式天然可比较）
+                var vda = a[_sqSortKey] || '';
+                var vdb = b[_sqSortKey] || '';
+                if (_sqSortDir === 'asc') {
+                    return vda < vdb ? -1 : vda > vdb ? 1 : 0;
+                } else {
+                    return vda > vdb ? -1 : vda < vdb ? 1 : 0;
+                }
+            }
             var va = parseFloat(a[_sqSortKey]) || 0;
             var vb = parseFloat(b[_sqSortKey]) || 0;
             return _sqSortDir === 'asc' ? va - vb : vb - va;
@@ -1349,7 +1565,17 @@ function renderSlowQueryLogTable(res) {
 
     // 前端排序
     if (_sqSortKey) {
+        var isDateSortLog = (_sqSortKey === 'start_time');
         rows.sort(function(a, b) {
+            if (isDateSortLog) {
+                var vda = a[_sqSortKey] || '';
+                var vdb = b[_sqSortKey] || '';
+                if (_sqSortDir === 'asc') {
+                    return vda < vdb ? -1 : vda > vdb ? 1 : 0;
+                } else {
+                    return vda > vdb ? -1 : vda < vdb ? 1 : 0;
+                }
+            }
             var va = parseFloat(a[_sqSortKey]) || 0;
             var vb = parseFloat(b[_sqSortKey]) || 0;
             return _sqSortDir === 'asc' ? va - vb : vb - va;
@@ -1531,31 +1757,34 @@ function slowQueryLoadRunning() {
             showOkDialog('运行进程', '当前没有长时间运行的进程 ✅', '✅', '#2ecc71');
             return;
         }
-        var html = '<div style="max-height:400px;overflow-y:auto;">' +
-            '<table style="width:100%;border-collapse:collapse;font-size:11px;">' +
-            '<thead><tr style="background:#222;">' +
-            '<th style="padding:4px;text-align:left;">ID</th>' +
-            '<th style="padding:4px;text-align:left;">用户</th>' +
-            '<th style="padding:4px;text-align:left;">数据库</th>' +
-            '<th style="padding:4px;text-align:left;">状态</th>' +
-            '<th style="padding:4px;text-align:right;">耗时(s)</th>' +
-            '<th style="padding:4px;text-align:left;">SQL</th>' +
-            '<th style="padding:4px;text-align:center;">操作</th>' +
+        // ★ 放大弹窗，展示更多进程信息
+        var box = $('modal_box');
+        if (box) box.classList.add('wide-modal', 'tall-modal');
+        var html = '<div style="max-height:70vh;overflow-y:auto;">' +
+            '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
+            '<thead><tr style="background:#222;position:sticky;top:0;z-index:1;">' +
+            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">ID</th>' +
+            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">用户</th>' +
+            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">数据库</th>' +
+            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">状态</th>' +
+            '<th style="padding:8px 10px;text-align:right;border-bottom:1px solid #444;">耗时(s)</th>' +
+            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">SQL</th>' +
+            '<th style="padding:8px 10px;text-align:center;border-bottom:1px solid #444;">操作</th>' +
             '</tr></thead><tbody>';
-        rows.forEach(function(r) {
+        rows.forEach(function(r, i) {
             var timeVal = parseInt(r.time_ || 0);
-            html += '<tr style="border-top:1px solid #333;">' +
-                '<td style="padding:4px;color:#888;">' + (r.id || '') + '</td>' +
-                '<td style="padding:4px;">' + escapeHtml(r.user_ || '') + '</td>' +
-                '<td style="padding:4px;">' + escapeHtml(r.db || '') + '</td>' +
-                '<td style="padding:4px;color:#f39c12;">' + escapeHtml(r.state || '') + '</td>' +
-                '<td style="padding:4px;text-align:right;color:' +
+            html += '<tr style="' + (i % 2 ? 'background:#1f1f1f;' : '') + 'border-top:1px solid #2c2c2c;">' +
+                '<td style="padding:7px 10px;color:#888;">' + (r.id || '') + '</td>' +
+                '<td style="padding:7px 10px;">' + escapeHtml(r.user_ || '') + '</td>' +
+                '<td style="padding:7px 10px;">' + escapeHtml(r.db || '') + '</td>' +
+                '<td style="padding:7px 10px;color:#f39c12;">' + escapeHtml(r.state || '') + '</td>' +
+                '<td style="padding:7px 10px;text-align:right;font-weight:bold;color:' +
                     (timeVal >= 10 ? '#e74c3c' : '#f39c12') + '">' + timeVal + '</td>' +
-                '<td style="padding:4px;max-width:350px;overflow:hidden;text-overflow:ellipsis;' +
-                    'font-family:Consolas,monospace;font-size:10px;color:#ccc;"' +
+                '<td style="padding:7px 10px;max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
+                    'font-family:Consolas,monospace;font-size:11px;color:#ccc;"' +
                 ' title="' + escapeAttr(r.info || '') + '">' +
-                escapeHtml((r.info || '').substring(0, 100)) + '</td>' +
-                '<td style="padding:4px;text-align:center;"><span class="sq-btn-kill"' +
+                escapeHtml((r.info || '').substring(0, 160)) + '</td>' +
+                '<td style="padding:7px 10px;text-align:center;"><span class="sq-btn-kill"' +
                 ' onclick="slowQueryKill(' + (r.id || '') + ')">终止</span></td>' +
                 '</tr>';
         });
@@ -1613,7 +1842,7 @@ function switchSqSubtab(name) {
     if (sqTab) sqTab.classList.toggle('active', name === 'sq');
     if (dashTab) dashTab.classList.toggle('active', name === 'dash');
     if (replTab) replTab.classList.toggle('active', name === 'repl');
-    var sqOnlyEls = ['sq_btn_enable', 'sq_source_sel', 'sq_threshold_wrap', 'sq_btn_running'];
+    var sqOnlyEls = ['sq_btn_enable', 'sq_source_sel', 'sq_threshold_wrap', 'sq_btn_running', 'sq_btn_today'];
     sqOnlyEls.forEach(function(id){
         var el = $(id); if (el) el.style.display = (name === 'sq' ? '' : 'none');
     });
@@ -1705,17 +1934,49 @@ function replImportFromTree() {
         if (c.db_type === 'mysql' || c.db_type === 'ob-mysql') conns.push({cid:cid, name:c.name||c.host||'', host:c.host||'', port:c.port||'3306', user:c.user||'', pwd:c.pwd||''});
     }
     if (conns.length === 0) { showWarnDialog('提示', '没有 MySQL 类型的连接'); return; }
-    var h = '<div style="max-height:300px;overflow-y:auto;">';
-    conns.forEach(function(c){
-        h += '<div class="repl-import-item" onclick="replImportFromTreeSelect(\''+c.cid+'\')">' +
-            '<div><div style="font-size:12px;">🖥 '+escapeHtml(c.name)+'</div><div style="font-size:10px;color:#888;">'+escapeHtml(c.host)+':'+c.port+'</div></div>' +
-            '<span style="font-size:10px;color:#5dade2;">选择 →</span></div>';
-    });
-    h += '</div>';
+    window._replImportList = conns;
+    window._replImportKeyword = '';
+    var h = '<div class="repl-import-search-wrap">' +
+        '<input id="repl_import_search" class="repl-import-search" type="search" placeholder="搜索连接名称、主机、端口或用户名" oninput="replFilterImportList(this.value)" autocomplete="off">' +
+        '<span class="repl-import-search-count" id="repl_import_search_count"></span>' +
+        '</div><div id="repl_import_list" class="repl-import-list"></div>';
     hideModal();
     showModal('📥', '从我的连接导入', h, '#5dade2',
         '<button class="btn btn-gray btn-sm" onclick="hideModal();replAddConn()">返回</button>');
-    window._replImportList = conns;
+    replRenderImportList();
+    setTimeout(function() {
+        var search = $('repl_import_search');
+        if (search) search.focus();
+    }, 0);
+}
+function replFilterImportList(keyword) {
+    window._replImportKeyword = keyword || '';
+    replRenderImportList();
+}
+function replRenderImportList() {
+    var list = $('repl_import_list');
+    if (!list) return;
+    var keyword = String(window._replImportKeyword || '').trim().toLowerCase();
+    var all = window._replImportList || [];
+    var filtered = all.filter(function(c) {
+        if (!keyword) return true;
+        return [c.name, c.host, c.port, c.user].some(function(value) {
+            return String(value || '').toLowerCase().indexOf(keyword) !== -1;
+        });
+    });
+    var count = $('repl_import_search_count');
+    if (count) count.textContent = filtered.length + '/' + all.length;
+    if (filtered.length === 0) {
+        list.innerHTML = '<div class="repl-empty repl-import-empty">未找到匹配的连接</div>';
+        return;
+    }
+    var h = '';
+    filtered.forEach(function(c){
+        h += '<div class="repl-import-item" onclick="replImportFromTreeSelect(\''+c.cid+'\')">' +
+            '<div><div style="font-size:12px;">🖥 '+escapeHtml(c.name)+'</div><div style="font-size:10px;color:#888;">'+escapeHtml(c.host)+':'+escapeHtml(c.port)+'</div></div>' +
+            '<span style="font-size:10px;color:#5dade2;">选择 →</span></div>';
+    });
+    list.innerHTML = h;
 }
 function replImportFromTreeSelect(cid) {
     var item = (window._replImportList||[]).find(function(c){return c.cid===cid;});
@@ -2702,6 +2963,7 @@ function onDgLocalFileSelected(e) {
 
 // ========== 选项 / 设置弹窗 ==========
 var _settingsData = { theme: 'dark' };
+var _pendingTheme = 'dark';
 
 // ★ 启动时同步 localStorage 主题到 settings.json（确保下次启动背景色正确）
 (function() {
@@ -2722,10 +2984,12 @@ function openSettings() {
     if (typeof eel !== 'undefined' && eel.settings_get) {
         eel.settings_get()(function(data) {
             if (data) _settingsData = data;
+            _pendingTheme = _settingsData.theme || 'dark';
             _renderSettings();
             $('settings_overlay').classList.add('show');
         });
     } else {
+        _pendingTheme = _settingsData.theme || 'dark';
         _renderSettings();
         $('settings_overlay').classList.add('show');
     }
@@ -2733,6 +2997,7 @@ function openSettings() {
 
 /** 关闭设置弹窗 */
 function closeSettings() {
+    _pendingTheme = _settingsData.theme || 'dark';
     $('settings_overlay').classList.remove('show');
 }
 
@@ -2773,7 +3038,7 @@ function _renderSettingsContent(tab) {
 
 /** 常规设置页 */
 function _renderGeneralTab() {
-    var isDark = _settingsData.theme === 'dark';
+    var isDark = _pendingTheme === 'dark';
     var html = '<div class="settings-section">';
     html += '<h4>📋 常规</h4>';
 
@@ -2818,6 +3083,9 @@ function _renderShortcutsTab() {
                 {key:'Escape',        desc:'关闭编辑器内查找栏'},
                 {key:'Ctrl + Z',      desc:'撤销（支持 Ctrl+D 等操作的撤回）'},
                 {key:'Ctrl + Y',      desc:'重做'},
+                {key:'↑ / ↓',         desc:'自动补全列表中选择上一项/下一项'},
+                {key:'Enter',         desc:'确认自动补全选项'},
+                {key:'Escape',        desc:'关闭自动补全列表'},
             ]
         },
         {
@@ -2832,6 +3100,8 @@ function _renderShortcutsTab() {
             title: '连接树 / 全局',
             items: [
                 {key:'F2',            desc:'重命名当前选中的表/连接/文件夹'},
+                {key:'Ctrl + C',      desc:'复制选中的表名（对象窗口/连接树）'},
+                {key:'Ctrl + V',      desc:'粘贴表名：同库创建备份表，跨库打开导入'},
                 {key:'双击连接',       desc:'展开/选中数据库连接'},
                 {key:'双击数据库',       desc:'展开数据库分类（表/视图/存储过程/函数/查询）'},
                 {key:'右键菜单',        desc:'更多操作（编辑/删除/刷新/新建查询等）'},
@@ -2843,7 +3113,12 @@ function _renderShortcutsTab() {
             items: [
                 {key:'双击单元格',       desc:'复制单元格内容到剪贴板'},
                 {key:'右键单元格',       desc:'查看完整内容（长文本截断时）'},
+                {key:'Ctrl + C',         desc:'复制选中的单元格/字段列内容'},
+                {key:'Ctrl + V',         desc:'粘贴内容到选中的单元格/字段列'},
                 {key:'Ctrl + 点击行',    desc:'多选行（切换选中状态）'},
+                {key:'Shift + 点击行',   desc:'选择连续行范围'},
+                {key:'点击字段名',       desc:'选择整列'},
+                {key:'Ctrl/Shift + 点击字段名', desc:'追加选择/范围选择字段列'},
             ]
         },
         {
@@ -2882,30 +3157,33 @@ function _renderShortcutsTab() {
 
 /** 选择主题（即时生效 + 同步 localStorage） */
 function _selectTheme(theme) {
-    _settingsData.theme = theme;
-    _applyTheme();
+    // 只更新弹窗中的待保存选项，点击“确定”后才真正应用主题。
+    _pendingTheme = theme;
     $('settings_content').innerHTML = _renderGeneralTab();
 }
 
 /** 保存设置 */
 function _saveSettings() {
+    var dataToSave = Object.assign({}, _settingsData, { theme: _pendingTheme });
     if (typeof eel !== 'undefined' && eel.settings_save) {
-        eel.settings_save(_settingsData)(function(result) {
+        eel.settings_save(dataToSave)(function(result) {
             if (result && result.ok) {
+                _settingsData = dataToSave;
+                _applyTheme(false);
                 closeSettings();
-                showOkDialog('设置已保存', '设置已保存。');
             } else {
                 showErrorDialog('保存失败', result ? result.msg : '未知错误');
             }
         });
     } else {
+        _settingsData = dataToSave;
+        _applyTheme(false);
         closeSettings();
-        showOkDialog('设置已应用', '设置已应用。');
     }
 }
 
 /** 应用当前主题（即时切换 + 同步 localStorage 防闪烁 + 同步 settings.json 供启动读取） */
-function _applyTheme() {
+function _applyTheme(persist) {
     var htmlEl = document.documentElement;
     if (_settingsData.theme === 'light') {
         htmlEl.classList.add('light-theme');
@@ -2915,7 +3193,7 @@ function _applyTheme() {
         localStorage.setItem('mqdb_theme', 'dark');
     }
     // ★ 同步到 settings.json，供 PyWebView 启动时读取背景色
-    if (typeof eel !== 'undefined' && eel.settings_save) {
+    if (persist !== false && typeof eel !== 'undefined' && eel.settings_save) {
         eel.settings_save(_settingsData)(function(){});
     }
 }
@@ -2930,7 +3208,7 @@ function _renderFilesTab() {
     var files = [
         { id: 'tree_file', name: 'navicat_tree.json', desc: '连接树数据（文件夹、连接、保存的查询）', loading: true },
         { id: 'profiles_file', name: 'db_profiles.json', desc: '数据库同步的配置方案', loading: true },
-        { id: 'log_file', name: 'db_operation.log', desc: '数据库操作日志', loading: true },
+        { id: 'log_file', name: '当天数据库操作日志', desc: '按日期保存的数据库操作日志', loading: true },
         { id: 'settings_file', name: 'settings.json', desc: 'MQDB 用户设置（主题等）', loading: true }
     ];
 
@@ -2994,7 +3272,7 @@ function refreshSyncConnSelectors() {
     // 构建 option 列表
     var defaultOpt = '<option value="">— 从已有连接中选择 —</option>';
     var html = '';
-    var dbTypeIcons = { 'mysql': '🐬', 'ob-mysql': '🌊', 'postgresql': '🐘', 'oracle': '🔴', 'mssql': '🟢', 'redis': '📦' };
+    var dbTypeIcons = { 'mysql': '🐬', 'ob-mysql': '🌊', 'postgresql': '🐘', 'oracle': '🔴', 'mssql': '🟢', 'redis': '🗃' };
     conns.forEach(function(c) {
         var icon = dbTypeIcons[c.db_type] || '🗄';
         var label = c.name + ' (' + c.host + ':' + (c.port || '3306') + ')';
@@ -3031,5 +3309,142 @@ function onSyncConnSelect(side) {
     $('sync_' + side + '_pwd').value  = c.pwd  || '';
     $('sync_' + side + '_db').value   = c.db   || '';
 
+    // ★ 保存 db_type 用于测试连接
+    if (sel) sel.dataset.dbType = c.db_type || 'mysql';
+
     appendLog('📌 ' + (side === 'src' ? '源库' : '目标库') + '已从连接"' + c.name + '"载入配置');
+}
+
+// ========== 数据库同步 - 源库选表（多选） ==========
+// 缓存：源库配置签名 + 表列表 + 已选表名（切换 tab 后不清空）
+var _syncTableCache = {
+    srcKey: null,
+    tables: [],
+    picked: new Set()
+};
+
+function _syncSrcKey() {
+    var h = ($('sync_src_host') || {}).value || '';
+    var p = ($('sync_src_port') || {}).value || '';
+    var u = ($('sync_src_user') || {}).value || '';
+    var d = ($('sync_src_db')   || {}).value || '';
+    return [h, p, u, d].join('|');
+}
+
+function openSyncTablePicker() {
+    var dbField = $('sync_src_db');
+    var dbName = dbField ? (dbField.value || '').trim() : '';
+    if (!dbName) {
+        showWarnDialog('提示', '请先选择数据库');
+        return;
+    }
+    var srcKey = _syncSrcKey();
+
+    var html = '<div class="sync-pick-content">' +
+        '<div class="sync-pick-tip">💡 多选后会以英文逗号自动填充到表名输入框；切换 Tab 不会丢失选择</div>' +
+        '<div class="sync-pick-toolbar">' +
+            '<input type="text" id="sync_pick_search" placeholder="🔍 搜索表名..." oninput="filterSyncPickList()">' +
+            '<span class="sp-count" id="sync_pick_count">--</span>' +
+            '<button class="btn btn-sm" onclick="syncPickAll(true)">全选</button>' +
+            '<button class="btn btn-sm" onclick="syncPickAll(false)">清空</button>' +
+        '</div>' +
+        '<div class="sync-pick-list" id="sync_pick_list"><div class="sync-pick-progress">加载中...</div></div>' +
+        '</div>';
+
+    showModal('📋 选择表', '从源库 [' + dbName + '] 拉取表', html, '#5dade2',
+        '<button class="btn btn-gray" onclick="hideModal()">取消</button>' +
+        '<button class="btn btn-green" onclick="applySyncPick()">确定</button>');
+
+    // 源库配置没变且已有缓存 → 直接复用（不重新拉取）
+    if (_syncTableCache.srcKey === srcKey && _syncTableCache.tables.length > 0) {
+        _renderSyncPickList(_syncTableCache.tables, _syncTableCache.picked);
+        return;
+    }
+
+    _syncTableCache.srcKey = srcKey;
+    _syncTableCache.tables = [];
+    _syncTableCache.picked = new Set();
+
+    var connData = {
+        host: ($('sync_src_host') || {}).value || '',
+        port: ($('sync_src_port') || {}).value || '3306',
+        user: ($('sync_src_user') || {}).value || '',
+        pwd:  ($('sync_src_pwd')  || {}).value || '',
+        db:   dbName,
+        db_type: 'mysql'
+    };
+
+    _eelAutoAsync(eel.db_explore_get_tables(connData, dbName, ''), function(r) {
+        var list = $('sync_pick_list');
+        if (!list) return;  // 弹窗已关闭
+        if (r && r.ok && r.tables) {
+            _syncTableCache.tables = r.tables.map(function(t) { return t.name; });
+            _renderSyncPickList(_syncTableCache.tables, _syncTableCache.picked);
+        } else {
+            list.innerHTML = '<div class="sync-pick-empty error">❌ ' + escapeHtml((r && r.msg) || '连接源库失败，请检查源库配置') + '</div>';
+            var cnt = $('sync_pick_count'); if (cnt) cnt.textContent = '0 张';
+        }
+    });
+}
+
+function _renderSyncPickList(tables, pickedSet) {
+    var list = $('sync_pick_list');
+    if (!list) return;
+    if (!tables || !tables.length) {
+        list.innerHTML = '<div class="sync-pick-empty">该数据库下没有表</div>';
+        var cnt0 = $('sync_pick_count'); if (cnt0) cnt0.textContent = '0 张';
+        return;
+    }
+    var html = '';
+    tables.forEach(function(t) {
+        var checked = pickedSet && pickedSet.has(t) ? 'checked' : '';
+        html += '<label class="sync-pick-item" data-name="' + escapeAttr(t) + '">' +
+                '<input type="checkbox" value="' + escapeAttr(t) + '" ' + checked + ' onchange="onSyncPickChange(this)">' +
+                '<span>' + escapeHtml(t) + '</span>' +
+                '</label>';
+    });
+    list.innerHTML = html;
+    _updateSyncPickCount();
+}
+
+function onSyncPickChange(cb) {
+    var name = cb.value;
+    if (cb.checked) _syncTableCache.picked.add(name);
+    else _syncTableCache.picked.delete(name);
+    _updateSyncPickCount();
+}
+
+function filterSyncPickList() {
+    var kw = (($('sync_pick_search') || {}).value || '').toLowerCase();
+    var items = document.querySelectorAll('#sync_pick_list .sync-pick-item');
+    var shown = 0;
+    items.forEach(function(it) {
+        var n = (it.getAttribute('data-name') || '').toLowerCase();
+        var hit = !kw || n.indexOf(kw) !== -1;
+        it.style.display = hit ? '' : 'none';
+        if (hit) shown++;
+    });
+    var cnt = $('sync_pick_count');
+    if (cnt) cnt.textContent = _syncTableCache.picked.size + ' 已选 / ' + shown + ' 张';
+}
+
+function syncPickAll(sel) {
+    document.querySelectorAll('#sync_pick_list .sync-pick-item input[type=checkbox]').forEach(function(cb) {
+        cb.checked = sel;
+        if (sel) _syncTableCache.picked.add(cb.value);
+        else _syncTableCache.picked.delete(cb.value);
+    });
+    _updateSyncPickCount();
+}
+
+function _updateSyncPickCount() {
+    var cnt = $('sync_pick_count');
+    if (cnt) cnt.textContent = _syncTableCache.picked.size + ' 已选 / ' + _syncTableCache.tables.length + ' 张';
+}
+
+function applySyncPick() {
+    var list = _syncTableCache.tables.filter(function(t) { return _syncTableCache.picked.has(t); });
+    var input = $('table_name');
+    if (input) input.value = list.join(',');
+    hideModal();
 }

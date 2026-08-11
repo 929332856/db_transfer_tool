@@ -51,14 +51,68 @@ var _activeObjSchema = '';  // 当前对象面板显示的 schema
 var _redisKeysCache = {};  // Redis keys 缓存 {dbId: {keys, total, cid, dbIdx}}
 var _redisPanelCtx = null; // 当前右侧面板是否在展示 Redis keys {cid, dbIdx, dbId}
 
-// 数据库类型图标（与查询窗口工具栏保持一致，使用 emoji）
+// ★ 数据库品牌 logo <img> 标签生成器（使用 database/ 目录下的 .svg 文件）
+var _DB_LOGO_MAP = {
+    'mysql': 'mysql.svg',
+    'ob-mysql': 'oceanbase.svg',
+    'oceanbase': 'oceanbase.svg',
+    'oracle': 'oracle.svg',
+    'postgresql': 'postgres.svg',
+    'mssql': 'sqlserver.svg',
+    'redis': 'redis.svg',
+    'mariadb': 'mariadb.svg',
+    'mongodb': 'mongodb.svg',
+    'tidb': 'tidb.svg',
+    'dm': 'dm.svg',
+    'sqlite': 'sqlite.svg',
+    'elasticsearch': 'elasticsearch.svg',
+    'clickhouse': 'clickhouse.svg',
+    'duckdb': 'duckdb.svg',
+    'kafka': 'kafka.svg',
+    'hbase': 'hbase.svg',
+    'hive': 'hive.svg',
+    'cassandra': 'cassandra.svg',
+    'neo4j': 'neo4j.svg',
+    'cockroach': 'cockroach.svg',
+    'couchbase': 'couchbase.svg',
+    'firebird': 'firebird.svg',
+    'informix': 'informix.svg',
+    'hsqldb': 'hsqldb.svg',
+    'snowflake': 'snowflake.svg',
+    'singlestore': 'singlestore.svg',
+    'vertica': 'vertica.svg',
+    'yugabyte': 'yugabyte.svg',
+    'rocksdb': 'rocksdb.svg',
+    'questdb': 'questdb.svg',
+    'timescaledb': 'timescaledb.svg',
+    'teradata': 'teradata.svg',
+    'kdb': 'kdb.svg',
+    'meilisearch': 'meilisearch.svg',
+    'opensearch': 'opensearch.svg',
+    'qdrant': 'qdrant.svg',
+    'typesense': 'typesense.svg',
+    'risingwave': 'risingwave.svg',
+    'rabbitmq': 'rabbitmq.svg',
+    's3': 's3.svg'
+};
+function _dbLogoImg(type, size) {
+    size = size || 16;
+    var file = _DB_LOGO_MAP[type];
+    if (file) {
+        return '<img src="database/' + file + '" width="' + size + '" height="' + size + '" style="vertical-align:middle;display:inline-block;flex-shrink:0" alt="">';
+    }
+    // 未知类型回退到通用数据库内联 SVG，避免引用不存在的 unknown.svg
+    return '<svg viewBox="0 0 24 24" width="' + size + '" height="' + size + '" style="vertical-align:middle;display:inline-block;flex-shrink:0"><ellipse cx="12" cy="4.5" rx="9" ry="3" fill="currentColor" opacity="0.9"/><path d="M3 4.5v15c0 1.66 4.03 3 9 3s9-1.34 9-3v-15" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.75"/><ellipse cx="12" cy="12" rx="9" ry="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.4"/><ellipse cx="12" cy="19.5" rx="9" ry="3" fill="currentColor" opacity="0.9"/></svg>';
+}
+
+// 数据库类型图标（emoji 保留用于 select/option 标签，option 不支持 html img）
 var DB_ICONS = {
     'mysql':      '🐬',
     'ob-mysql':   '🌊',
     'oracle':     '🔴',
     'postgresql': '🐘',
     'mssql':      '🟢',
-    'redis':      '📦'
+    'redis':      '🗃'
 };
 var DB_DEFAULTS = {
     'mysql':      {port:'3306', user:'root'},
@@ -69,11 +123,11 @@ var DB_DEFAULTS = {
     'redis':      {port:'6379'}
 };
 
-// 数据库图标（圆柱体形状，使用 currentColor 可通过 CSS 切换颜色）
-var DB_ICON_SVG = '<svg viewBox="0 0 24 24" width="16" height="16"><ellipse cx="12" cy="4.5" rx="9" ry="3" fill="currentColor" opacity="0.9"/><path d="M3 4.5v15c0 1.66 4.03 3 9 3s9-1.34 9-3v-15" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.75"/><ellipse cx="12" cy="12" rx="9" ry="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.4"/><ellipse cx="12" cy="19.5" rx="9" ry="3" fill="currentColor" opacity="0.9"/></svg>';
+// 数据库图标（通用圆柱体，使用 currentColor 可通过 CSS 切换颜色，用于数据库节点分组图标）
+var DB_ICON_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" style="vertical-align:middle;display:inline-block;flex-shrink:0"><ellipse cx="12" cy="4.5" rx="9" ry="3" fill="currentColor" opacity="0.9"/><path d="M3 4.5v15c0 1.66 4.03 3 9 3s9-1.34 9-3v-15" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.75"/><ellipse cx="12" cy="12" rx="9" ry="3" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.4"/><ellipse cx="12" cy="19.5" rx="9" ry="3" fill="currentColor" opacity="0.9"/></svg>';
 
 function getConnIcon(dbType) {
-    return DB_ICONS[dbType] || '🗄️';
+    return _dbLogoImg(dbType, 16);
 }
 
 // ★ 初始化代码已移至 tree_init.js，请勿在此处添加初始化逻辑

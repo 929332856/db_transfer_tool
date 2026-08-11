@@ -96,7 +96,7 @@ function showRunSqlFile(cid, db) {
 function pickAndShowSqlFile() {
     window._sqlFileTarget = 'run';
     var input = document.getElementById('hidden_import_file');
-    if (input) { input.accept = '.sql'; input.click(); }
+    if (input) { input.accept = '.sql,.csv'; input.click(); }
 }
 
 function onImportFileSelected(e) {
@@ -107,7 +107,9 @@ function onImportFileSelected(e) {
     window._sqlFileTarget = '';
 
     if (target === 'run') {
-        // 运行 SQL 文件
+        // 运行 SQL 文件（支持 .sql 与 .csv，CSV 走数据导入）
+        window._sqlFileType = (file.name || '').toLowerCase().endsWith('.csv') ? 'csv' : 'sql';
+        window._sqlFileName = file.name || 'import.sql';
         var label = document.getElementById('sql_file_label');
         if (label) { label.textContent = file.name + ' ⏳ 读取中...'; label.style.color = '#f39c12'; }
         var runBtn = document.getElementById('btn_run_sql_file');
@@ -155,6 +157,15 @@ function startRunSqlFile(cid, db) {
         document.getElementById('btn_run_sql_file').disabled = false;
         return;
     }
+    var isCsv = (window._sqlFileType === 'csv');
+    if (isCsv) {
+        var tblName = (window._sqlFileName || 'import.csv').replace(/\.csv$/i, '');
+        var okC = confirm('即将把 CSV 数据导入到数据库 [' + db + '] 的表 [' + tblName + ']。\n\n若该表已存在，会被先删除再重建（DROP TABLE IF EXISTS），表中的原数据将丢失！\n\n确认继续吗？');
+        if (!okC) {
+            document.getElementById('btn_run_sql_file').disabled = false;
+            return;
+        }
+    }
     var conn = treeData && treeData.connections ? treeData.connections[cid] : activeConnData;
 
     document.getElementById('modal_title').textContent = '⏳ 运行中...';
@@ -177,48 +188,96 @@ function startRunSqlFile(cid, db) {
             if (!msgs) return;
             for (var i = 0; i < msgs.length; i++) {
                 var m = msgs[i];
-                if (m && m[0] === 'sql_run_log') {
-                    var logArea = document.getElementById('sql_run_log_area');
-                    if (logArea) {
-                        var ts = new Date().toTimeString().slice(0, 8);
-                        logArea.innerHTML += '<div style="color:#e74c3c;"><span style="color:#666;">[' + ts + ']</span> ' + escapeHtml(m[1]) + '</div>';
-                        logArea.scrollTop = logArea.scrollHeight;
+                if (!m) continue;
+                if (isCsv) {
+                    // ===== CSV 导入的消息类型（import_*）=====
+                    if (m[0] === 'import_log') {
+                        var logCsv = document.getElementById('sql_run_log_area');
+                        if (logCsv) {
+                            var tsC = new Date().toTimeString().slice(0, 8);
+                            logCsv.innerHTML += '<div style="color:#e74c3c;"><span style="color:#666;">[' + tsC + ']</span> ' + escapeHtml(m[1]) + '</div>';
+                            logCsv.scrollTop = logCsv.scrollHeight;
+                        }
+                    } else if (m[0] === 'import_progress') {
+                        var dC = m[1] || {};
+                        var barC = document.getElementById('sql_run_bar');
+                        var pctC = dC.total ? Math.floor((dC.processed / dC.total) * 100) : 0;
+                        if (barC) barC.style.width = pctC + '%';
+                        var stC = document.getElementById('sql_run_status');
+                        if (stC) stC.textContent = '已导入 ' + (dC.processed||0) + ' / ' + (dC.total||0) + ' 行数据';
+                    } else if (m[0] === 'import_done') {
+                        clearInterval(tid);
+                        document.getElementById('modal_title').textContent = '运行 SQL 文件';
+                        document.getElementById('sql_run_bar').style.width = '100%';
+                        var logCsv2 = document.getElementById('sql_run_log_area');
+                        if (logCsv2) { logCsv2.innerHTML += '<div style="color:#2ecc71;">✅ CSV 导入完成，共导入 ' + (m[1] && m[1].processed||0) + ' 行数据</div>'; logCsv2.scrollTop = logCsv2.scrollHeight; }
+                        document.getElementById('modal_btns').innerHTML = '<button class="btn btn-green" onclick="hideModal()">完成</button>';
+                    } else if (m[0] === 'import_error') {
+                        clearInterval(tid);
+                        document.getElementById('modal_title').textContent = '运行 SQL 文件';
+                        var logCsv3 = document.getElementById('sql_run_log_area');
+                        if (logCsv3) { logCsv3.innerHTML += '<div style="color:#e74c3c;">❌ CSV 导入失败: ' + escapeHtml(m[1] && m[1].msg || m[1]) + '</div>'; logCsv3.scrollTop = logCsv3.scrollHeight; }
+                        document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
                     }
-                } else if (m && m[0] === 'sql_run_progress') {
-                    var d = m[1];
-                    var bar = document.getElementById('sql_run_bar');
-                    var pct = d.total ? Math.floor((d.processed / d.total) * 100) : 0;
-                    if (bar) bar.style.width = pct + '%';
-                    var st = document.getElementById('sql_run_status');
-                    if (st) st.textContent = '已执行 ' + (d.processed||0) + ' / ' + (d.total||0) + ' 条语句';
-                } else if (m && m[0] === 'sql_run_done') {
-                    clearInterval(tid);
-                    document.getElementById('modal_title').textContent = '运行 SQL 文件';
-                    document.getElementById('sql_run_bar').style.width = '100%';
-                    var logArea2 = document.getElementById('sql_run_log_area');
-                    if (logArea2) { logArea2.innerHTML += '<div style="color:#2ecc71;">✅ 执行完成，成功执行 ' + (m[1].processed||0) + ' 条语句</div>'; logArea2.scrollTop = logArea2.scrollHeight; }
-                    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-green" onclick="hideModal()">完成</button>';
-                } else if (m && m[0] === 'sql_run_error') {
-                    clearInterval(tid);
-                    document.getElementById('modal_title').textContent = '运行 SQL 文件';
-                    var logArea3 = document.getElementById('sql_run_log_area');
-                    if (logArea3) { logArea3.innerHTML += '<div style="color:#e74c3c;">❌ 执行失败: ' + escapeHtml(m[1].msg) + '</div>'; logArea3.scrollTop = logArea3.scrollHeight; }
-                    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
+                } else {
+                    if (m[0] === 'sql_run_log') {
+                        var logArea = document.getElementById('sql_run_log_area');
+                        if (logArea) {
+                            var ts = new Date().toTimeString().slice(0, 8);
+                            logArea.innerHTML += '<div style="color:#e74c3c;"><span style="color:#666;">[' + ts + ']</span> ' + escapeHtml(m[1]) + '</div>';
+                            logArea.scrollTop = logArea.scrollHeight;
+                        }
+                    } else if (m[0] === 'sql_run_progress') {
+                        var d = m[1];
+                        var bar = document.getElementById('sql_run_bar');
+                        var pct = d.total ? Math.floor((d.processed / d.total) * 100) : 0;
+                        if (bar) bar.style.width = pct + '%';
+                        var st = document.getElementById('sql_run_status');
+                        if (st) st.textContent = '已执行 ' + (d.processed||0) + ' / ' + (d.total||0) + ' 条语句';
+                    } else if (m[0] === 'sql_run_done') {
+                        clearInterval(tid);
+                        document.getElementById('modal_title').textContent = '运行 SQL 文件';
+                        document.getElementById('sql_run_bar').style.width = '100%';
+                        var logArea2 = document.getElementById('sql_run_log_area');
+                        if (logArea2) { logArea2.innerHTML += '<div style="color:#2ecc71;">✅ 执行完成，成功执行 ' + (m[1].processed||0) + ' 条语句</div>'; logArea2.scrollTop = logArea2.scrollHeight; }
+                        document.getElementById('modal_btns').innerHTML = '<button class="btn btn-green" onclick="hideModal()">完成</button>';
+                    } else if (m[0] === 'sql_run_error') {
+                        clearInterval(tid);
+                        document.getElementById('modal_title').textContent = '运行 SQL 文件';
+                        var logArea3 = document.getElementById('sql_run_log_area');
+                        if (logArea3) { logArea3.innerHTML += '<div style="color:#e74c3c;">❌ 执行失败: ' + escapeHtml(m[1].msg) + '</div>'; logArea3.scrollTop = logArea3.scrollHeight; }
+                        document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
+                    }
                 }
             }
         });
     }, 300);
 
-    eel.db_run_sql_file(conn, db, '', window._sqlFileContent)();
+    if (isCsv) {
+        // CSV：先保存内容到临时文件（后端用文件名做表名），再走导入向导
+        eel.save_import_file(window._sqlFileContent, window._sqlFileName)(function(path) {
+            if (!path) {
+                document.getElementById('modal_title').textContent = '运行 SQL 文件';
+                var logCsvE = document.getElementById('sql_run_log_area');
+                if (logCsvE) logCsvE.innerHTML += '<div style="color:#e74c3c;">❌ CSV 保存失败</div>';
+                document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
+                return;
+            }
+            eel.import_wizard_run(conn, db, path, 'csv', '', window._sqlFileContent)();
+        });
+    } else {
+        eel.db_run_sql_file(conn, db, '', window._sqlFileContent)();
+    }
 }
 
 function closeDatabase(cid, db, dbId) {
-    // 折叠数据库节点，图标变灰，箭头隐藏
+    // 折叠数据库节点，图标变灰，保留箭头以便再次展开
     var el = document.getElementById(dbId);
     if (el) {
         el.classList.remove('open');
         var ar = document.getElementById('ar_' + dbId);
-        if (ar) { ar.textContent = '▸'; ar.style.visibility = 'hidden'; }
+        // 关闭数据库只是收起内容，仍要保留箭头，用户可以再次点击展开。
+        if (ar) { ar.textContent = '▸'; ar.style.visibility = 'visible'; }
         var iconEl = el.previousElementSibling ? el.previousElementSibling.querySelector('.db-icon') : null;
         if (iconEl) { iconEl.classList.remove('active'); iconEl.classList.add('closed'); }
     }
@@ -293,7 +352,6 @@ function qLabelCtx(e, cid, db, schema) {
     e.preventDefault(); e.stopPropagation();
     var sch = schema || '';
     showCtxMenu(e.clientX, e.clientY, [
-        {label:'📂 打开查询文件夹',action:function(){clickQueries(cid, db, sch);}},
         {label:'📝 新建查询',action:function(){addQuery(cid, db, sch);}}
     ]);
 }
@@ -315,7 +373,7 @@ function expandCat(cat, cid, db, dbKey, pad, schema) {
             var conn = treeData.connections[cid];
             if (!conn) return;
             loadCategoryItems(conn, db, cat, function (items) {
-                var catIcons = {tables:'📊',views:'👁',mviews:'📋',indexes:'🔍',sequences:'🔢',synonyms:'🔗',functions:'𝑓',procedures:'⚙',packages:'📦',triggers:'⚡'};
+                var catIcons = {tables:(window.MQ_ICON&&window.MQ_ICON.table)||'📊',views:'👁',mviews:'📋',indexes:'🔍',sequences:'🔢',synonyms:'🔗',functions:'𝑓',procedures:'⚙',packages:'📦',triggers:'⚡'};
                 var catIcon = catIcons[cat] || '📝';
                 var h = items.map(function (it) {
                     var n = it.name || it;
@@ -370,7 +428,7 @@ function refreshCatItem(cat, cid, db, schema, dbKey, pad) {
     var sch = schema || '';
     loadCategoryItems(conn, db, cat, function(items) {
         var itemPad = (pad||0) + 20;
-        var catIcons = {tables:'📊',views:'👁',mviews:'📋',indexes:'🔍',sequences:'🔢',synonyms:'🔗',functions:'𝑓',procedures:'⚙',packages:'📦',triggers:'⚡'};
+        var catIcons = {tables:(window.MQ_ICON&&window.MQ_ICON.table)||'📊',views:'👁',mviews:'📋',indexes:'🔍',sequences:'🔢',synonyms:'🔗',functions:'𝑓',procedures:'⚙',packages:'📦',triggers:'⚡'};
         var catIcon = catIcons[cat] || '📝';
         var h = items.map(function(it) {
             var n = it.name || it;
@@ -424,14 +482,19 @@ function refreshTableFolder(cid, db, schema) {
         el = document.getElementById(rowId);
     }
     if (!el) return;
-    // 确保文件夹已展开
+    // ★ 保留当前折叠/展开状态：只在已展开时局部刷新内容，不强制展开
     var children = el.nextElementSibling;
-    if (children && children.classList.contains('tree-children')) {
-        children.classList.add('open');
-        updateCatArrow(rowId, '▾');
-    }
+    var wasOpen = children && children.classList.contains('tree-children') && children.classList.contains('open');
     var pad = _getCatRowPad(rowId);
-    refreshTableCat(cid, db, schema||'', dbKey, pad);
+    if (wasOpen) {
+        // 已展开：直接走 refreshCatItem（局部替换而不闪）
+        refreshTableCat(cid, db, schema||'', dbKey, pad);
+    } else {
+        // 未展开：清空缓存内容，下次用户点击展开时会重新加载
+        if (children && children.classList.contains('tree-children')) {
+            children.innerHTML = '';
+        }
+    }
 }
 
 function expandQueries(cid, dbKey, pad, db, schema) {
@@ -489,26 +552,89 @@ function refreshQueriesTree(cid, db, schema) {
 // ==================== 左侧树表名内联重命名 ====================
 var _treeRenameState = null;      // { div, oldName, db, schema, cid, nameSpan }
 var _treeLastSelect = null;
+var _treeRangeAnchor = null;      // Shift 范围选择的起点
+
+// 表节点会在同步/删除后通过 innerHTML 重建，使用事件委托保证重建后箭头和高亮仍然可用。
+(function() {
+    document.addEventListener('click', function(e) {
+        var target = e.target;
+        if (!target || !target.closest) return;
+
+        var arrow = target.closest('.tree-table-struct-arrow');
+        if (arrow) {
+            var row = arrow.closest('.tree-table-item');
+            if (!row) return;
+            e.preventDefault();
+            e.stopPropagation();
+            toggleTableStruct(
+                row.getAttribute('data-tname') || '',
+                row.getAttribute('data-db') || '',
+                row.getAttribute('data-sch') || '',
+                row.getAttribute('data-cid') || '',
+                parseInt(row.style.paddingLeft, 10) || 0
+            );
+            return;
+        }
+
+        var tableRow = target.closest('.tree-table-item');
+        if (tableRow) treeTableClick(e, tableRow);
+    });
+})();
+
+function _treeTableRowsInList(div) {
+    var container = div && div.closest ? div.closest('.tree-children') : null;
+    if (!container) return [div];
+    var rows = [];
+    Array.prototype.forEach.call(container.children, function(child) {
+        if (child.classList && child.classList.contains('tree-table-item')) {
+            rows.push(child);
+            return;
+        }
+        var row = child.querySelector ? child.querySelector('.tree-table-item') : null;
+        if (row) rows.push(row);
+    });
+    return rows.length ? rows : [div];
+}
 
 // 左侧树表项点击：选择 / 再次点击进入重命名
 function treeTableClick(e, div) {
     if (_treeRenameState) return;
     if (e.detail > 1) return; // 双击忽略
-    // 清除所有表项高亮
-    document.querySelectorAll('.tree-table-item').forEach(function(d) {
-        d.classList.remove('tree-table-selected');
-    });
-    div.classList.add('tree-table-selected');
+    var multi = !!(e.ctrlKey || e.metaKey);
+    var range = !!e.shiftKey;
+    var rows = _treeTableRowsInList(div);
+    var anchorIndex = rows.indexOf(_treeRangeAnchor);
+    var targetIndex = rows.indexOf(div);
+    var hasRange = range && anchorIndex >= 0 && targetIndex >= 0;
+    // Shift 点击选择同一表列表中的连续范围；Ctrl/Command 仍用于追加/取消单项。
+    if (hasRange) {
+        document.querySelectorAll('.tree-table-item').forEach(function(d) { d.classList.remove('tree-table-selected'); });
+        document.querySelectorAll('#obj_content .exp-table tbody tr.drag-table-item').forEach(function(r) { r.classList.remove('table-row-selected'); });
+        var from = Math.min(anchorIndex, targetIndex), to = Math.max(anchorIndex, targetIndex);
+        rows.slice(from, to + 1).forEach(function(row) { row.classList.add('tree-table-selected'); });
+    } else if (!multi) {
+        document.querySelectorAll('.tree-table-item').forEach(function(d) {
+            d.classList.remove('tree-table-selected');
+        });
+        document.querySelectorAll('#obj_content .exp-table tbody tr.drag-table-item').forEach(function(r) {
+            r.classList.remove('table-row-selected');
+        });
+        div.classList.add('tree-table-selected');
+    } else {
+        div.classList.toggle('tree-table-selected');
+    }
     // ★ 同时取消左侧分类行的高亮（点击表项时分类行不再高亮）
     document.querySelectorAll('.tree-highlight').forEach(function(r) { r.classList.remove('tree-highlight'); });
     activeCatId = null;
 
-    if (_treeLastSelect === div) {
+    if (!range) _treeRangeAnchor = div;
+    // 多选/范围选择时不触发重命名；普通点击同一项两次仍保留原来的重命名行为。
+    if (!multi && !range && _treeLastSelect === div) {
         // 同一项再次点击 → 进入重命名模式
         _startTreeRename(div);
         _treeLastSelect = null;
     } else {
-        _treeLastSelect = div;
+        _treeLastSelect = (multi || range) ? null : div;
     }
 }
 
@@ -803,63 +929,124 @@ function openProcTestTab(procName, db, schema, cid) {
         // ★ 上方表格只展示需要输入的参数（IN / IN/OUT），纯 OUT 在下方展示
         var inputParams = params.filter(function(p){ return p.io === 'IN' || p.io === 'IN/OUT' || p.io === 'INOUT'; });
         var rowsHtml = inputParams.map(function(p, i){
-            var inferred = _inferProcType(p.type || '');
+            var definedType = p.type || '未定义';
             var tip = (p.io === 'IN/OUT' || p.io === 'INOUT') ? ' title="IN/OUT 参数，输出值也会在下方展示"' : '';
             return '<tr data-name="'+escapeAttr(p.name)+'" data-io="'+escapeAttr(p.io||'IN')+'">' +
-                '<td style="padding:4px 6px;text-align:center;border:1px solid #333;width:32px;"><input type="checkbox" checked class="proc-test-check"></td>' +
-                '<td style="padding:4px 8px;border:1px solid #333;">' + escapeHtml(p.name) + '</td>' +
-                '<td style="padding:0;border:1px solid #333;width:130px;">' + _procTestTypeDropdown(inferred) + '</td>' +
-                '<td style="padding:0;border:1px solid #333;"><input class="proc-test-input" data-orig-type="'+escapeAttr(inferred)+'"' + tip + '></td>' +
+                '<td class="proc-test-enabled"><input type="checkbox" checked class="proc-test-check"></td>' +
+                '<td class="proc-test-param-name">' + escapeHtml(p.name) + '</td>' +
+                '<td class="proc-test-type-cell"><span class="proc-test-type-readonly" title="存储过程定义类型">' + escapeHtml(definedType) + '</span></td>' +
+                '<td class="proc-test-value-cell"><input class="proc-test-input" data-orig-type="'+escapeAttr(definedType)+'"' + tip + '></td>' +
                 '</tr>';
         }).join('');
         var plsqlBlock = _buildProcCallBlock(procName, params);
         var html =
-            '<div class="ddl-toolbar" style="padding:6px 10px;border-bottom:1px solid #333;display:flex;align-items:center;gap:8px;flex-shrink:0;">' +
-                '<span style="color:#5dade2;font-size:13px;">🧪 测试：' + escapeHtml(procName) + '</span>' +
-                '<button class="btn btn-sm btn-blue" style="margin-left:auto;" onclick="runProcTest(\''+escapeAttr(tabId)+'\',\''+escapeAttr(procName)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')">▶ 执行</button>' +
-            '</div>' +
-            '<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;">' +
-                // 顶部 PL/SQL 调用块（只读参考）
-                '<div style="flex:1 1 0;min-height:200px;display:flex;flex-direction:column;border-bottom:1px solid #333;">' +
-                    '<div class="proc-toolbar-label" style="padding:5px 10px;font-size:11px;flex-shrink:0;border-bottom:1px solid #2a3040;">PL/SQL 调用（参考）</div>' +
-                    '<textarea readonly class="proc-plsql-block" style="flex:1;">' + escapeHtml(plsqlBlock) + '</textarea>' +
+            '<div class="proc-test-view">' +
+                '<div class="proc-test-toolbar">' +
+                    '<div class="proc-test-title-wrap">' +
+                        '<span class="proc-test-icon">🧪</span>' +
+                        '<span class="proc-test-title">存储过程测试</span>' +
+                        '<span class="proc-test-name">' + escapeHtml(procName) + '</span>' +
+                    '</div>' +
+                    '<button class="btn btn-sm btn-blue proc-test-run-btn" onclick="runProcTest(\''+escapeAttr(tabId)+'\',\''+escapeAttr(procName)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')">▶ 执行</button>' +
                 '</div>' +
-                // 底部参数表
-                '<div style="flex:1 1 0;min-height:220px;overflow:auto;display:flex;flex-direction:column;">' +
-                    // ★ 备注：上方只展示入参（IN / IN/OUT），纯 OUT 在下方展示
-                    '<div style="padding:6px 12px;font-size:11px;color:#888;background:#1a1f2a;border-bottom:1px solid #2a3040;">' +
+                '<div class="proc-test-body">' +
+                    '<section class="proc-test-card proc-test-code-card">' +
+                        '<div class="proc-section-heading">' +
+                            '<div><span class="proc-section-title">PL/SQL 调用</span><span class="proc-section-subtitle">参考代码</span></div>' +
+                            '<span class="proc-reference-badge">只读</span>' +
+                        '</div>' +
+                        '<textarea readonly class="proc-plsql-block">' + escapeHtml(plsqlBlock) + '</textarea>' +
+                    '</section>' +
+                    '<div class="proc-test-splitter" onmousedown="startProcTestResize(event,this)" ondblclick="resetProcTestResize(this)" title="上下拖动调整区域高度，双击恢复默认比例"></div>' +
+                    '<section class="proc-test-card proc-test-params-card">' +
+                        '<div class="proc-section-heading">' +
+                            '<div><span class="proc-section-title">输入参数</span><span class="proc-section-subtitle">IN / INOUT</span></div>' +
+                            '<span class="proc-param-hint">勾选后参与执行</span>' +
+                        '</div>' +
+                        '<div class="proc-test-tip">' +
                         '<svg viewBox="0 0 16 16" width="10" height="10" style="vertical-align:middle;opacity:0.7;"><path d="M8 1l8 14H0z" fill="currentColor"/></svg> ' +
                         '下方表格仅展示输入参数（IN / IN/OUT）。纯 OUT 参数和函数返回值会自动在「出参/返回值」中显示。' +
-                    '</div>' +
-                    '<table class="proc-test-table">' +
+                        '</div>' +
+                    '<div class="proc-test-table-wrap"><table class="proc-test-table">' +
                         '<thead><tr><th>启用</th><th>变量</th><th>类型</th><th>值</th></tr></thead>' +
-                        '<tbody>' + (rowsHtml || '<tr><td colspan="4" style="padding:12px;text-align:center;color:#888;">（无入参）</td></tr>') + '</tbody>' +
-                    '</table>' +
-                    '<div style="margin-top:8px;font-weight:bold;font-size:12px;padding:4px 10px;">出参/返回值：</div>' +
-                    '<div id="'+escapeAttr(tabId)+'_results" style="margin-top:6px;padding:0 10px 10px;"><div class="proc-test-result" style="color:#888;">（点击执行后查看结果）</div></div>' +
+                        '<tbody>' + (rowsHtml || '<tr><td colspan="4" class="proc-test-empty">（无入参）</td></tr>') + '</tbody>' +
+                    '</table></div>' +
+                    '<div class="proc-output-heading">出参 / 返回值</div>' +
+                    '<div id="'+escapeAttr(tabId)+'_results" class="proc-test-results"><div class="proc-test-result proc-test-result-empty">（点击执行后查看结果）</div></div>' +
+                    '</section>' +
                 '</div>' +
             '</div>';
         addOrUpdateTab(tabId, '测试：' + procName, 'ddl', html, db, cid);
     });
 }
 
-// ★ 根据 Oracle DATA_TYPE 推断用户类型
-function _inferProcType(oracleType) {
-    var t = (oracleType || '').toUpperCase();
-    if (t.indexOf('NUMBER') >= 0 || t.indexOf('FLOAT') >= 0 || t.indexOf('BINARY') >= 0 || t.indexOf('DECIMAL') >= 0 || t.indexOf('NUMERIC') >= 0) return 'Float';
-    if (t.indexOf('INTEGER') >= 0 || t.indexOf('INT') >= 0) return 'Integer';
-    if (t.indexOf('TIMESTAMP') >= 0) return 'Timestamp';
-    if (t.indexOf('DATE') >= 0) return 'Date';
-    return 'String';
+// ★ 存储过程测试页：拖动参考代码与参数区之间的分割线调整上下高度
+var _procTestResizeState = null;
+function startProcTestResize(e, divider) {
+    if (!e || e.button !== 0 || !divider) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var body = divider.parentElement;
+    var codeCard = divider.previousElementSibling;
+    var paramsCard = divider.nextElementSibling;
+    if (!body || !codeCard || !paramsCard) return;
+
+    if (_procTestResizeState) finishProcTestResize();
+    _procTestResizeState = {
+        body: body,
+        codeCard: codeCard,
+        paramsCard: paramsCard,
+        startY: e.clientY,
+        startHeight: codeCard.getBoundingClientRect().height,
+        oldCursor: document.body.style.cursor,
+        oldUserSelect: document.body.style.userSelect
+    };
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onProcTestResizeMove);
+    document.addEventListener('mouseup', finishProcTestResize);
 }
 
-// ★ 类型下拉框
-function _procTestTypeDropdown(selected) {
-    var types = ['String', 'Float', 'Integer', 'Date', 'Timestamp'];
-    var opts = types.map(function(t) {
-        return '<option value="'+t+'"' + (t === selected ? ' selected' : '') + '>' + t + '</option>';
-    }).join('');
-    return '<select class="proc-test-type" style="width:100%;background:transparent;border:none;color:#aaa;padding:4px 6px;outline:none;cursor:pointer;">' + opts + '</select>';
+function onProcTestResizeMove(e) {
+    var state = _procTestResizeState;
+    if (!state) return;
+    var minCodeHeight = 150;
+    var minParamsHeight = 230;
+    var bodyHeight = state.body.clientHeight;
+    var splitterHeight = state.body.querySelector('.proc-test-splitter').offsetHeight;
+    var gapsAndPadding = 40; // 上下 padding + 三个子项之间的 gap
+    var maxCodeHeight = Math.max(minCodeHeight, bodyHeight - splitterHeight - gapsAndPadding - minParamsHeight);
+    var nextHeight = state.startHeight + (e.clientY - state.startY);
+    nextHeight = Math.max(minCodeHeight, Math.min(maxCodeHeight, nextHeight));
+    state.codeCard.style.flex = '0 0 ' + nextHeight + 'px';
+    state.codeCard.style.height = nextHeight + 'px';
+    state.paramsCard.style.flex = '1 1 auto';
+    state.paramsCard.style.height = 'auto';
+}
+
+function finishProcTestResize() {
+    var state = _procTestResizeState;
+    if (!state) return;
+    document.removeEventListener('mousemove', onProcTestResizeMove);
+    document.removeEventListener('mouseup', finishProcTestResize);
+    document.body.style.cursor = state.oldCursor || '';
+    document.body.style.userSelect = state.oldUserSelect || '';
+    _procTestResizeState = null;
+}
+
+function resetProcTestResize(divider) {
+    if (!divider) return;
+    if (_procTestResizeState) finishProcTestResize();
+    var codeCard = divider.previousElementSibling;
+    var paramsCard = divider.nextElementSibling;
+    if (codeCard) {
+        codeCard.style.removeProperty('flex');
+        codeCard.style.removeProperty('height');
+    }
+    if (paramsCard) {
+        paramsCard.style.removeProperty('flex');
+        paramsCard.style.removeProperty('height');
+    }
 }
 
 // ★ 构造 PL/SQL 调用块（参考展示）
@@ -891,18 +1078,18 @@ function runProcTest(tabId, procName, db, schema, cid) {
         var name = row.getAttribute('data-name');
         var io = row.getAttribute('data-io');
         var checked = row.querySelector('.proc-test-check');
-        var typeSel = row.querySelector('.proc-test-type');
+        var typeLabel = row.querySelector('.proc-test-type-readonly');
         var input = row.querySelector('.proc-test-input');
         inputs.push({
             name: name,
             io: io,
             value: input ? input.value : '',
-            data_type: typeSel ? typeSel.value : '',
+            data_type: typeLabel ? typeLabel.textContent : '',
             enabled: checked ? checked.checked : true
         });
     });
     var resultDiv = document.getElementById(tabId + '_results');
-    if (resultDiv) resultDiv.innerHTML = '<div class="proc-test-result" style="color:#888;">⏳ 执行中...</div>';
+    if (resultDiv) resultDiv.innerHTML = '<div class="proc-test-result proc-test-result-loading">⏳ 执行中...</div>';
     eel.db_explore_test_proc(conn, db, procName, inputs, sch)(function(r){
         if (!resultDiv) return;
         if (!r || !r.ok) {
@@ -910,12 +1097,12 @@ function runProcTest(tabId, procName, db, schema, cid) {
             return;
         }
         var outRows = (r.outputs || []).map(function(o){
-            return '<tr><td style="padding:4px 8px;border:1px solid #333;width:30%;">' + escapeHtml(o.name) + '</td>' +
-                '<td class="proc-test-result" style="border:1px solid #333;">' + escapeHtml(o.value === null ? 'NULL' : String(o.value)) + '</td></tr>';
+            return '<tr><td class="proc-output-name">' + escapeHtml(o.name) + '</td>' +
+                '<td class="proc-test-result">' + escapeHtml(o.value === null ? 'NULL' : String(o.value)) + '</td></tr>';
         }).join('');
         var html = '<table class="proc-test-table" style="margin-top:4px;"><thead><tr><th>参数</th><th>值</th></tr></thead><tbody>' +
-            (outRows || '<tr><td colspan="2" class="proc-test-result" style="color:#888;">（无返回）</td></tr>') + '</tbody></table>';
-        if (r.msg) html += '<div class="proc-test-result" style="margin-top:6px;color:#2ecc71;">✅ ' + escapeHtml(r.msg) + '</div>';
+            (outRows || '<tr><td colspan="2" class="proc-test-result proc-test-result-empty">（无返回）</td></tr>') + '</tbody></table>';
+        if (r.msg) html += '<div class="proc-test-result proc-test-result-success">✅ ' + escapeHtml(r.msg) + '</div>';
         resultDiv.innerHTML = html;
     });
 }
@@ -1351,21 +1538,20 @@ function showCreateTableDialog(cid, db, schema) {
 
 // ==================== 表结构展开（字段/索引/外键） ====================
 function _renderTableNode(n, itemPad, catIcon, db, sch, cid, qual) {
-    var tsId = 'ts_' + safeBtoa(cid + '_' + db + '_' + n);
+    var tsId = 'ts_' + safeBtoa(cid + '_' + db + '_' + (sch || '') + '_' + n);
     return '<div class="tree-node" data-tname="'+escapeAttr(n)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+cid+'">' +
         '<div draggable="true" class="my-conn-row drag-table-item tree-table-item" data-tname="'+escapeAttr(n)+'" data-db="'+escapeAttr(db)+'" data-sch="'+escapeAttr(sch)+'" data-cid="'+cid+'" style="padding-left:'+itemPad+'px;font-size:11px;line-height:22px;" ' +
         'ondblclick="addTableDataTab(\''+escapeAttr(n)+'\',\''+escapeAttr(qual)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ' +
-        'onclick="treeTableClick(event,this)" ' +
         'oncontextmenu="tableCtx(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ' +
         'ondragstart="onTableDragStart(event,\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\')" ' +
         'ondragend="onTableDragEnd(event)">' +
-        '<span class="arrow" id="arr_'+tsId+'" onclick="event.stopPropagation();toggleTableStruct(\''+escapeAttr(n)+'\',\''+escapeAttr(db)+'\',\''+escapeAttr(sch)+'\',\''+cid+'\','+itemPad+')">▸</span>' +
+        '<span class="arrow tree-table-struct-arrow" id="arr_'+tsId+'">▸</span>' +
         '<span class="my-conn-icon">'+catIcon+'</span><span class="tree-table-name">'+escapeHtml(n)+'</span></div>' +
         '<div class="tree-children" id="'+tsId+'"></div></div>';
 }
 
 function toggleTableStruct(tn, db, schema, cid, pad) {
-    var tsId = 'ts_' + safeBtoa(cid + '_' + db + '_' + tn);
+    var tsId = 'ts_' + safeBtoa(cid + '_' + db + '_' + (schema || '') + '_' + tn);
     var children = document.getElementById(tsId);
     var arrow = document.getElementById('arr_' + tsId);
     if (!children) return;
@@ -1396,7 +1582,7 @@ function toggleTableStruct(tn, db, schema, cid, pad) {
 
 function _renderTableSubCats(container, tn, db, schema, cid, subPad, cols, idxs, fks) {
     var sch = schema || '';
-    var bk = safeBtoa(cid+'_'+db+'_'+tn);
+    var bk = safeBtoa(cid+'_'+db+'_'+(sch || '')+'_'+tn);
     var colsId = 'cols_'+bk;
     var idxsId = 'idxs_'+bk;
     var fksId = 'fks_'+bk;
@@ -1439,7 +1625,7 @@ function toggleTableSubCat(catId, cntPad, tn, db, schema, cid, catType) {
     if (arrow) arrow.textContent = '▾';
     if (children.innerHTML.trim()) return;
     // 从上层容器获取缓存数据
-    var tsId = 'ts_' + safeBtoa(cid + '_' + db + '_' + tn);
+    var tsId = 'ts_' + safeBtoa(cid + '_' + db + '_' + (schema || '') + '_' + tn);
     var tsContainer = document.getElementById(tsId);
     var info = tsContainer ? tsContainer._tableInfo : null;
     if (!info) { children.innerHTML = '<div style="padding-left:'+cntPad+'px;color:#e74c3c;font-size:11px;">❌ 数据丢失，请重新展开</div>'; return; }
@@ -1483,14 +1669,14 @@ function toggleTableSubCat(catId, cntPad, tn, db, schema, cid, catType) {
 }
 
 function refreshTableSubCat(catType, tn, db, schema, cid, pad) {
-    var bk = safeBtoa(cid+'_'+db+'_'+tn);
+    var bk = safeBtoa(cid+'_'+db+'_'+(schema || '')+'_'+tn);
     var catId = (catType==='columns'?'cols_':catType==='indexes'?'idxs_':'fks_')+bk;
     var children = document.getElementById(catId);
     if (!children) return;
     children.classList.add('open');
     var arrow = document.getElementById('arr_'+catId);
     if (arrow) arrow.textContent = '▾';
-    var tsId = 'ts_' + safeBtoa(cid + '_' + db + '_' + tn);
+    var tsId = 'ts_' + safeBtoa(cid + '_' + db + '_' + (schema || '') + '_' + tn);
     var tsContainer = document.getElementById(tsId);
     var cntPad = tsContainer && tsContainer._tableInfo ? tsContainer._tableInfo.cntPad : pad + 26;
     children.innerHTML = '<div style="padding-left:'+cntPad+'px;color:#999;font-size:11px;">🔄 刷新中...</div>';

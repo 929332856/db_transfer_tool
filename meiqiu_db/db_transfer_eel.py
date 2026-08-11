@@ -214,6 +214,11 @@ _query_rows = []
 _query_conn_id = None       # 当前查询的数据库连接 ID（用于 kill）
 _query_src_data = None       # 当前查询的源库连接信息
 
+# 表级 DROP/TRUNCATE 操作的独立取消状态。不能复用查询状态，否则取消表操作
+# 可能误杀正在执行的查询或传输连接。
+_table_op_lock = threading.RLock()
+_table_op_state = None       # {op_id, conn_data, pid, cancel_requested}
+
 
 # ==================== JSON 序列化辅助 ====================
 def _json_safe(val):
@@ -275,6 +280,46 @@ def _rows_to_dicts(exec_result):
 
 
 # ==================== 传输引擎 ====================
+def _dst_table_exists(conn, table_name: str, database: str = '') -> bool:
+    """检查目标库（MySQL/OceanBase）某表是否已存在"""
+    try:
+        if database:
+            sql = ("SELECT COUNT(*) FROM information_schema.tables "
+                   "WHERE table_schema = :db AND table_name = :t")
+            params = {"db": database, "t": table_name}
+        else:
+            sql = ("SELECT COUNT(*) FROM information_schema.tables "
+                   "WHERE table_schema = DATABASE() AND table_name = :t")
+            params = {"t": table_name}
+        return bool(conn.execute(text(sql), params).scalar())
+    except Exception:
+        return False
+
+
+def _get_pk_columns(engine, table_name: str):
+    """获取表的单列主键或唯一索引列（用于分页拉取）；无则返回空列表"""
+    insp = None
+    try:
+        insp = inspect(engine)
+        pk = insp.get_pk_constraint(table_name)
+        cols = list(pk.get('constrained_columns') or [])
+        if len(cols) == 1:
+            return cols
+        for idx in insp.get_indexes(table_name):
+            if idx.get('unique') and idx.get('column_names'):
+                return list(idx['column_names'])
+    except Exception:
+        pass
+    finally:
+        # ★ 显式关闭 Inspector 持有的连接，避免连接滞留池外（旧版 SQLAlchemy 会缓存连接）
+        if insp is not None:
+            try:
+                insp.close()
+            except Exception:
+                pass
+    return []
+
+
 class TransferEngine:
     def __init__(self, config: dict):
         self.src_host = config["src_host"]
@@ -289,10 +334,82 @@ class TransferEngine:
         self.dst_db = config["dst_db"]
         self.table_name = config.get("table_name", "")
         self.batch_size = config.get("batch_size", 10000)
+        # ★ 传输前检查控制：drop_existing=False 时不删除目标已存在的表
+        self.drop_existing = config.get("drop_existing", True)
+        # 手动指定要同步的表名列表（用于「只同步不存在的表」场景，优先于 table_name）
+        self.manual_tables = config.get("tables", None)
+        # ★ 多表并行传输开关：多张表时每表独立连接同时传输（默认关闭）
+        self.parallel = config.get("parallel", False)
         self._stop_event = threading.Event()
+        # ★ 保存 (线程ID, SQLAlchemy连接对象)，停止时只处理仍打开的连接
+        self._src_conn_ids = []
+        self._dst_conn_ids = []
+        self._conn_ids_lock = threading.Lock()
+
+    def _record_src_conn_id(self, src_conn):
+        """记录源库连接的服务端线程 ID，供 stop() 时 KILL QUERY 立即中断"""
+        try:
+            pid = src_conn.exec_driver_sql("SELECT CONNECTION_ID()").scalar()
+            if pid:
+                with self._conn_ids_lock:
+                    self._src_conn_ids.append((int(pid), src_conn))
+        except Exception:
+            pass
+
+    def _record_dst_conn_id(self, dst_conn):
+        """记录目标库连接的服务端线程 ID，供 stop() 时 KILL CONNECTION"""
+        try:
+            pid = dst_conn.exec_driver_sql("SELECT CONNECTION_ID()").scalar()
+            if pid:
+                with self._conn_ids_lock:
+                    self._dst_conn_ids.append((int(pid), dst_conn))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _live_conn_ids(records):
+        """只返回仍由本次传输持有的打开连接，避免误杀已复用的线程 ID。"""
+        return [pid for pid, conn in records
+                if not getattr(conn, "closed", True)]
+
+    def _kill_server_sessions(self, host, port, user, pwd, db, pids, kill_connection=False):
+        """用独立连接中断本次传输留下的数据库会话。"""
+        if not pids:
+            return
+        try:
+            u = quote_plus(user)
+            p = quote_plus(pwd)
+            kurl = (f"mysql+mysqldb://{u}:{p}@{host}:{port}/{db}"
+                    "?charset=utf8mb4&read_timeout=10")
+            keng = create_engine(kurl, connect_args=_connect_args("mysql", timeout=5))
+            try:
+                with keng.connect() as kconn:
+                    command = "KILL CONNECTION" if kill_connection else "KILL QUERY"
+                    for pid in sorted(set(pids)):
+                        try:
+                            kconn.exec_driver_sql(f"{command} {int(pid)}")
+                        except Exception:
+                            pass  # 会话可能已自行结束，忽略即可
+            finally:
+                keng.dispose()
+        except Exception:
+            pass
 
     def stop(self):
         self._stop_event.set()
+        # ★ 中断源库查询 + 杀掉目标库 DROP/CREATE/INSERT 会话。
+        #    目标库使用 KILL CONNECTION，确保停止后不会留下 Waiting for table metadata lock。
+        with self._conn_ids_lock:
+            src_pids = self._live_conn_ids(self._src_conn_ids)
+            dst_pids = self._live_conn_ids(self._dst_conn_ids)
+        self._kill_server_sessions(
+            self.src_host, self.src_port, self.src_user, self.src_pwd,
+            self.src_db, src_pids, kill_connection=False
+        )
+        self._kill_server_sessions(
+            self.dst_host, self.dst_port, self.dst_user, self.dst_pwd,
+            self.dst_db, dst_pids, kill_connection=True
+        )
 
     @property
     def src_url(self) -> str:
@@ -313,15 +430,24 @@ class TransferEngine:
         return f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}?charset=utf8mb4&read_timeout=3600"
 
     def _create_dst_database(self):
-        tmp_engine = create_engine(self.dst_url_no_db, connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
-        with tmp_engine.connect() as conn:
-            conn.execute(text("COMMIT"))
-            conn.execute(text(
-                f"CREATE DATABASE IF NOT EXISTS `{self.dst_db}` "
-                f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-            ))
-        _progress_q.put(("log", f"📦 目标数据库 [{self.dst_db}] 已就绪"))
-        tmp_engine.dispose()
+        tmp_engine = None
+        try:
+            tmp_engine = create_engine(self.dst_url_no_db, connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
+            with tmp_engine.connect() as conn:
+                self._record_dst_conn_id(conn)
+                conn.execute(text("COMMIT"))
+                conn.execute(text(
+                    f"CREATE DATABASE IF NOT EXISTS `{self.dst_db}` "
+                    f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                ))
+            _progress_q.put(("log", f"📦 目标数据库 [{self.dst_db}] 已就绪"))
+        finally:
+            # ★ 无论成功/异常都必须关闭连接：否则残留连接会持有元数据锁
+            if tmp_engine is not None:
+                try:
+                    tmp_engine.dispose()
+                except Exception:
+                    pass
 
     def _sanitize_ddl(self, ddl: str) -> str:
         """清除 OceanBase 专有语法，适配 MySQL"""
@@ -347,6 +473,72 @@ class TransferEngine:
         row = result.fetchone()
         return row[1] if row else ""
 
+    def _exec_ddl_timeout(self, dst_conn, stmt, table_name, action):
+        """在当前传输线程执行 DDL。
+
+        旧实现把 SQLAlchemy Connection 跨线程提交到线程池，再从当前线程等待
+        future。MySQLdb 连接不是这样设计的，遇到元数据锁时很容易表现为整个
+        传输没有任何新日志。锁等待由目标库会话参数负责限制，连接始终留在
+        创建它的传输线程中。
+        """
+        try:
+            dst_conn.execute(stmt)
+        except Exception as exc:
+            err_text = str(exc)
+            lock_words = (
+                "lock wait timeout", "metadata lock", "table metadata lock",
+                "等待表级锁", "元数据锁"
+            )
+            if any(word.lower() in err_text.lower() for word in lock_words):
+                raise Exception(
+                    f"{action}表 [{table_name}] 失败：目标库锁等待超时。"
+                    f"{self._collect_mdl_diag()} 原始错误：{err_text}"
+                ) from exc
+            raise
+
+    def _collect_mdl_diag(self) -> str:
+        """收集目标库未结束事务诊断（用独立短连接查 innodb_trx，不被表级锁阻塞）"""
+        try:
+            u = quote_plus(self.dst_user)
+            p = quote_plus(self.dst_pwd)
+            diag_url = (f"mysql+mysqldb://{u}:{p}@{self.dst_host}:{self.dst_port}/"
+                        f"{self.dst_db}?charset=utf8mb4&read_timeout=10")
+            deng = create_engine(diag_url, connect_args=_connect_args("mysql", timeout=5))
+            try:
+                with deng.connect() as dconn:
+                    rows = dconn.execute(text(
+                        "SELECT trx_mysql_thread_id, trx_state, trx_started "
+                        "FROM information_schema.innodb_trx ORDER BY trx_started LIMIT 5"
+                    )).fetchall()
+                    if rows:
+                        info = "；".join(f"线程{r[0]}({r[1]},{r[2]})" for r in rows[:3])
+                        return (f"目标库存在 {len(rows)} 个未结束事务：{info}。"
+                                f"请 SHOW FULL PROCESSLIST 找到这些线程后 KILL")
+            finally:
+                deng.dispose()
+        except Exception:
+            pass
+        return "请检查目标库残留连接（SHOW FULL PROCESSLIST / 重启 MySQL）"
+
+    def _check_dst_trx(self, dst_engine):
+        """传输开始前检查目标库未结束事务（可能导致 DDL 被元数据锁阻塞）。"""
+        rows = []
+        try:
+            with dst_engine.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT trx_mysql_thread_id, trx_state, trx_started "
+                    "FROM information_schema.innodb_trx ORDER BY trx_started LIMIT 5"
+                )).fetchall()
+                if rows:
+                    _progress_q.put(("log", f"⚠️ 目标库存在 {len(rows)} 个未结束事务（可能阻塞建表/传输）："))
+                    for r in rows[:3]:
+                        _progress_q.put(("log",
+                                         f"   ⚠️ 线程 {r[0]} 状态={r[1]} 开始={r[2]}，"
+                                         f"可在目标库执行 KILL {r[0]}"))
+        except Exception:
+            return []
+        return rows
+
     def _create_all_tables(self, src_engine, dst_engine, tables: List[str]):
         _progress_q.put(("log", "📋 阶段1：创建所有表结构..."))
         ddls = {}
@@ -358,16 +550,34 @@ class TransferEngine:
                 if ddl:
                     ddls[table_name] = ddl
         with dst_engine.connect() as dst_conn:
+            self._record_dst_conn_id(dst_conn)
             dst_conn.execute(text("COMMIT"))
             dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+            # DDL 遇到目标库元数据锁时快速失败，避免界面长时间停在“就绪”。
+            # 两个参数分别覆盖元数据锁和 InnoDB 行锁等待。
+            try:
+                dst_conn.execute(text("SET SESSION lock_wait_timeout = 15"))
+            except Exception:
+                pass
+            try:
+                dst_conn.execute(text("SET SESSION innodb_lock_wait_timeout = 15"))
+            except Exception:
+                pass
             for table_name in tables:
                 if self._stop_event.is_set():
                     break
                 if table_name in ddls:
-                    dst_conn.execute(text(f"DROP TABLE IF EXISTS `{table_name}`"))
-                    # 清理 OceanBase 专有语法后执行
+                    _progress_q.put(("log", f"  ⏳ 正在处理表 [{table_name}] 结构..."))
+                    if self.drop_existing:
+                        # 删除目标已存在的同名表再重建
+                        self._exec_ddl_timeout(dst_conn, text(f"DROP TABLE IF EXISTS `{table_name}`"),
+                                               table_name, "删除")
+                    # 清理 OceanBase 专有语法后执行（不删除模式下，若表已存在则跳过建表避免冲突）
                     safe_ddl = self._sanitize_ddl(ddls[table_name])
-                    dst_conn.execute(text(safe_ddl))
+                    if not self.drop_existing and _dst_table_exists(dst_conn, table_name):
+                        _progress_q.put(("log", f"  ⏭ 表 [{table_name}] 目标已存在，跳过建表（保留原表）"))
+                        continue
+                    self._exec_ddl_timeout(dst_conn, text(safe_ddl), table_name, "创建")
                     _progress_q.put(("log", f"  ✅ 表 [{table_name}] 结构已创建"))
             dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
         _progress_q.put(("log", "✅ 所有表结构创建完成"))
@@ -377,26 +587,132 @@ class TransferEngine:
                                total_tables: int, dst_conn) -> int:
         prefix = f"[{table_index}/{total_tables}]" if total_tables > 1 else ""
         _progress_q.put(("log", f"{prefix} 📊 表 [{table_name}] 开始传输..."))
-        src_conn = src_engine.connect().execution_options(stream_results=True)
-        result = src_conn.execute(text(f"SELECT * FROM `{table_name}`"))
-        columns = list(result.keys())
-        col_list = ', '.join(f'`{c}`' for c in columns)
-        placeholder_list = ', '.join(f':{c}' for c in columns)
-        insert_sql = text(f"INSERT INTO `{table_name}` ({col_list}) VALUES ({placeholder_list})")
-        transferred = 0
-        while not self._stop_event.is_set():
-            rows = result.fetchmany(self.batch_size)
-            if not rows:
-                break
-            batch = [dict(zip(columns, row)) for row in rows]
-            dst_conn.execute(insert_sql, batch)
-            transferred += len(rows)
-            _progress_q.put(("table_progress", {"count": transferred, "table": table_name}))
-        src_conn.close()
-        _progress_q.put(("log", f"{prefix} ✅ 表 [{table_name}] 传输完成 ({transferred:,} 行)"))
+        # ★ 主键分页拉取：每次查询是独立短往返且 buffered 读取，I/O 等待期间不持有 GIL。
+        #    源库为公网/大表时，流式读取（SSCursor fetch 不释放 GIL）会锁死整个进程导致 UI 无响应；
+        #    无主键/唯一索引的表回退流式读取（批次减半缓解卡顿）
+        try:
+            # ★ 元数据查询加 15s 硬超时：公网源库连接异常时快速失败，避免整个传输卡死
+            pk_fut = _get_db_thread_pool().submit(_get_pk_columns, src_engine, table_name)
+            pk_cols = pk_fut.result(timeout=15)
+        except concurrent.futures.TimeoutError:
+            raise Exception(f"获取表 [{table_name}] 主键信息超时（>15s），源库连接可能异常")
+        if pk_cols:
+            transferred, skipped = self._transfer_by_pk(src_engine, dst_conn, table_name, pk_cols)
+        else:
+            transferred, skipped = self._transfer_stream(src_engine, dst_conn, table_name)
+        skip_msg = f"，跳过 {skipped:,} 行重复键" if skipped else ""
+        _progress_q.put(("log", f"{prefix} ✅ 表 [{table_name}] 传输完成 ({transferred:,} 行{skip_msg})"))
         return transferred
 
+    def _insert_batch(self, dst_conn, table_name, columns, col_list, values_tmpl, rows):
+        """多值 INSERT IGNORE 一批行（每条约 800 行/512KB），返回跳过的行数"""
+        skipped = 0
+        i = 0
+        n_rows = len(rows)
+        while i < n_rows:
+            part = []
+            part_rows = 0
+            part_bytes = 0
+            while i < n_rows and part_rows < 800 and part_bytes < 512 * 1024:
+                row = rows[i]
+                part.append(row)
+                part_rows += 1
+                i += 1
+                part_bytes += sum(len(str(v)) if v is not None else 4 for v in row)
+            sql = f"INSERT IGNORE INTO `{table_name}` ({col_list}) VALUES " + ", ".join([values_tmpl] * part_rows)
+            flat = [v for row in part for v in row]
+            # ★ 参数必须是「tuple 列表」（每组一个 tuple）：扁平 list 会被 SQLAlchemy
+            #    误判为 executemany 参数组而报 "List argument must consist only of tuples"
+            r = dst_conn.exec_driver_sql(sql, [tuple(flat)])
+            # ★ rowcount 为实际受影响行数；小于本片行数 = 重复键被跳过
+            affected = r.rowcount
+            if affected is not None and affected >= 0:
+                skipped += max(0, part_rows - affected)
+            # ★ 每批提交：避免单表大事务撑爆 undo log → 磁盘满 → 服务器卡死 → SSH 断连
+            #    每批 800 行事务极小，undo 可忽略；INSERT IGNORE 幂等，分批提交断点续传安全
+            dst_conn.commit()
+        return skipped
+
+    def _transfer_by_pk(self, src_engine, dst_conn, table_name, pk_cols):
+        """主键分页传输：WHERE pk > last ORDER BY pk LIMIT n（索引游标，不慢于流式）。
+        每次查询是独立短往返 + buffered 读取，I/O 期间不持有 GIL，UI 保持响应"""
+        pk = pk_cols[0]
+        batch = max(self.batch_size or 10000, 1000)
+        transferred = 0
+        skipped = 0
+        last = None
+        with src_engine.connect() as src_conn:
+            # ★ 记录服务端线程 ID，停止时可 KILL QUERY 立即中断
+            self._record_src_conn_id(src_conn)
+            # 先取列名：LIMIT 0 快速返回，不拉数据
+            result = src_conn.exec_driver_sql(f"SELECT * FROM `{table_name}` LIMIT 0")
+            columns = list(result.keys())
+            col_list = ', '.join(f'`{c}`' for c in columns)
+            values_tmpl = "(" + ", ".join(["%s"] * len(columns)) + ")"
+            pk_index = columns.index(pk) if pk in columns else None
+            while not self._stop_event.is_set():
+                if last is None:
+                    sql = f"SELECT * FROM `{table_name}` ORDER BY `{pk}` LIMIT {batch}"
+                    rows = src_conn.exec_driver_sql(sql).fetchall()
+                else:
+                    sql = f"SELECT * FROM `{table_name}` WHERE `{pk}` > %s ORDER BY `{pk}` LIMIT {batch}"
+                    rows = src_conn.exec_driver_sql(sql, [(last,)]).fetchall()
+                if not rows:
+                    break
+                if pk_index is not None:
+                    last = rows[-1][pk_index]
+                transferred += len(rows)
+                skipped += self._insert_batch(dst_conn, table_name, columns, col_list, values_tmpl, rows)
+                _progress_q.put(("table_progress", {"count": transferred, "table": table_name}))
+        return transferred, skipped
+
+    def _transfer_stream(self, src_engine, dst_conn, table_name):
+        """流式读取传输（无主键表回退）：批次调小以缓解 UI 卡顿"""
+        batch = min(self.batch_size or 10000, 2000) if self.batch_size else 2000
+        transferred = 0
+        skipped = 0
+        src_conn = src_engine.connect().execution_options(stream_results=True)
+        # ★ 记录服务端线程 ID，停止时可 KILL QUERY 立即中断
+        self._record_src_conn_id(src_conn)
+        try:
+            result = src_conn.execute(text(f"SELECT * FROM `{table_name}`"))
+            columns = list(result.keys())
+            col_list = ', '.join(f'`{c}`' for c in columns)
+            values_tmpl = "(" + ", ".join(["%s"] * len(columns)) + ")"
+            while not self._stop_event.is_set():
+                rows = result.fetchmany(batch)
+                if not rows:
+                    break
+                transferred += len(rows)
+                skipped += self._insert_batch(dst_conn, table_name, columns, col_list, values_tmpl, rows)
+                _progress_q.put(("table_progress", {"count": transferred, "table": table_name}))
+        finally:
+            src_conn.close()
+        return transferred, skipped
+
+    def _transfer_one_table_parallel(self, src_engine, dst_engine,
+                                     table_name, table_index, total_tables):
+        """并行传输单张表：独立连接 + 独立事务（导完即提交，互不影响）"""
+        conn = dst_engine.connect()
+        try:
+            self._record_dst_conn_id(conn)
+            conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+            rows = self._transfer_single_table(
+                src_engine, dst_engine, table_name, table_index, total_tables, conn)
+            conn.commit()
+            return table_name, rows
+        finally:
+            # ★ 恢复外键检查并提交（避免连接回池后外键检查仍处于关闭状态）
+            try:
+                conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+                conn.commit()
+            except Exception:
+                pass
+            conn.close()
+
     def run(self):
+        src_engine = None
+        dst_engine = None
         try:
             _progress_q.put(("log", "🔗 正在连接源库..."))
             src_engine = create_engine(self.src_url, pool_pre_ping=True,
@@ -406,12 +722,36 @@ class TransferEngine:
             _progress_q.put(("log", "✅ 源库连接成功"))
 
             _progress_q.put(("log", "🔗 正在连接目标库..."))
-            self._create_dst_database()
+            # ★ 目标库连接包装硬超时：connect_timeout 在丢包/防火墙场景下可能不生效，
+            #    用线程池 + 30 秒超时保证不会无限挂起
+            _connect_dst_timeout = 30
+            _connect_dst_future = _get_db_thread_pool().submit(self._create_dst_database)
+            try:
+                _connect_dst_future.result(timeout=_connect_dst_timeout)
+            except concurrent.futures.TimeoutError:
+                raise Exception(f"目标库连接超时（>{_connect_dst_timeout}s），请检查地址、端口、防火墙")
             dst_engine = create_engine(self.dst_url, pool_pre_ping=True,
                                        connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
             _progress_q.put(("log", "✅ 目标库连接成功"))
+            # ★ 检查目标库未结束事务（上次同步异常/程序强杀残留 → 元数据锁 → 建表阻塞）
+            # innodb_trx 中有记录不代表一定持有会阻塞 DDL 的元数据锁，
+            # 这里只做提示，不再因为活动事务记录直接终止传输。
+            # 真正执行 DDL 时已设置 lock_wait_timeout=15，若确实被锁住会快速报错。
+            pending_trx = self._check_dst_trx(dst_engine)
+            if pending_trx:
+                _progress_q.put((
+                    "log",
+                    f"ℹ️ 检测到 {len(pending_trx)} 个活动事务，但未确认其阻塞建表；"
+                    "继续传输（DDL 锁等待上限 15 秒）"
+                ))
 
-            if self.table_name:
+            if self.manual_tables:
+                # ★ 前端已按「只同步不存在的表」过滤好的表列表
+                tables = [t.strip() for t in self.manual_tables if t.strip()]
+                _progress_q.put(("log", f"📋 待同步表（已排除目标已存在）: {', '.join(tables) if tables else '（无）'}"))
+                if not tables:
+                    raise Exception("所有目标表都已存在，且未选择删除，无需传输")
+            elif self.table_name:
                 tables = [t.strip() for t in self.table_name.split(',') if t.strip()]
             else:
                 _progress_q.put(("log", "📋 表名为空，将导入整个数据库..."))
@@ -428,17 +768,49 @@ class TransferEngine:
                 _progress_q.put(("log", "⏸ 用户停止传输"))
             else:
                 _progress_q.put(("log", "📊 阶段2：传输数据..."))
-                with dst_engine.begin() as dst_conn:
-                    dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
-                    total_rows = 0
-                    for i, table in enumerate(tables, 1):
-                        if self._stop_event.is_set():
-                            _progress_q.put(("log", "⏸ 用户停止传输"))
-                            break
-                        rows = self._transfer_single_table(
-                            src_engine, dst_engine, table, i, len(tables), dst_conn)
-                        total_rows += rows
-                    dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+                total_rows = 0
+                if self.parallel and len(tables) > 1:
+                    # ★ 多表并行：每表独立连接同时传输（每表独立事务，导完一张提交一张）
+                    max_workers = min(len(tables), 4)
+                    _progress_q.put(("log", f"⚡ 多表并行传输已开启（{max_workers} 路并发，每表独立连接）"))
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                        futures = {ex.submit(self._transfer_one_table_parallel,
+                                             src_engine, dst_engine, t, i, len(tables)): t
+                                   for i, t in enumerate(tables, 1)}
+                        for fut in concurrent.futures.as_completed(futures):
+                            if self._stop_event.is_set():
+                                _progress_q.put(("log", "⏸ 用户停止传输"))
+                                break
+                            try:
+                                tn, rows = fut.result()
+                                total_rows += rows
+                            except Exception as e:
+                                if self._stop_event.is_set():
+                                    # ★ 停止引发的查询中断不算错误
+                                    _progress_q.put(("log", "⏸ 用户停止传输"))
+                                else:
+                                    _progress_q.put(("error", f"❌ 表 [{futures[fut]}] 传输失败: {e}"))
+                else:
+                    # ★ 串行模式：共享连接，每导完一张表 commit 一次，避免一张表失败导致全部回滚
+                    with dst_engine.connect() as dst_conn:
+                        self._record_dst_conn_id(dst_conn)
+                        dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
+                        try:
+                            for i, table in enumerate(tables, 1):
+                                if self._stop_event.is_set():
+                                    _progress_q.put(("log", "⏸ 用户停止传输"))
+                                    break
+                                rows = self._transfer_single_table(
+                                    src_engine, dst_engine, table, i, len(tables), dst_conn)
+                                total_rows += rows
+                                dst_conn.commit()  # ★ 导完一张提交一张
+                        finally:
+                            # ★ 恢复外键检查并提交（避免连接回池后外键检查仍处于关闭状态）
+                            try:
+                                dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
+                                dst_conn.commit()
+                            except Exception:
+                                pass
 
                 if not self._stop_event.is_set():
                     elapsed = time.time() - start_time
@@ -451,7 +823,21 @@ class TransferEngine:
             src_engine.dispose()
             dst_engine.dispose()
         except Exception as e:
-            _progress_q.put(("error", f"❌ 传输失败: {str(e)}"))
+            if self._stop_event.is_set():
+                # ★ 停止引发的查询中断（KILL QUERY）不算错误，不弹失败弹窗
+                _progress_q.put(("log", "⏸ 用户停止传输"))
+            else:
+                _progress_q.put(("error", f"❌ 传输失败: {str(e)}"))
+        finally:
+            # ★ 关键：无论成功/异常/超时，都必须关闭连接池。
+            #    否则残留连接上的未提交事务会持有 MySQL 元数据锁（schema metadata lock），
+            #    导致目标库的所有新连接全部阻塞在 "Waiting for schema metadata lock"
+            for eng in (src_engine, dst_engine):
+                if eng is not None:
+                    try:
+                        eng.dispose()
+                    except Exception:
+                        pass
 
 
 # ==================== Eel 暴露接口 ====================
@@ -498,13 +884,20 @@ def test_connection(data: dict, side: str):
     try:
         prefix = "src_" if side == "src" else "dst_"
         label = "源库" if side == "src" else "目标库"
+        db_type = data.get(f'{prefix}db_type', 'mysql')
+        # 测试连接只验证服务器/实例可达，不把目标库名放入连接串。
+        # MySQL/OceanBase/MSSQL 均支持无具体数据库建立连接；真正同步时
+        # 再由 TransferEngine 创建目标库并连接到它。
+        test_db = data.get(f'{prefix}db', '')
+        if db_type in ('mysql', 'ob-mysql', 'mssql'):
+            test_db = ''
         conn_data = {
             'user': data.get(f'{prefix}user', ''),
             'pwd':  data.get(f'{prefix}pwd', ''),
             'host': data.get(f'{prefix}host', ''),
             'port': data.get(f'{prefix}port', '3306'),
-            'db':   data.get(f'{prefix}db', ''),
-            'db_type': 'mysql',
+            'db':   test_db,
+            'db_type': db_type,
         }
         if not conn_data['host'] or not conn_data['user']:
             return {"ok": False, "msg": f"{label}连接信息不完整"}
@@ -532,6 +925,52 @@ def stop_transfer():
     if _engine:
         _engine.stop()
     return True
+
+
+@eel.expose
+def check_target_tables(data: dict):
+    """传输前检查：连接目标库，返回输入表列表中已存在的表"""
+    dst_engine = None
+    try:
+        dst_user = data.get("dst_user") or ""
+        dst_pwd = data.get("dst_pwd") or ""
+        dst_host = data.get("dst_host") or ""
+        dst_port = data.get("dst_port") or "3306"
+        dst_db = data.get("dst_db") or ""
+        dst_db_type = data.get("dst_db_type") or "mysql"
+        u = quote_plus(dst_user)
+        p = quote_plus(dst_pwd)
+        # 这里只检查服务器是否可连接，不能把一个尚未创建的目标库
+        # 放入 URL；真正的目标库创建在 TransferEngine.run() 中完成。
+        if dst_db_type in ('mysql', 'ob-mysql'):
+            url = f"mysql+mysqldb://{u}:{p}@{dst_host}:{dst_port}/?charset=utf8mb4"
+        else:
+            url = _conn_url({
+                "user": dst_user, "pwd": dst_pwd, "host": dst_host,
+                "port": dst_port, "db": "", "db_type": dst_db_type
+            })
+        dst_engine = create_engine(url, pool_pre_ping=True,
+                                   connect_args=_connect_args(dst_db_type, timeout=10, read_timeout=60))
+        tables_to_check = data.get("tables") or []
+        if isinstance(tables_to_check, str):
+            tables_to_check = [t.strip() for t in tables_to_check.split(",") if t.strip()]
+        existing = []
+        with dst_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            for t in tables_to_check:
+                if _dst_table_exists(conn, t, dst_db):
+                    existing.append(t)
+        missing = [t for t in tables_to_check if t not in existing]
+        return {"ok": True, "existing": existing, "missing": missing}
+    except Exception as e:
+        return {"ok": False, "msg": str(e), "existing": [], "missing": []}
+    finally:
+        # ★ 任何路径都释放连接，防止检查泄漏连接
+        if dst_engine is not None:
+            try:
+                dst_engine.dispose()
+            except Exception:
+                pass
 
 
 @eel.expose
@@ -580,6 +1019,11 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
         _query_job_conn[job_id] = conn_key
     DEFAULT_PAGE_SIZE = 200  # 首屏默认显示行数
     BATCH = 1000             # 每次从结果集取 1000 行进行处理
+    # ★ 最大拉取行数保护：防止大表 SELECT 把全量行堆进内存导致 OOM 崩溃
+    #   （进程崩溃时若正执行写入/DDL，残留连接同样会引发元数据锁问题）
+    MAX_FETCH_ROWS = 500000
+    engine = None
+    truncated = False
 
     try:
         # 兼容两种数据格式：{host,user,pwd} 和 {src_host,src_user,src_pwd}
@@ -618,7 +1062,9 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
             _t0 = _time.perf_counter()
             # ★ 先用 stream_results=True 让 execute() 不缓冲全量行（只获取元数据），
             #    再用 fetchmany 按批从服务端拉取，每批限量 max_fetch_rows 保护
-            result = conn.execution_options(stream_results=True).execute(text(sql))
+            # ★ 用 exec_driver_sql 直接执行原生 SQL：避免 text() 把 SQL 文本中的
+            #    ":7004"（如 JSON 字符串 "port":7004 的值）误解析为命名绑定参数
+            result = conn.execution_options(stream_results=True).exec_driver_sql(sql)
             _t_exec = _time.perf_counter()  # 查询提交 + 元数据接收完成
 
             if _is_cancelled(conn_key):
@@ -638,6 +1084,11 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
                         break
                     for row in batch:
                         _query_rows.append(list(row))
+                    # ★ 行数保护：达到上限停止拉取；with 退出时连接关闭，
+                    #    服务器端查询自动终止（不残留任何锁/事务）
+                    if len(_query_rows) >= MAX_FETCH_ROWS:
+                        truncated = True
+                        break
                 result.close()
             else:
                 # INSERT/UPDATE/DELETE 等写入操作：提交并返回影响行数
@@ -647,7 +1098,6 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
             _server_ms = round((_t1 - _t0) * 1000, 1)
             _exec_ms = round((_t_exec - _t0) * 1000, 1)
             _fetch_ms = round((_t1 - _t_exec) * 1000, 1)
-        engine.dispose()
         # 写入操作提前返回（无需序列化行数据）
         if not result.returns_rows:
             return {"ok": True, "msg": f"成功执行，影响 {rc} 行", "columns": [], "rows": [], "total": rc,
@@ -687,10 +1137,18 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
             "page": 0,
             "page_size": DEFAULT_PAGE_SIZE,
             "page_total": min(total_rows, DEFAULT_PAGE_SIZE),  # 首屏已显示的行数
-            "_job_id": job_id  # 回传 job_id 供后续加载使用
+            "_job_id": job_id,  # 回传 job_id 供后续加载使用
+            "truncated": truncated  # ★ 行数超上限被截断（前端可提示）
         }
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, data.get('db_type','mysql'))}
+    finally:
+        # ★ 任何路径（成功/异常/取消）都释放连接池，防止连接积压
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
 
 
 # ★ 异步查询结果存储（job_id → result or None=等待中）
@@ -911,7 +1369,7 @@ def _get_backend_pid(conn, db_type: str):
     return None
 
 
-def _connect_args(db_type='mysql', timeout=10):
+def _connect_args(db_type='mysql', timeout=10, read_timeout=None):
     """返回 create_engine 的 connect_args，MySQL 禁用 SSL"""
     if db_type == 'oracle':
         # oracledb tcp_connect_timeout 单位是秒（float），不是毫秒
@@ -920,6 +1378,9 @@ def _connect_args(db_type='mysql', timeout=10):
     if db_type in ('mysql', 'ob-mysql'):
         # mysqlclient (MySQLdb) 用 ssl=False 禁用 SSL（不是 pymysql 的 ssl_disabled）
         args["ssl"] = False
+        # ★ mysqlclient (MySQLdb) 支持 read_timeout（秒），用于大表读取/长查询
+        if read_timeout:
+            args["read_timeout"] = read_timeout
     return args
 
 # 数据库连接线程池：所有数据库操作都在独立 OS 线程中执行，
@@ -1214,12 +1675,27 @@ def table_load_page(conn_data, database, table_name, schema='', offset=0, limit=
         return {"ok": False, "msg": _friendly_error(e, cdata_saved.get('db_type','mysql') if cdata_saved else 'mysql')}
 
 
-def _sanitize_where_clause(where_clause):
+def _sanitize_where_clause(where_clause, db_type='mysql'):
     """在 WHERE 子句中，给 = / != / <> 操作符右侧未加引号的值自动加单引号，
     确保字符串精确匹配（如 securitycode = 000045 → securitycode = '000045'）。
     比较运算符 > / < / >= / <= 保持原样（数字比较）。"""
     if not where_clause:
         return where_clause
+
+    # MySQL 默认未开启 ANSI_QUOTES 时，双引号会被当成字符串引号。
+    # WHERE 编辑器/旧版本可能生成："server_soc" = '121.36.221.7'，
+    # 这会实际比较字符串 "server_soc"，因此匹配不到任何记录。
+    # 这里只转换运算符左侧的双引号标识符，不改动右侧字符串值。
+    def _mysql_identifier(m):
+        return f"`{m.group(1)}` {m.group(2)}"
+
+    if db_type in ('mysql', 'ob-mysql') and where_clause and '"' in where_clause:
+        where_clause = re.sub(
+            r'"([^"\\]+)"\s*(=|!=|<>|>=|<=|>|<|LIKE|NOT\s+LIKE)',
+            _mysql_identifier,
+            where_clause,
+            flags=re.IGNORECASE
+        )
 
     def _add_quotes(m):
         col = m.group(1)
@@ -1248,7 +1724,7 @@ def _sanitize_where_clause(where_clause):
 
 def _build_full_table_sql(tbl, db_type, order_clause, limit=None, offset=0, where_clause=''):
     """构建 SELECT * FROM tbl 的 SQL，支持各数据库方言、可选 LIMIT/OFFSET/WHERE"""
-    where_clause = _sanitize_where_clause(where_clause)
+    where_clause = _sanitize_where_clause(where_clause, db_type)
     where_str = f" WHERE {where_clause}" if where_clause else ''
     base_sql = f"SELECT * FROM {tbl}{where_str}{order_clause}"
     if limit is None:
@@ -1428,12 +1904,14 @@ def _get_where_columns(c, db_type, database, table_name):
             return [r[0] for r in pks]
         # 2. 唯一索引（取第一个唯一索引的所有列）
         uniqs = c.execute(text(
-            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS "
+            "SELECT INDEX_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.STATISTICS "
             "WHERE TABLE_SCHEMA=:db AND TABLE_NAME=:tbl AND NON_UNIQUE=0 AND INDEX_NAME!='PRIMARY' "
             "ORDER BY INDEX_NAME, SEQ_IN_INDEX"
         ), {"db": database, "tbl": table_name}).fetchall()
         if uniqs:
-            return [r[0] for r in uniqs]
+            # 只能使用一个完整的唯一索引，不能把多个唯一索引的列混成一组。
+            first_name = uniqs[0][0]
+            return [r[1] for r in uniqs if r[0] == first_name]
     elif db_type == 'postgresql':
         # 1. 主键
         pks = c.execute(text(
@@ -1446,18 +1924,61 @@ def _get_where_columns(c, db_type, database, table_name):
             return [r[0] for r in pks]
         # 2. 唯一索引
         uniqs = c.execute(text(
-            "SELECT kcu.column_name FROM information_schema.table_constraints tc "
+            "SELECT tc.constraint_name, kcu.column_name FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name "
             "WHERE tc.table_name=:tbl AND tc.constraint_type='UNIQUE' "
             "ORDER BY tc.constraint_name, kcu.ordinal_position"
         ), {"tbl": table_name}).fetchall()
         if uniqs:
-            return [r[0] for r in uniqs]
+            # PostgreSQL 结果同样可能包含多个 UNIQUE constraint，只取第一个。
+            first_name = c.execute(text(
+                "SELECT tc.constraint_name FROM information_schema.table_constraints tc "
+                "WHERE tc.table_name=:tbl AND tc.constraint_type='UNIQUE' "
+                "ORDER BY tc.constraint_name LIMIT 1"
+            ), {"tbl": table_name}).scalar()
+            if first_name:
+                return [r[1] for r in uniqs if r[0] == first_name]
     # 3. 兜底：返回 None，调用方使用所有列
     return None
 
 
-def _build_where_clause(tbl, db_type, where_cols, columns, orig_row):
+def _is_text_column_type(col_type):
+    """判断数据库列是否为文本/二进制类型，避免把 00123 当成数字。"""
+    if not col_type:
+        return False
+    t = str(col_type).strip().lower()
+    return bool(re.match(
+        r"^(char|varchar|character|character varying|nchar|nvarchar|text|tinytext|"
+        r"mediumtext|longtext|enum|set|json|uuid|xml|clob|nclob|raw|binary|"
+        r"varbinary|blob|tinyblob|mediumblob|longblob)\b", t
+    ))
+
+
+def _is_numeric_column_type(col_type):
+    """判断数据库列是否为数值类型。"""
+    if not col_type:
+        return False
+    t = str(col_type).strip().lower()
+    return bool(re.match(
+        r"^(tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|"
+        r"float|double|double precision|real|number|serial|bigserial|"
+        r"smallserial|money|bit)\b", t
+    ))
+
+
+def _find_col_type(col_types, col_name):
+    if not col_types:
+        return ""
+    if col_name in col_types:
+        return col_types[col_name]
+    wanted = str(col_name).lower()
+    for name, value in col_types.items():
+        if str(name).lower() == wanted:
+            return value
+    return ""
+
+
+def _build_where_clause(tbl, db_type, where_cols, columns, orig_row, col_types=None):
     """构建 UPDATE/DELETE 的 WHERE 子句，优先使用主键/唯一索引。
     WHERE 值始终以字符串引用（不用 _sql_value），避免：
     1. VARCHAR PK 含纯数字时被误判为数字导致隐式类型转换不匹配
@@ -1472,10 +1993,19 @@ def _build_where_clause(tbl, db_type, where_cols, columns, orig_row):
         try:
             idx = columns.index(cname)
             val = orig_row[idx] if idx < len(orig_row) else 'NULL'
-            if val == 'NULL' or val is None or str(val).upper() == 'NULL':
+            col_type = _find_col_type(col_types, cname)
+            # 新版前端保留真正的 null；兼容旧版前端的 NULL 哨兵，但文本列
+            # 中的字面量 "NULL" 不能被误判成 SQL NULL。
+            is_null = val is None or (
+                str(val).upper() == 'NULL' and not _is_text_column_type(col_type)
+            )
+            if is_null:
                 where_parts.append(f"{_safe_ident(cname, db_type)} IS NULL")
             else:
-                where_parts.append(f"{_safe_ident(cname, db_type)} = {_escape_str_val(str(val))}")
+                where_parts.append(
+                    f"{_safe_ident(cname, db_type)} = "
+                    f"{_sql_value(val, db_type, col_type, null_sentinel=False)}"
+                )
         except ValueError:
             pass
     return " AND ".join(where_parts) if where_parts else "1=1"
@@ -1484,6 +2014,63 @@ def _build_where_clause(tbl, db_type, where_cols, columns, orig_row):
 def _escape_str_val(val_str):
     """将字符串值安全地转为 SQL 字符串字面量（始终加引号）"""
     return "'" + val_str.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _group_table_changes(changes):
+    """按原始行合并修改项，使同一行多列修改只执行一条 UPDATE。"""
+    groups = []
+    by_key = {}
+    for ch in changes or []:
+        # 新版前端提供 rowIdx；旧版调用方没有该字段时，用原始行内容兜底。
+        row_idx = ch.get("rowIdx")
+        if row_idx is not None:
+            key = ("row", str(row_idx))
+        else:
+            try:
+                key = ("values", json.dumps(
+                    ch.get("origRow", []), ensure_ascii=False,
+                    sort_keys=True, default=str
+                ))
+            except Exception:
+                key = ("values", repr(ch.get("origRow", [])))
+        group = by_key.get(key)
+        if group is None:
+            group = {
+                "origRow": ch.get("origRow", []),
+                "columns": ch.get("columns", []),
+                "rowIdx": row_idx,
+                "changes": [],
+            }
+            by_key[key] = group
+            groups.append(group)
+        group["changes"].append(ch)
+    return groups
+
+
+def _build_update_sql(tbl, db_type, group, where_cols, col_types):
+    columns = group.get("columns", [])
+    orig_row = group.get("origRow", [])
+    set_by_col = {}
+    for ch in group.get("changes", []):
+        col = ch.get("col")
+        if not col or col not in columns:
+            raise ValueError(f"无效的修改列：{col}")
+        # 同一行同一列只应有一项；如有旧版重复请求，以最后一次为准。
+        set_by_col[col] = ch.get("newVal")
+    if not set_by_col:
+        raise ValueError("没有有效的修改内容")
+    set_parts = []
+    for col, new_val in set_by_col.items():
+        col_type = _find_col_type(col_types, col)
+        set_parts.append(
+            f"{_safe_ident(col, db_type)} = {_sql_value(new_val, db_type, col_type)}"
+        )
+    where_clause = _build_where_clause(
+        tbl, db_type, where_cols, columns, orig_row, col_types
+    )
+    if where_clause == "1=1":
+        raise ValueError("无法根据原始行数据生成安全的 WHERE 条件，已拒绝保存")
+    return f"UPDATE {tbl} SET {', '.join(set_parts)} WHERE {where_clause}"
 
 
 @eel.expose
@@ -1498,18 +2085,16 @@ def table_save_changes(conn_data, database, table_name, schema, changes):
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as c:
             where_cols = _get_where_columns(c, db_type, database, table_name)
+            col_types = _load_column_types(c, db_type, database, table_name, schema)
 
-        sqls = []
-        for ch in changes:
-            col = ch["col"]
-            new_val = ch["newVal"]
-            orig_row = ch.get("origRow", [])
-            columns = ch.get("columns", [])
-            set_clause = f"{_safe_ident(col, db_type)} = {_sql_value(new_val, db_type)}"
-            where_clause = _build_where_clause(tbl, db_type, where_cols, columns, orig_row)
-            sqls.append(f"UPDATE {tbl} SET {set_clause} WHERE {where_clause};")
+        groups = _group_table_changes(changes)
+        sqls = [
+            _build_update_sql(tbl, db_type, group, where_cols, col_types) + ";"
+            for group in groups
+        ]
         engine.dispose()
-        return {"ok": True, "sql": "\n".join(sqls), "count": len(sqls)}
+        return {"ok": True, "sql": "\n".join(sqls), "count": len(changes or []),
+                "statement_count": len(sqls)}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
@@ -1528,36 +2113,62 @@ def table_exec_save(conn_data, database, table_name, schema, changes):
     try:
         with engine.connect() as c:
             where_cols = _get_where_columns(c, db_type, database, table_name)
+            col_types = _load_column_types(c, db_type, database, table_name, schema)
+        groups = _group_table_changes(changes)
         with engine.begin() as c:
             # ★ 记录连接 PID，供 cancel 时 Kill
             _query_conn_id = _get_backend_pid(c, db_type)
             _query_src_data = cdata
-            for ch in changes:
+            for group in groups:
                 if _query_cancel.is_set():
                     _kill_db_query()
-                    return {"ok": False, "msg": "操作已取消", "cancelled": True}
-                col = ch["col"]
-                new_val = ch["newVal"]
-                orig_row = ch.get("origRow", [])
-                columns = ch.get("columns", [])
+                    raise RuntimeError("操作已取消")
+                orig_row = group.get("origRow", [])
+                columns = group.get("columns", [])
                 # ★ 禁止修改主键列（会引发 Duplicate entry）
-                if col in where_cols:
+                if False:  # legacy guard retained for compatibility; active guard is below
                     return {"ok": False, "msg": f"不能修改主键列 '{col}'，请用 DELETE + INSERT 替代"}
-                set_clause = f"{_safe_ident(col, db_type)} = {_sql_value(new_val, db_type)}"
-                where_clause = _build_where_clause(tbl, db_type, where_cols, columns, orig_row)
-                update_sql = f"UPDATE {tbl} SET {set_clause} WHERE {where_clause}"
-                result = c.execute(text(update_sql))
+                changed_cols = {
+                    str(ch.get("col")).lower() for ch in group["changes"]
+                }
+                if where_cols:
+                    where_lower = {str(col).lower() for col in where_cols}
+                    blocked = changed_cols & where_lower
+                    if blocked:
+                        bad_col = next(iter(blocked))
+                        raise ValueError(
+                            f"不能修改主键/唯一键列 '{bad_col}'，请用 DELETE + INSERT 替代"
+                        )
+                update_sql = _build_update_sql(
+                    tbl, db_type, group, where_cols, col_types
+                )
+                # update_sql 已是完整 SQL；使用驱动直执行，避免 JSON 中的
+                # "port":7004 被 SQLAlchemy text() 误识别为 :7004 参数。
+                result = c.exec_driver_sql(update_sql)
                 # ★ 检查 rowcount：如果 WHERE 条件未匹配到行，说明 origRow 数据可能已过期
                 rc = result.rowcount
-                if rc == 0:
-                    # 回退日志中只保留一条警告
-                    _log_db_update(update_sql, f"-- WARNING: 0 rows affected, WHERE may not match")
-                else:
-                    # 生成回退 SQL：恢复到原值
-                    old_val = orig_row[columns.index(col)] if col in columns else None
-                    rollback_set = f"{_safe_ident(col, db_type)} = {_sql_value(old_val, db_type)}"
-                    rollback_sql = f"UPDATE {tbl} SET {rollback_set} WHERE {where_clause};"
-                    _log_db_update(update_sql, rollback_sql)
+                if rc != 1:
+                    raise RuntimeError(
+                        f"保存失败：第 {group.get('rowIdx', '?')} 行 WHERE 条件影响了 {rc} 行，"
+                        "为避免误修改，已回滚本次全部保存"
+                    )
+                rollback_parts = []
+                for ch in group["changes"]:
+                    col = ch.get("col")
+                    old_val = orig_row[columns.index(col)]
+                    col_type = _find_col_type(col_types, col)
+                    rollback_parts.append(
+                        f"{_safe_ident(col, db_type)} = "
+                        f"{_sql_value(old_val, db_type, col_type, null_sentinel=False)}"
+                    )
+                where_clause = _build_where_clause(
+                    tbl, db_type, where_cols, columns, orig_row, col_types
+                )
+                rollback_sql = (
+                    f"UPDATE {tbl} SET {', '.join(rollback_parts)} "
+                    f"WHERE {where_clause};"
+                )
+                _log_db_update(update_sql, rollback_sql)
         return {"ok": True, "msg": f"成功修改 {len(changes)} 处"}
     except Exception as e:
         if _query_cancel.is_set():
@@ -1569,17 +2180,16 @@ def table_exec_save(conn_data, database, table_name, schema, changes):
         engine.dispose()
 
 
-def _sql_value(val, db_type):
-    if val is None or val == 'NULL':
+def _sql_value(val, db_type, col_type=None, null_sentinel=True):
+    if val is None or (null_sentinel and val == 'NULL'):
         return 'NULL'
     val = str(val)
     # 尝试数字
-    try:
-        float(val)
-        return val
-    except:
-        pass
-    return "'" + val.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    if _is_numeric_column_type(col_type) and re.fullmatch(
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", val.strip()
+    ):
+        return val.strip()
+    return _escape_str_val(val)
 
 
 @eel.expose
@@ -1594,11 +2204,14 @@ def table_delete_rows(conn_data, database, table_name, schema, rows_data):
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as c:
             where_cols = _get_where_columns(c, db_type, database, table_name)
+            col_types = _load_column_types(c, db_type, database, table_name, schema)
         sqls = []
         for rd in rows_data:
             orig_row = rd.get("origRow", [])
             columns = rd.get("columns", [])
-            where_clause = _build_where_clause(tbl, db_type, where_cols, columns, orig_row)
+            where_clause = _build_where_clause(
+                tbl, db_type, where_cols, columns, orig_row, col_types
+            )
             sqls.append(f"DELETE FROM {tbl} WHERE {where_clause};")
         engine.dispose()
         return {"ok": True, "sql": "\n".join(sqls), "count": len(sqls)}
@@ -1618,13 +2231,17 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data):
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as c:
             where_cols = _get_where_columns(c, db_type, database, table_name)
+            col_types = _load_column_types(c, db_type, database, table_name, schema)
         with engine.begin() as c:
             for rd in rows_data:
                 orig_row = rd.get("origRow", [])
                 columns = rd.get("columns", [])
-                where_clause = _build_where_clause(tbl, db_type, where_cols, columns, orig_row)
+                where_clause = _build_where_clause(
+                    tbl, db_type, where_cols, columns, orig_row, col_types
+                )
                 delete_sql = f"DELETE FROM {tbl} WHERE {where_clause}"
-                result = c.execute(text(delete_sql))
+                # 同样避免 DELETE 条件中的 URL/时间/JSON 冒号被识别成绑定参数。
+                result = c.exec_driver_sql(delete_sql)
                 # ★ 检查 rowcount：如果未删除任何行，可能数据已变化
                 if result.rowcount == 0:
                     _log_db_delete(delete_sql, "-- WARNING: 0 rows affected, WHERE may not match")
@@ -2643,33 +3260,122 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
         return {"ok": False, "msg": _friendly_error(e, db_type or 'mysql')}
 
 
-@eel.expose
-def table_truncate(conn_data, database, table_name, schema=''):
+def _kill_table_operation_session(state):
+    """仅终止当前 DROP/TRUNCATE 操作记录的数据库会话。"""
+    if not state or not state.get('pid') or not state.get('conn_data'):
+        return False
+    cdata = dict(state['conn_data'])
+    db_type = cdata.get('db_type', 'mysql')
+    pid = int(state['pid'])
     try:
-        cdata = dict(conn_data)
-        if cdata.get('db_type') != 'oracle': cdata["db"] = database
-        tbl = _build_table_ref(cdata, database, table_name, schema)
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
-        sql = f"TRUNCATE TABLE {tbl}"
-        with engine.begin() as conn: conn.execute(text(sql))
-        engine.dispose()
-        _log_db_delete(sql)
-        return {"ok": True, "msg": f"表 [{table_name}] 已截断"}
-    except Exception as e: return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type','mysql'))}
+        if db_type in ('mysql', 'ob-mysql'):
+            engine = create_engine(_conn_url(cdata),
+                                   connect_args=_connect_args(db_type, timeout=5))
+            try:
+                with engine.connect() as killer:
+                    killer.exec_driver_sql(f"KILL CONNECTION {pid}")
+            finally:
+                engine.dispose()
+            return True
+        if db_type == 'postgresql':
+            engine = create_engine(_conn_url(cdata),
+                                   connect_args=_connect_args(db_type, timeout=5))
+            try:
+                with engine.connect() as killer:
+                    killer.execute(text("SELECT pg_terminate_backend(:pid)"), {'pid': pid})
+            finally:
+                engine.dispose()
+            return True
+    except Exception:
+        # 会话可能已经结束；主操作会根据 cancel_requested 返回“已取消”。
+        return False
+    return False
+
 
 @eel.expose
-def table_delete(conn_data, database, table_name, schema=''):
+def cancel_table_operation(op_id=None):
+    """取消当前表级 DROP/TRUNCATE，并只杀掉该操作自己的会话。"""
+    with _table_op_lock:
+        state = _table_op_state
+        if not state or (op_id and state.get('op_id') != op_id):
+            return {"ok": False, "cancelled": False, "msg": "没有正在执行的表操作"}
+        state['cancel_requested'] = True
+        state_copy = dict(state)
+    killed = _kill_table_operation_session(state_copy)
+    return {"ok": True, "cancelled": True, "killed": killed}
+
+
+def _run_table_destructive_operation(conn_data, database, table_name, schema,
+                                     sql, success_msg, op_id=None):
+    """执行可取消的表级 DDL，并记录本次 SQL 对应的服务端连接 ID。"""
+    global _table_op_state
+    cdata = dict(conn_data)
+    db_type = cdata.get('db_type', 'mysql')
+    if db_type != 'oracle':
+        cdata['db'] = database
+    engine = None
+    state = {
+        'op_id': op_id or ('table_op_' + str(time.time_ns())),
+        'conn_data': cdata,
+        'pid': None,
+        'cancel_requested': False,
+    }
+    with _table_op_lock:
+        _table_op_state = state
     try:
-        cdata = dict(conn_data)
-        if cdata.get('db_type') != 'oracle': cdata["db"] = database
-        tbl = _build_table_ref(cdata, database, table_name, schema)
-        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
-        sql = f"DROP TABLE {tbl}"
-        with engine.begin() as conn: conn.execute(text(sql))
-        engine.dispose()
+        engine = create_engine(_conn_url(cdata),
+                               connect_args=_connect_args(db_type, timeout=10))
+        with engine.begin() as conn:
+            pid = _get_backend_pid(conn, db_type)
+            with _table_op_lock:
+                if _table_op_state is state:
+                    state['pid'] = pid
+                cancelled = state['cancel_requested']
+            if cancelled:
+                _kill_table_operation_session(dict(state))
+                return {"ok": False, "cancelled": True, "msg": "操作已取消"}
+            conn.execute(text(sql))
         _log_db_delete(sql)
-        return {"ok": True, "msg": f"表 [{table_name}] 已删除"}
-    except Exception as e: return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type','mysql'))}
+        return {"ok": True, "msg": success_msg}
+    except Exception as e:
+        with _table_op_lock:
+            cancelled = state.get('cancel_requested', False)
+        if cancelled:
+            return {"ok": False, "cancelled": True, "msg": "操作已取消"}
+        return {"ok": False, "msg": _friendly_error(e, db_type)}
+    finally:
+        with _table_op_lock:
+            if _table_op_state is state:
+                _table_op_state = None
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
+
+
+@eel.expose
+def table_truncate(conn_data, database, table_name, schema='', operation_id=None):
+    cdata = dict(conn_data)
+    if cdata.get('db_type') != 'oracle':
+        cdata['db'] = database
+    tbl = _build_table_ref(cdata, database, table_name, schema)
+    sql = f"TRUNCATE TABLE {tbl}"
+    return _run_table_destructive_operation(
+        conn_data, database, table_name, schema, sql,
+        f"表 [{table_name}] 已截断", operation_id)
+
+
+@eel.expose
+def table_delete(conn_data, database, table_name, schema='', operation_id=None):
+    cdata = dict(conn_data)
+    if cdata.get('db_type') != 'oracle':
+        cdata['db'] = database
+    tbl = _build_table_ref(cdata, database, table_name, schema)
+    sql = f"DROP TABLE {tbl}"
+    return _run_table_destructive_operation(
+        conn_data, database, table_name, schema, sql,
+        f"表 [{table_name}] 已删除", operation_id)
 
 @eel.expose
 def table_clear(conn_data, database, table_name, schema=''):
@@ -2782,7 +3488,9 @@ def table_execute_sql(conn_data, database, sql, schema=''):
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
         with engine.begin() as conn:
-            conn.execute(text(sql))
+            # ★ exec_driver_sql 直接执行原生 SQL：避免 text() 把 SQL 中的 ":7004"
+            #    （如 JSON 字符串 "port":7004 的值）误解析为绑定参数
+            conn.exec_driver_sql(sql)
         engine.dispose()
         _db_op_logger.info(f"[EXEC_SQL] 执行成功: {sql[:200]}...")
         return {"ok": True, "msg": "操作成功"}
@@ -3083,10 +3791,19 @@ def settings_save(data):
 @eel.expose
 def settings_get_paths():
     """返回各配置文件的路径"""
+    # 操作日志按日期写入 logs/db_operations，取当前 logger 实际绑定的文件，
+    # 避免引用已经不存在的旧版 _LOG_FILE 导致整个路径接口失败。
+    log_file = os.path.join(_LOG_OP_DIR, f"{datetime.now().strftime('%Y-%m-%d')}_op.log")
+    try:
+        handlers = getattr(_db_op_logger, "handlers", [])
+        if handlers and getattr(handlers[0], "baseFilename", ""):
+            log_file = handlers[0].baseFilename
+    except Exception:
+        pass
     return {
         "tree_file": TREE_FILE,
         "profiles_file": PROFILES_FILE,
-        "log_file": _LOG_FILE,
+        "log_file": log_file,
         "settings_file": SETTINGS_FILE
     }
 
@@ -3396,64 +4113,68 @@ def _format_size(size_bytes):
     if s >= 1024: return f"{s/1024:.0f} KB"
     return f"{s} B"
 
-@eel.expose
-def db_explore_get_tables(conn_data, database, schema=''):
+def _db_explore_get_tables_sync(conn_data, database, schema=''):
+    """同步获取数据库表列表（内部调用：导出向导等，避免拿到异步包装结构）"""
     cdata = dict(conn_data)
     if cdata.get("db_type") != 'oracle':
         cdata["db"] = database
     db_type = cdata.get("db_type", "mysql")
     try:
-        def _get_tables():
-            engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
-            try:
-                with engine.connect() as c:
-                    if db_type == 'oracle':
-                        print(f"[Oracle get_tables] database={database!r}, user={cdata.get('user','')!r}")
-                        # ★ 用 USER_SEGMENTS 替代 ALL_SEGMENTS（ZX 等普通用户无 ALL_SEGMENTS 权限会导致 ORA-00942）
-                        rows = c.execute(text(
-                            "SELECT t.TABLE_NAME, t.NUM_ROWS, "
-                            "COALESCE((SELECT SUM(s.BYTES) FROM USER_SEGMENTS s WHERE s.SEGMENT_NAME=t.TABLE_NAME),0), "
-                            "COALESCE((SELECT c.COMMENTS FROM USER_TAB_COMMENTS c WHERE c.TABLE_NAME=t.TABLE_NAME AND c.TABLE_TYPE='TABLE'),'') "
-                            "FROM USER_TABLES t ORDER BY t.TABLE_NAME"
-                        )).fetchall()
-                        print(f"[Oracle get_tables] found {len(rows)} tables for user={database!r}")
-                        tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
-                    elif db_type in ('mysql', 'ob-mysql'):
-                        rows = c.execute(text("SELECT TABLE_NAME,TABLE_ROWS,DATA_LENGTH,UPDATE_TIME,TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
-                        tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":str(r[3]) if r[3] else "","comment":r[4] or ""} for r in rows]
-                    elif db_type == 'postgresql':
-                        sch = schema if schema else 'public'
-                        rows = c.execute(text(
-                            "SELECT c.relname, c.reltuples::bigint, pg_total_relation_size(c.oid), "
-                            "COALESCE(pg_catalog.obj_description(c.oid,'pg_class'),'') "
-                            "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
-                            "WHERE c.relkind='r' AND n.nspname=:sch ORDER BY c.relname"
-                        ), {"sch":sch}).fetchall()
-                        tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":"","comment":r[3] or ""} for r in rows]
-                    elif db_type == 'mssql':
-                        rows = c.execute(text(
-                            "SELECT t.NAME, p.rows, SUM(ISNULL(a.used_pages,0))*8192, "
-                            "CAST(ISNULL(ep.value,'') AS NVARCHAR(4000)) "
-                            "FROM sys.tables t "
-                            "LEFT JOIN sys.partitions p ON t.object_id=p.object_id AND p.index_id IN (0,1) "
-                            "LEFT JOIN sys.allocation_units a ON p.partition_id=a.container_id "
-                            "LEFT JOIN sys.extended_properties ep ON ep.major_id=t.object_id AND ep.minor_id=0 AND ep.name='MS_Description' "
-                            "GROUP BY t.NAME, t.object_id, p.rows, CAST(ep.value AS NVARCHAR(4000)) "
-                            "ORDER BY t.NAME"
-                        )).fetchall()
-                        tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
-                    else:
-                        rows = c.execute(text("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
-                        tables = [{"name":r[0],"rows":"","data_size":"","update_time":"","comment":""} for r in rows]
-                return {"ok": True, "tables": tables}
-            except Exception as e:
-                return {"ok": False, "msg": _friendly_error(e, db_type)}
-            finally:
-                engine.dispose()
-        return _with_db_timeout(_get_tables, timeout=15)
-
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        try:
+            with engine.connect() as c:
+                if db_type == 'oracle':
+                    # ★ 用 USER_SEGMENTS 替代 ALL_SEGMENTS（ZX 等普通用户无 ALL_SEGMENTS 权限会导致 ORA-00942）
+                    rows = c.execute(text(
+                        "SELECT t.TABLE_NAME, t.NUM_ROWS, "
+                        "COALESCE((SELECT SUM(s.BYTES) FROM USER_SEGMENTS s WHERE s.SEGMENT_NAME=t.TABLE_NAME),0), "
+                        "COALESCE((SELECT c.COMMENTS FROM USER_TAB_COMMENTS c WHERE c.TABLE_NAME=t.TABLE_NAME AND c.TABLE_TYPE='TABLE'),'') "
+                        "FROM USER_TABLES t ORDER BY t.TABLE_NAME"
+                    )).fetchall()
+                    tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
+                elif db_type in ('mysql', 'ob-mysql'):
+                    rows = c.execute(text("SELECT TABLE_NAME,TABLE_ROWS,DATA_LENGTH,UPDATE_TIME,TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
+                    tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":str(r[3]) if r[3] else "","comment":r[4] or ""} for r in rows]
+                elif db_type == 'postgresql':
+                    sch = schema if schema else 'public'
+                    rows = c.execute(text(
+                        "SELECT c.relname, c.reltuples::bigint, pg_total_relation_size(c.oid), "
+                        "COALESCE(pg_catalog.obj_description(c.oid,'pg_class'),'') "
+                        "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                        "WHERE c.relkind='r' AND n.nspname=:sch ORDER BY c.relname"
+                    ), {"sch":sch}).fetchall()
+                    tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]),"update_time":"","comment":r[3] or ""} for r in rows]
+                elif db_type == 'mssql':
+                    rows = c.execute(text(
+                        "SELECT t.NAME, p.rows, SUM(ISNULL(a.used_pages,0))*8192, "
+                        "CAST(ISNULL(ep.value,'') AS NVARCHAR(4000)) "
+                        "FROM sys.tables t "
+                        "LEFT JOIN sys.partitions p ON t.object_id=p.object_id AND p.index_id IN (0,1) "
+                        "LEFT JOIN sys.allocation_units a ON p.partition_id=a.container_id "
+                        "LEFT JOIN sys.extended_properties ep ON ep.major_id=t.object_id AND ep.minor_id=0 AND ep.name='MS_Description' "
+                        "GROUP BY t.NAME, t.object_id, p.rows, CAST(ep.value AS NVARCHAR(4000)) "
+                        "ORDER BY t.NAME"
+                    )).fetchall()
+                    tables = [{"name":r[0],"rows":r[1] or 0,"data_size":_format_size(r[2]) if r[2] else "","update_time":"","comment":r[3] or ""} for r in rows]
+                else:
+                    rows = c.execute(text("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=:db AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME"), {"db":database}).fetchall()
+                    tables = [{"name":r[0],"rows":"","data_size":"","update_time":"","comment":""} for r in rows]
+            return {"ok": True, "tables": tables}
+        except Exception as e:
+            return {"ok": False, "msg": _friendly_error(e, db_type)}
+        finally:
+            engine.dispose()
     except Exception as e:
         return {"ok": False, "msg": _friendly_error(e, db_type)}
+
+
+@eel.expose
+def db_explore_get_tables(conn_data, database, schema=''):
+    """获取数据库中的表列表（异步非阻塞：返回 job_id，前端轮询 poll_query_result）"""
+    cdata = dict(conn_data)
+    if cdata.get("db_type") != 'oracle':
+        cdata["db"] = database
+    return _with_db_timeout(_db_explore_get_tables_sync, cdata, database, schema, timeout=15)
 
 
 # ==================== Redis 操作 ====================
@@ -4458,7 +5179,9 @@ def db_explore_test_proc(conn_data, database, proc_name, inputs, schema=''):
             """根据用户指定类型或 Oracle 类型转换输入值"""
             if val == '' or val is None:
                 return val
-            dt = (user_dt or oracle_dtype or 'STRING').upper()
+            # 类型必须以存储过程在 ALL_ARGUMENTS 中定义的 DATA_TYPE 为准，
+            # 不接受前端传入的可变类型，避免用户用错误类型覆盖 Oracle 定义。
+            dt = (oracle_dtype or user_dt or 'STRING').upper()
             if dt in ('FLOAT', 'NUMBER', 'NUMERIC', 'DECIMAL'):
                 try:
                     return float(val) if '.' in str(val) else int(val)
@@ -5282,6 +6005,77 @@ def _get_index_info(conn, db_type, db_name, table_name):
         pass
     return result
 
+def _mysql_type_row_bytes(type_text):
+    """Estimate the maximum bytes occupied by one MySQL column in a row."""
+    t = str(type_text or '').strip().lower()
+    if re.match(r'^(?:tiny|medium|long)?(?:text|blob)\b', t):
+        return 20
+
+    match = re.match(r'^(varchar|char)\s*\(\s*(\d+)\s*\)', t)
+    if match:
+        chars = int(match.group(2))
+        return chars * 4 + (2 if match.group(1) == 'varchar' else 0)
+
+    match = re.match(r'^(varbinary|binary)\s*\(\s*(\d+)\s*\)', t)
+    if match:
+        size = int(match.group(2))
+        return size + (2 if match.group(1) == 'varbinary' else 0)
+
+    match = re.match(r'^bit\s*\(\s*(\d+)\s*\)', t)
+    if match:
+        return (int(match.group(1)) + 7) // 8
+
+    if t.startswith('bigint'):
+        return 8
+    if t.startswith(('tinyint', 'smallint', 'mediumint', 'int', 'integer')):
+        return 4
+    if t.startswith(('decimal', 'numeric')):
+        return 32
+    if t.startswith(('double', 'float')):
+        return 8
+    if t.startswith('datetime'):
+        return 8
+    if t.startswith(('timestamp', 'date', 'time', 'year')):
+        return 5
+    if t.startswith(('enum', 'set')):
+        return 4
+    return 100
+
+
+def _mysql_text_type_for(type_text):
+    """Return a TEXT-family type for a large VARCHAR/CHAR, if applicable."""
+    match = re.match(r'^\s*(varchar|char)\s*\(\s*(\d+)\s*\)', str(type_text or ''), re.I)
+    if not match:
+        return None
+    return 'TEXT' if int(match.group(2)) <= 16000 else 'MEDIUMTEXT'
+
+
+def _format_migrated_default(value, col_type):
+    """格式化跨库迁移的默认值，避免 Oracle 的字符串默认值被当成标识符。"""
+    if value is None:
+        return ''
+    v = str(value).strip()
+    if not v:
+        return ''
+    if (len(v) >= 2 and v[0] == "'" and v[-1] == "'") or (len(v) >= 2 and v[0] == '"' and v[-1] == '"'):
+        return v
+    if re.fullmatch(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", v):
+        return v
+    upper = v.upper()
+    if upper in ('NULL', 'TRUE', 'FALSE', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP',
+                 'LOCALTIME', 'LOCALTIMESTAMP', 'SYSDATE', 'SYSTIMESTAMP', 'GETDATE()',
+                 'GETUTCDATE()', 'NOW()', 'UUID()'):
+        return v
+    if re.match(r'^(CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME|LOCALTIME|LOCALTIMESTAMP)\s*\(', upper):
+        return v
+    if 'NEXTVAL' in upper or upper.startswith('NEXT VALUE FOR '):
+        return v
+    if re.match(r'^[A-Z_][A-Z0-9_$]*(?:\.[A-Z_][A-Z0-9_$]*)?\s*\(', upper):
+        return v
+    # Oracle DATA_DEFAULT 可能返回 NONE、v1 等不带引号的字符串，目标库必须按字符串处理。
+    return "'" + v.replace("'", "''") + "'"
+
+
 def _generate_create_table(db_type, tbl, cols, indexes=None):
     """根据目标数据库类型生成 CREATE TABLE 语句（含主键/唯一/索引约束）"""
     if not cols:
@@ -5290,12 +6084,51 @@ def _generate_create_table(db_type, tbl, cols, indexes=None):
         indexes = {}
 
     # 每列 SQL
+    column_types = {str(c.get("name")): c.get("type", "") for c in cols}
+    converted_text = set()
+    if db_type in ('mysql', 'ob-mysql'):
+        protected = set()
+        for name in indexes.get("primary_key", []):
+            protected.add(str(name).casefold())
+        for group in indexes.get("unique", []) + indexes.get("indexes", []):
+            for name in group.get("columns", []):
+                protected.add(str(name).casefold())
+
+        row_size = sum(_mysql_type_row_bytes(t) for t in column_types.values())
+        candidates = []
+        for c in cols:
+            name = str(c.get("name", ""))
+            if name.casefold() in protected:
+                continue
+            new_type = _mysql_text_type_for(c.get("type", ""))
+            if new_type:
+                candidates.append((
+                    _mysql_type_row_bytes(c.get("type", "")), name, new_type
+                ))
+
+        for old_size, name, new_type in sorted(candidates, reverse=True):
+            if row_size <= 60000:
+                break
+            column_types[name] = new_type
+            converted_text.add(name.casefold())
+            row_size -= max(old_size - 20, 0)
+
+        if row_size > 65535:
+            raise ValueError(
+                "目标 MySQL 表行宽仍超过 65535 字节；请缩短未加索引的 VARCHAR/CHAR，"
+                "或移除超大字段的索引后重试"
+            )
+
     col_lines = []
     for c in cols:
         col_name = _safe_ident(c["name"], db_type)
         null = '' if c.get("nullable", True) else ' NOT NULL'
-        dflt = f' DEFAULT {c["default"]}' if c.get("default") else ''
-        col_lines.append(f"  {col_name} {c['type']}{null}{dflt}")
+        name_key = str(c.get("name", "")).casefold()
+        col_type = column_types.get(str(c.get("name")), c.get("type", ""))
+        # Older MySQL versions reject defaults on TEXT/MEDIUMTEXT.
+        has_default = c.get("default") and name_key not in converted_text
+        dflt = f' DEFAULT {_format_migrated_default(c["default"], col_type)}' if has_default else ''
+        col_lines.append(f"  {col_name} {col_type}{null}{dflt}")
 
     # 主键约束
     pk_cols = indexes.get("primary_key", [])
@@ -5346,7 +6179,8 @@ def _generate_create_table(db_type, tbl, cols, indexes=None):
     return ddl
 
 @eel.expose
-def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, copy_data=True, new_table_name=None):
+def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db,
+                    copy_data=True, new_table_name=None, drop_existing=False):
     """拖拽复制表：支持跨数据库类型（MySQL/OB/PG/Oracle/MSSQL 互相同步）
     new_table_name: 可选，指定目标表名（用于同库备份场景，备份为带时间戳的副本）
     """
@@ -5376,7 +6210,9 @@ def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, co
 
         _progress_q.put(("drag_progress", {"percent": 3, "status": "已连接，检查目标表..."}))
 
-        # 1. 检查目标表是否已存在
+        # 1. 检查目标表是否已存在。删除选项只在目标连接/目标数据库上执行，
+        #    源连接从未参与 DROP，避免误删源库表。
+        target_exists = False
         try:
             with dst_engine.connect() as dc:
                 if dst_db_type == 'oracle':
@@ -5385,9 +6221,23 @@ def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, co
                     dc.execute(text(f"SELECT TOP 1 1 FROM {dst_tbl}"))
                 else:
                     dc.execute(text(f"SELECT 1 FROM {dst_tbl} LIMIT 1"))
-            return {"ok": False, "msg": f"目标库中表 [{table_name}] 已存在"}
+            target_exists = True
         except Exception:
             pass
+
+        if target_exists:
+            if not drop_existing:
+                src_engine.dispose()
+                dst_engine.dispose()
+                return {"ok": False, "msg": f"目标库中表 [{table_name}] 已存在"}
+            try:
+                with dst_engine.begin() as dconn:
+                    dconn.execute(text(f"DROP TABLE {dst_tbl}"))
+                _progress_q.put(("drag_progress", {"percent": 3, "status": f"已删除目标库同名表 [{table_name}]"}))
+            except Exception as e:
+                src_engine.dispose()
+                dst_engine.dispose()
+                return {"ok": False, "msg": f"删除目标库同名表 [{table_name}] 失败: {e}"}
 
         # 2. 同类型同服务器：用 CREATE TABLE LIKE（最快最可靠）
         _progress_q.put(("drag_progress", {"percent": 5, "status": "正在创建表结构..."}))
@@ -5555,6 +6405,122 @@ def drag_copy_table(src_conn_data, src_db, table_name, dst_conn_data, dst_db, co
         return {"ok": False, "msg": str(e)}
 
 
+@eel.expose
+def drag_copy_tables(src_conn_data, src_db, table_names, dst_conn_data, dst_db,
+                     copy_data=True, drop_existing=False):
+    """批量导入表。每张表独立复制，DROP 只针对目标库同名表。"""
+    try:
+        if isinstance(table_names, str):
+            table_names = [table_names]
+        names = []
+        for name in (table_names or []):
+            name = str(name or '').strip()
+            if name and name not in names:
+                names.append(name)
+        if not names:
+            return {"ok": False, "msg": "未选择要导入的表"}
+
+        _query_cancel.clear()
+        results = []
+        total = len(names)
+
+        # 批量导入前一次性检查目标库，避免前面的表已经导入后才在中途发现重名。
+        if not drop_existing:
+            _progress_q.put(("drag_progress", {
+                "percent": 0,
+                "status": "正在检查目标库是否存在同名表...",
+                "table_total": total
+            }))
+            dst_data = dict(dst_conn_data)
+            dst_data["db"] = dst_db
+            dst_db_type = dst_data.get("db_type", "mysql")
+            dst_engine = None
+            existing = []
+            try:
+                dst_url = _conn_url(dst_data)
+                if dst_db_type in ('mysql', 'ob-mysql'):
+                    dst_url = (dst_url.replace("?charset=utf8mb4", "?charset=utf8mb4&connect_timeout=10&read_timeout=30")
+                               if "?" in dst_url else dst_url + "?connect_timeout=10&read_timeout=30")
+                dst_engine = create_engine(dst_url, connect_args=_connect_args(dst_db_type, timeout=10))
+                with dst_engine.connect() as dc:
+                    for name in names:
+                        dst_tbl = _build_table_ref(dst_data, dst_db, name)
+                        try:
+                            if dst_db_type == 'oracle':
+                                dc.execute(text(f"SELECT 1 FROM {dst_tbl} WHERE ROWNUM <= 1"))
+                            elif dst_db_type == 'mssql':
+                                dc.execute(text(f"SELECT TOP 1 1 FROM {dst_tbl}"))
+                            else:
+                                dc.execute(text(f"SELECT 1 FROM {dst_tbl} LIMIT 1"))
+                            existing.append(name)
+                        except Exception:
+                            pass
+            except Exception as e:
+                return {"ok": False, "precheck": True, "msg": f"导入前检查目标表失败：{e}"}
+            finally:
+                if dst_engine is not None:
+                    dst_engine.dispose()
+            if existing:
+                msg = "目标库已存在同名表：" + "、".join(f"[{name}]" for name in existing) + \
+                      "。请勾选‘导入前删除目标库中同名表’，或先处理这些表后再导入。"
+                _progress_q.put(("drag_progress", {
+                    "percent": 0,
+                    "status": "发现目标库同名表，导入已停止",
+                    "table_total": total
+                }))
+                return {"ok": False, "precheck": True, "existing_tables": existing, "msg": msg}
+
+        for index, name in enumerate(names):
+            if _query_cancel.is_set():
+                return {"ok": False, "cancelled": True, "msg": "操作已取消",
+                        "total": total, "succeeded": len([x for x in results if x.get('ok')]),
+                        "failed": len([x for x in results if not x.get('ok')]), "results": results}
+            _progress_q.put(("drag_progress", {
+                "percent": int(index * 100 / total),
+                "status": f"正在导入第 {index + 1}/{total} 张表：{name}",
+                "table_index": index + 1,
+                "table_total": total,
+                "table_name": name
+            }))
+            result = drag_copy_table(src_conn_data, src_db, name, dst_conn_data, dst_db,
+                                     copy_data, None, drop_existing)
+            results.append({"table": name, **(result or {"ok": False, "msg": "无响应"})})
+            # drag_copy_table 内部按表使用独立的 begin 事务；函数返回表示该表已提交，
+            # 在开始下一张表前明确通知前端，避免用户误以为全部表结束后才提交。
+            _progress_q.put(("drag_progress", {
+                "percent": int((index + 1) * 100 / total),
+                "status": (f"第 {index + 1}/{total} 张表已导入并提交：{name}"
+                           if result and result.get("ok") and not result.get("partial")
+                           else (f"第 {index + 1}/{total} 张表结构已提交，数据导入部分失败：{name}"
+                                 if result and result.get("partial")
+                                 else f"第 {index + 1}/{total} 张表处理完成：{name}")),
+                "table_index": index + 1,
+                "table_total": total,
+                "table_name": name,
+                "committed": bool(result and result.get("ok") and not result.get("partial"))
+            }))
+            if result and result.get("cancelled"):
+                return {"ok": False, "cancelled": True, "msg": "操作已取消",
+                        "total": total, "succeeded": len([x for x in results if x.get('ok')]),
+                        "failed": len([x for x in results if not x.get('ok')]), "results": results}
+
+        succeeded = [x for x in results if x.get("ok")]
+        failed = [x for x in results if not x.get("ok")]
+        _progress_q.put(("drag_progress", {
+            "percent": 100,
+            "status": f"导入完成：成功 {len(succeeded)} 张，失败 {len(failed)} 张"
+        }))
+        if failed:
+            msg = "；".join(f"[{x['table']}] {x.get('msg', '失败')}" for x in failed)
+            return {"ok": False, "partial": bool(succeeded), "msg": msg,
+                    "total": total, "succeeded": len(succeeded), "failed": len(failed),
+                    "results": results}
+        return {"ok": True, "msg": f"已成功导入 {len(succeeded)} 张表到目标库 [{dst_db}]",
+                "total": total, "succeeded": len(succeeded), "failed": 0, "results": results}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
 def _batch_insert(conn, tbl, columns, batch):
     """批量插入数据"""
     if not batch:
@@ -5576,7 +6542,8 @@ def export_wizard_get_tables(conn_data, database, schema=''):
         if db_type != 'oracle':
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
-        tables = db_explore_get_tables(cdata, database, schema or '')
+        # ★ 用同步版获取表列表：db_explore_get_tables 已改为异步返回 job_id，不能直接消费
+        tables = _db_explore_get_tables_sync(cdata, database, schema or '')
         engine.dispose()
         if isinstance(tables, dict) and tables.get("ok"):
             return {"ok": True, "tables": [t["name"] for t in tables["tables"]]}
@@ -5848,8 +6815,8 @@ def save_import_file(content, filename):
 
 
 @eel.expose
-def import_wizard_run(conn_data, database, file_path, file_type, schema='', content=''):
-    """执行导入（后台线程），支持直接传内容或文件路径"""
+def import_wizard_run(conn_data, database, file_path, file_type, schema='', content='', file_name='', drop_existing=False):
+    """导入向导执行（后台线程）。drop_existing 只删除目标库同名表。"""
     def _check_db_prefix(content, db_type, target_db):
         """检查 SQL 文件中是否包含数据库前缀，如果有且与目标库不一致则返回错误"""
         imported_dbs = set()
@@ -5927,8 +6894,30 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                 if not header:
                     _progress_q.put(("import_error", {"msg": "CSV 文件无标题行"}))
                     return
-                # 用文件名作为表名
-                tbl_name = os.path.splitext(os.path.basename(file_path))[0]
+                # ★ 过滤空白/无意义表头列（如行末多余逗号产生的空列），并记录有效列索引
+                _strip_n = lambda s: (s or '').strip()
+                _valid = [i for i, h in enumerate(header) if _strip_n(h)]
+                if len(_valid) < len(header):
+                    # 表头被精简，逐行同步过滤对应列
+                    filtered_rows = []
+                    for _r in reader:
+                        filtered_rows.append([_r[i] if i < len(_r) else '' for i in _valid])
+                    header = [_strip_n(header[i]) for i in _valid]
+                    reader = iter(filtered_rows)
+                else:
+                    header = [_strip_n(h) for h in header]
+                # ★ 表名推导：优先 file_path，其次 file_name，均为空则用 schema 或默认值
+                if file_path:
+                    tbl_name = os.path.splitext(os.path.basename(file_path))[0]
+                elif file_name:
+                    tbl_name = os.path.splitext(os.path.basename(file_name))[0]
+                else:
+                    tbl_name = schema or 'import_data'
+                # 安全标识：去掉非法字符，兜底 import_data
+                try:
+                    tbl_name = _safe_ident(tbl_name, db_type) or 'import_data'
+                except Exception:
+                    tbl_name = ''.join(ch for ch in tbl_name if ch.isalnum() or ch == '_') or 'import_data'
                 tbl = _build_table_ref(cdata, database, tbl_name)
                 cols = ", ".join(_safe_ident(h, db_type) for h in header)
                 ph = ", ".join(":" + h for h in header)
@@ -5939,13 +6928,36 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                 batch_size = 5000
                 processed = 0
                 with engine.begin() as conn:
-                    # 自动建表
-                    conn.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
-                    _log_db_delete(f"DROP TABLE IF EXISTS {tbl}")
-                    col_defs = ", ".join(f"{_safe_ident(h, db_type)} TEXT" for h in header)
-                    create_sql = f"CREATE TABLE {tbl} ({col_defs})"
-                    conn.execute(text(create_sql))
-                    _db_op_logger.info(f"[DDL] {create_sql}")
+                    # 判断表是否已存在（不删除原表模式需要）
+                    def _table_exists():
+                        try:
+                            if db_type == 'oracle':
+                                sql = (f"SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = UPPER('{cdata.get('user','')}') "
+                                       f"AND TABLE_NAME = UPPER('{tbl_name}')")
+                            elif db_type == 'postgresql':
+                                sql = (f"SELECT COUNT(*) FROM information_schema.tables "
+                                       f"WHERE table_schema = '{cdata.get('db','public')}' AND table_name = '{tbl_name}'")
+                            else:
+                                sql = (f"SELECT COUNT(*) FROM information_schema.tables "
+                                       f"WHERE table_schema = DATABASE() AND table_name = '{tbl_name}'")
+                            return bool(conn.execute(text(sql)).scalar())
+                        except Exception:
+                            return False
+                    existed = _table_exists() if not drop_existing else False
+
+                    if not existed:
+                        # 表不存在 → 删除残留（若有）并建表
+                        if drop_existing:
+                            conn.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
+                            _log_db_delete(f"DROP TABLE IF EXISTS {tbl}")
+                        col_defs = ", ".join(f"{_safe_ident(h, db_type)} TEXT" for h in header)
+                        create_sql = f"CREATE TABLE {tbl} ({col_defs})"
+                        conn.execute(text(create_sql))
+                        _db_op_logger.info(f"[DDL] {create_sql}")
+                    else:
+                        # 不删除原表：表已存在，直接追加（不建表、不删表）
+                        _log_db_insert(f"表 {tbl_name} 已存在，跳过建表，追加导入 {total} 行")
+
                     insert_template = f"INSERT INTO {tbl} ({cols}) VALUES ({ph})"
                     _log_db_insert(f"{insert_template}  -- 共 {total} 行（批量导入）")
                     for row in rows:
@@ -6214,6 +7226,73 @@ def slow_query_get_list(data: dict, start_time: str = '', end_time: str = '',
                     engine.dispose()
                     return {"ok": False, "msg": "当前数据库不支持 performance_schema 慢查询统计",
                             "rows": [], "total": 0}
+
+                # ★ 勾选了「只看今天」（start_time 非空）时：
+                #   events_statements_summary_by_digest 是纯累计表，无时间维度，无法过滤历史。
+                #   改用带时间戳的明细表 events_statements_history_long 只聚合时间段内的真实数据。
+                #   TIMER_START 是自服务器启动的皮秒数，需换算成墙钟时间（NOW - Uptime + TIMER_START）。
+                if start_time:
+                    hist_check = conn.execute(text("""
+                        SELECT COUNT(*) FROM information_schema.tables
+                        WHERE table_schema='performance_schema'
+                          AND table_name='events_statements_history_long'
+                    """)).scalar()
+                    if hist_check and hist_check > 0:
+                        hist_where = ["e.TIMER_WAIT > 1000000000000"]
+                        params = {"lim": limit}
+                        if start_time:
+                            hist_where.append("DATE_FORMAT(CAST(FROM_UNIXTIME((SELECT UNIX_TIMESTAMP(NOW(6)) - CAST((SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Uptime') AS DECIMAL(20,0)) ) + e.TIMER_START/1000000000000.0) AS DATETIME(6)), '%Y-%m-%d %H:%i:%s') >= :st")
+                            params["st"] = start_time
+                        if end_time:
+                            hist_where.append("DATE_FORMAT(CAST(FROM_UNIXTIME((SELECT UNIX_TIMESTAMP(NOW(6)) - CAST((SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Uptime') AS DECIMAL(20,0)) ) + e.TIMER_START/1000000000000.0) AS DATETIME(6)), '%Y-%m-%d %H:%i:%s') <= :et")
+                            params["et"] = end_time
+                        hist_where_clause = " AND ".join(hist_where)
+                        sql = text(f"""
+                            SELECT
+                                e.SCHEMA_NAME as schema_name,
+                                e.DIGEST_TEXT as digest_text,
+                                COUNT(1) as count_star,
+                                SUM(e.TIMER_WAIT)/1000000000000.0 as total_time_sec,
+                                AVG(e.TIMER_WAIT)/1000000000000.0 as avg_time_sec,
+                                MAX(e.TIMER_WAIT)/1000000000000.0 as max_time_sec,
+                                SUM(e.ROWS_SENT) as rows_sent,
+                                SUM(e.ROWS_EXAMINED) as rows_examined,
+                                SUM(e.STATEMENT_STATUS='ERROR' AND e.ERRORS>0) as errors,
+                                SUM(e.WARNINGS) as warnings,
+                                MIN(CAST(FROM_UNIXTIME((SELECT UNIX_TIMESTAMP(NOW(6)) - CAST((SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Uptime') AS DECIMAL(20,0)) ) + e.TIMER_START/1000000000000.0) AS DATETIME(6))) as first_seen,
+                                MAX(CAST(FROM_UNIXTIME((SELECT UNIX_TIMESTAMP(NOW(6)) - CAST((SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='Uptime') AS DECIMAL(20,0)) ) + e.TIMER_START/1000000000000.0) AS DATETIME(6))) as last_seen
+                            FROM performance_schema.events_statements_history_long e
+                            WHERE {hist_where_clause}
+                            GROUP BY e.SCHEMA_NAME, e.DIGEST_TEXT
+                            ORDER BY AVG(e.TIMER_WAIT) DESC
+                            LIMIT :lim
+                        """)
+                        try:
+                            exec_result = conn.execute(sql, params)
+                            columns, rows = _rows_to_dicts(exec_result)
+                        except Exception:
+                            # 兼容旧版本 MySQL（无 Uptime 转换列等），回退到全量累计表
+                            exec_result = conn.execute(text("""
+                                SELECT SCHEMA_NAME as schema_name, DIGEST_TEXT as digest_text,
+                                    COUNT_STAR as count_star, SUM_TIMER_WAIT/1000000000000.0 as total_time_sec,
+                                    AVG_TIMER_WAIT/1000000000000.0 as avg_time_sec, MAX_TIMER_WAIT/1000000000000.0 as max_time_sec,
+                                    SUM_ROWS_SENT as rows_sent, SUM_ROWS_EXAMINED as rows_examined,
+                                    SUM_ERRORS as errors, SUM_WARNINGS as warnings,
+                                    FIRST_SEEN as first_seen, LAST_SEEN as last_seen
+                                FROM performance_schema.events_statements_summary_by_digest
+                                WHERE AVG_TIMER_WAIT > 1000000000000
+                                ORDER BY AVG_TIMER_WAIT DESC LIMIT :lim
+                            """), {"lim": limit})
+                            columns, rows = _rows_to_dicts(exec_result)
+                        engine.dispose()
+                        return {
+                            "ok": True,
+                            "columns": columns,
+                            "rows": rows,
+                            "total": len(rows),
+                            "time_window": True,
+                        }
+                    # history_long 不可用 → 回退累计表（无法按时间精确过滤，保持原逻辑）
 
                 sql = text("""
                     SELECT

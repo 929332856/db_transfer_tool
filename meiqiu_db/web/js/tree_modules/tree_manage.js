@@ -284,7 +284,7 @@ function showConnDialog(pid, editCid) {
     h += '<div class="form-row"><label>类型</label><div class="type-selector">';
     dbTypes.forEach(function(t){
         var sel = t.value===curType ? ' selected' : '';
-        h += '<div class="type-opt'+sel+'" data-val="'+t.value+'" onclick="selectType(this)">'+DB_ICONS[t.value]+' '+t.label+'</div>';
+        h += '<div class="type-opt'+sel+'" data-val="'+t.value+'" onclick="selectType(this)">'+_dbLogoImg(t.value,16)+' '+t.label+'</div>';
     });
     h += '</div></div>';
     h += '<input type="hidden" id="cf_type" value="'+curType+'">';
@@ -652,6 +652,10 @@ function showImportWizard(cid, db, schema) {
                 '<button class="btn btn-blue btn-sm" id="btn_pick_import" onclick="pickImportFile()">📁 选择文件</button>' +
                 '<span id="import_file_label" style="font-size:11px;color:#888;">未选择</span>' +
             '</div>' +
+            '<label style="display:flex;align-items:center;gap:8px;margin:6px 0 0;padding:0;font-size:12px;cursor:pointer;" title="取消勾选后，CSV 导入不会删除原表，而是直接追加数据到已有表（表不存在则自动创建）">' +
+                '<input type="checkbox" id="imp_drop_existing" style="flex-shrink:0;width:15px;height:15px;cursor:pointer;">' +
+                '<span>导入前删除目标库同名表（仅目标库，CSV 有效）</span>' +
+            '</label>' +
         '</div>';
 
     document.getElementById('modal_icon').innerHTML = '📥';
@@ -688,6 +692,8 @@ function importWizardStart() {
     var conn = treeData && treeData.connections ? treeData.connections[ds.cid] : null;
     var fileName = window._importFileName || 'import.sql';
     var content = window._importFileContent;
+    var dropEl = document.getElementById('imp_drop_existing');
+    var dropExisting = !!(dropEl && dropEl.checked);  // 只删除目标库同名表，默认不删除
 
     var html =
         '<div style="padding:10px 0;">' +
@@ -698,7 +704,7 @@ function importWizardStart() {
             '<div id="import_status" style="font-size:11px;color:#888;"></div>' +
             '<div style="margin-top:10px;border:1px solid #333;border-radius:4px;overflow:hidden;">' +
                 '<div style="background:#2a2a2a;padding:4px 10px;font-size:11px;color:#aaa;border-bottom:1px solid #333;">📋 导入日志</div>' +
-                '<div id="import_log_area" style="height:100px;overflow-y:auto;padding:6px 10px;background:#0d1117;font-family:Consolas,monospace;font-size:11px;line-height:1.6;"></div>' +
+                '<div id="import_log_area" class="import-log-area" style="height:100px;overflow-y:auto;padding:6px 10px;font-family:Consolas,monospace;font-size:11px;line-height:1.6;"></div>' +
             '</div>' +
         '</div>';
     document.getElementById('modal_msg').innerHTML = html;
@@ -740,7 +746,7 @@ function importWizardStart() {
         });
     }, 300);
 
-    eel.import_wizard_run(conn, ds.db, '', fileType, ds.schema, content || '')();
+    eel.import_wizard_run(conn, ds.db, '', fileType, ds.schema, content || '', window._importFileName || '', dropExisting)();
 }
 
 // ==================== 数据加载 ====================

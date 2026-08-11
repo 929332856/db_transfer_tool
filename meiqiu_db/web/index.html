@@ -6,7 +6,15 @@
     <title>MQDB</title>
     <link rel="icon" type="image/x-icon" href="mqdb.ico">
     <!-- ★ 同步读取 localStorage 主题，必须在 CSS 加载前执行防止闪烁 -->
-    <script>if(localStorage.getItem('mqdb_theme')==='light')document.documentElement.classList.add('light-theme')</script>
+    <script>
+        // 启动 URL 优先于 localStorage：PyWebView 默认 private_mode 会清空 localStorage，
+        // 必须在首个页面绘制前确定主题，避免浅色主题先闪黑再变白。
+        (function () {
+            var startupTheme = new URLSearchParams(window.location.search).get('theme');
+            var theme = startupTheme || localStorage.getItem('mqdb_theme');
+            if (theme === 'light') document.documentElement.classList.add('light-theme');
+        })();
+    </script>
     <!-- ★ 内联 body 背景色，避免加载前闪黑 -->
     <style>
         html,body{margin:0;padding:0;background:#1e1e2e;color:#e0e0e0}
@@ -15,6 +23,8 @@
     <link rel="stylesheet" href="css/style.css">
     <!-- ★ Flask 适配层：替代 Eel，eel.xxx()(callback) → fetch() -->
     <script src="js/eel_adapter.js"></script>
+    <script src="js/mq_icons.js"></script>
+    <script src="js/mq_apply_icons.js"></script>
     <script>
         // ★ 页面渲染完成后通知 PyWebView 显示窗口（消除启动闪黑）
         document.addEventListener('DOMContentLoaded', function() {
@@ -40,20 +50,20 @@
             <!-- 顶部工具栏 -->
             <div class="top-toolbar" id="top_toolbar">
                 <div class="top-import-wrap">
-                    <button class="top-import-btn" onclick="toggleImportDropdown(event)" title="导入数据库连接">📥 导入数据库连接 ▾</button>
+                    <button class="top-import-btn" onclick="toggleImportDropdown(event)">📥 导入数据库连接 ▾</button>
                     <div class="top-import-dropdown" id="import_dropdown">
                         <div class="top-import-item" onclick="showDgImportDialog();hideImportDropdown()">📄 DataGrip 导入</div>
-                        <div class="top-import-item import-disabled" title="即将支持">📄 Navicat 导入 <span style="color:#666;font-size:10px;">（即将上线）</span></div>
+                        <div class="top-import-item import-disabled">📄 Navicat 导入 <span style="color:#666;font-size:10px;">（即将上线）</span></div>
                     </div>
                 </div>
                 <span style="width:1px;height:18px;background:#444;display:inline-block;margin:0 8px;"></span>
-                <button class="top-toolbar-btn" onclick="openSettings()" title="工具/选项">🔧 工具</button>
+                <button class="top-toolbar-btn" onclick="openSettings()">🔧 工具</button>
             </div>
             <!-- 顶部 Tab 栏 -->
             <div class="top-tabs" id="top_tabs">
                 <button class="top-tab-btn active" onclick="showPanel('my_connections')">📁 我的连接</button>
                 <button class="top-tab-btn" onclick="showPanel('sync')">📦 数据库同步</button>
-                <button class="top-tab-btn" onclick="showPanel('slowquery')">📊 数据库性能监控</button>
+                <button class="top-tab-btn" onclick="showPanel('slowquery')">⚡ 数据库性能监控</button>
             </div>
 
             <!-- 我的连接 + 对象浏览 分栏 -->
@@ -132,9 +142,15 @@
                 </div>
                 <div class="tbl-row">
                     <label>表名:</label>
-                    <input type="text" id="table_name" placeholder="留空则导入整个数据库（多表用逗号分隔，如: users,orders）">
+                    <div class="tbl-name-wrap">
+                        <input type="text" id="table_name" placeholder="留空则导入整个数据库（多表用逗号分隔，如: users,orders）">
+                        <button class="btn btn-sm btn-blue" id="btn_pick_src_tables" onclick="openSyncTablePicker()" title="从源库拉取表列表进行多选">📋 选择表</button>
+                    </div>
                     <label style="margin-left:20px;">每批行数:</label>
                     <input type="number" id="sync_batch_size" placeholder="10000" value="10000" min="1000" max="100000" style="width:100px;margin-right:4px;" title="每批传输行数，越小越省内存">
+                    <label style="margin-left:16px;display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary,#aaa);cursor:pointer;" title="多张表时每表独立连接同时传输（最多4路并发），大库整库同步可显著提速">
+                        <input type="checkbox" id="sync_parallel" style="width:14px;height:14px;flex-shrink:0;">⚡ 多表并行传输
+                    </label>
                 </div>
                 <div class="btn-row">
                     <button class="btn btn-primary btn-lg" id="btn_start" onclick="startTransfer()">🚀 开始传输</button>
@@ -145,6 +161,10 @@
                     <span class="progress-text" id="progress_text">就绪</span>
                 </div>
                 <div class="sync-log-section">
+                    <div class="sync-log-header">
+                        <span>📋 传输日志</span>
+                        <button class="btn btn-sm" onclick="copySyncLog()" title="复制全部日志内容">📄 复制全部</button>
+                    </div>
                     <div class="log-box" id="log_box"></div>
                 </div>
             </div>
@@ -156,8 +176,8 @@
             <div class="content-panel" id="panel_slowquery">
                 <!-- ★ 子 Tab 切换：慢SQL分析 / 仪表盘 / 主从监控 -->
                 <div class="sq-subtabs">
-                    <button class="sq-subtab active" id="sq_subtab_sq" onclick="switchSqSubtab('sq')">📊 慢SQL分析</button>
-                    <button class="sq-subtab" id="sq_subtab_dash" onclick="switchSqSubtab('dash')">📈 服务器仪表盘</button>
+                    <button class="sq-subtab active" id="sq_subtab_sq" onclick="switchSqSubtab('sq')">🐌 慢SQL分析</button>
+                    <button class="sq-subtab" id="sq_subtab_dash" onclick="switchSqSubtab('dash')">🖥️ 服务器仪表盘</button>
                     <button class="sq-subtab" id="sq_subtab_repl" onclick="switchSqSubtab('repl')">🔄 主从监控</button>
                 </div>
                 <!-- 连接选择器（两个子tab共用） -->
@@ -185,7 +205,8 @@
                                    style="width:60px;height:26px;" title="慢查询时间阈值（秒）">
                         </span>
                         <button class="btn btn-sm btn-blue" id="sq_btn_refresh" onclick="slowQueryRefresh()">🔄 刷新</button>
-                        <button class="btn btn-sm" id="sq_btn_running" onclick="slowQueryLoadRunning()">🏃 运行进程</button>
+                        <button class="btn btn-sm" id="sq_btn_today" onclick="toggleSqToday()" style="background:#555;color:#fff;" title="只显示今天的慢SQL">📅 今天</button>
+                        <button class="btn btn-sm" id="sq_btn_running" onclick="slowQueryLoadRunning()" title="查看当前正在运行的进程（相当于 SHOW PROCESSLIST，仅显示有 SQL 在执行且 TIME≥1s 的会话，支持一键终止）">🏃 运行进程</button>
                     </div>
                 </div>
 
@@ -219,7 +240,8 @@
                                 <th style="width:85px;cursor:pointer;" onclick="sqSort('max_time_sec')" title="点击排序">
                                     最大耗时(s) <span class="sq-sort-arrow" id="sq_sort_max_time_sec"></span></th>
                                 <th style="width:65px;">扫描行数</th>
-                                <th style="width:80px;">最近执行</th>
+                                <th style="width:80px;cursor:pointer;" onclick="sqSortDate('last_seen')" title="按最近执行时间排序">
+                                    最近执行 <span class="sq-sort-arrow" id="sq_sort_last_seen"></span></th>
                             </tr>
                             <tr id="sq_thead_log" style="display:none;">
                                 <th style="width:40px;">#</th>
@@ -232,7 +254,8 @@
                                     锁等待(s) <span class="sq-sort-arrow" id="sq_sort_lock_time"></span></th>
                                 <th style="width:65px;">扫描行</th>
                                 <th style="width:55px;">返回行</th>
-                                <th style="width:80px;">执行时间</th>
+                                <th style="width:80px;cursor:pointer;" onclick="sqSortLogDate('start_time')" title="按执行时间排序">
+                                    执行时间 <span class="sq-sort-arrow" id="sq_sort_start_time"></span></th>
                             </tr>
                         </thead>
                         <tbody id="sq_tbody">
@@ -244,7 +267,7 @@
                 <!-- ★ 仪表盘视图（默认隐藏） -->
                 <div class="dash-view" id="dash_view" style="display:none;">
                     <div class="dash-toolbar">
-                        <div class="dash-title">📈 服务器仪表盘 <span id="dash_server_info" class="dash-server-info">--</span></div>
+                        <div class="dash-title">🖥️ 服务器仪表盘 <span id="dash_server_info" class="dash-server-info">--</span></div>
                         <div class="dash-toolbar-right">
                             <span class="slow-label">自动刷新:</span>
                             <select id="dash_interval" onchange="changeDashInterval()" style="height:26px;">

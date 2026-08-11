@@ -4,7 +4,8 @@ MQDB 主入口（Flask + PyWebView）
 - 多连接测试互相阻塞（Flask 多线程）
 - 关闭窗口残留进程（PyWebView 系统 WebView）
 """
-import sys, os, threading, socket, time
+import sys, os, threading, socket, time, json
+from urllib.parse import quote
 
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -51,6 +52,24 @@ def find_free_port():
     return port
 
 
+def _get_startup_theme():
+    """读取启动时主题，供原生窗口和页面首帧同时使用。"""
+    try:
+        settings_path = os.path.join(BASE_DIR, "settings.json")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+        if isinstance(settings, dict) and settings.get("theme") == "light":
+            return "light"
+    except Exception:
+        pass
+    return "dark"
+
+
+def _get_startup_background_color():
+    """返回与用户主题一致的原生窗口底色，避免 WebView 首帧闪黑。"""
+    return "#f5f6fa" if _get_startup_theme() == "light" else "#1e1e2e"
+
+
 def run_flask(app, port):
     """在独立线程中运行 Flask"""
     from waitress import serve
@@ -63,13 +82,17 @@ def start_webview(port):
     import urllib.request
 
     # 等 Flask 就绪
-    url = f"http://127.0.0.1:{port}"
+    base_url = f"http://127.0.0.1:{port}"
     for _ in range(60):
         try:
-            urllib.request.urlopen(f"{url}/api/ping", timeout=0.5)
+            urllib.request.urlopen(f"{base_url}/api/ping", timeout=0.5)
             break
         except Exception:
             time.sleep(0.3)
+
+    # PyWebView 默认 private_mode=True，每次启动 localStorage 都是空的。
+    # 直接把主题放进首个页面 URL，避免页面先按深色绘制再切换到浅色。
+    url = f"{base_url}/?theme={quote(_get_startup_theme())}"
 
     window = webview.create_window(
         "MQDB",
@@ -78,27 +101,39 @@ def start_webview(port):
         height=860,
         resizable=True,
         min_size=(900, 600),
+        # 原生窗口会先于 HTML/CSS 绘制；这里必须设置成当前主题的颜色，
+        # 否则浅色主题会经历“黑色原生底 → 白色页面”的闪烁。
+        background_color=_get_startup_background_color(),
         hidden=True,  # ★ 先隐藏，等页面渲染完成再显示，避免闪黑
     )
 
-    # ★ 暴露给前端 JS 调用：页面就绪后显示窗口
+    # 页面加载完成后立即显示窗口。DOMContentLoaded 可能早于 pywebview API 注入，
+    # 所以不能只依赖前端事件，否则会落到固定的 3 秒兜底延迟。
+    shown = threading.Event()
+
     def show_window():
-        window.show()
+        if shown.is_set():
+            return
+        try:
+            window.show()
+            shown.set()
+        except Exception:
+            pass
+
+    def show_on_loaded(window):
+        show_window()
 
     try:
+        window.events.loaded += show_on_loaded
         window.expose(show_window)
     except Exception:
         pass
 
-    # ★ 安全兆底：如果 JS 没有触发，3秒后强制显示
+    # 仅用于异常兜底；正常情况下会由 loaded 事件立即显示。
     def _fallback_show():
-        time.sleep(3)
-        try:
-            window.show()
-        except Exception:
-            pass
+        time.sleep(10)
+        show_window()
 
-    import threading
     threading.Thread(target=_fallback_show, daemon=True).start()
 
     webview.start()

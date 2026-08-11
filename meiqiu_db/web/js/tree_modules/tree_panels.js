@@ -44,6 +44,23 @@ function renderMyConnectionsList() {
     // ★ 初始化可拖拽分隔条
     if (typeof initConnSplitter === 'function') initConnSplitter();
     if (typeof initInfoSplitter === 'function') initInfoSplitter();
+    // ★ 绑定连接行悬浮 Tooltip（事件委托）
+    list.onmouseover = function(e) {
+        var row = e.target && e.target.closest('.conn-row');
+        if (!row) return;
+        var node = row.closest('.tree-node[data-cid]');
+        if (!node) return;
+        var cid = node.getAttribute('data-cid');
+        if (cid) _showConnTooltip(row, cid);
+    };
+    list.onmouseout = function(e) {
+        var row = e.target && e.target.closest('.conn-row');
+        if (!row) return;
+        var rel = e.relatedTarget;
+        if (rel && row.contains(rel)) return; // 仍在当前行内部移动
+        _hideConnTooltip();
+    };
+    list.onmouseleave = function() { _hideConnTooltip(); };
 }
 
 function getConnectionsByFolder(pid) {
@@ -78,7 +95,7 @@ function renderConn(c, indent) {
     return '<div class="tree-node" data-cid="'+cid+'"><div class="my-conn-row conn-row drag-conn-item conn-color-tint" draggable="true" style="padding-left:'+pad+'px;'+colorStyle+'" onclick="showConnInfo(\''+cid+'\')" ondblclick="expandConn(\''+cid+'\','+pad+')" oncontextmenu="connCtx(event,\''+cid+'\')" ondragstart="onConnDragStart(event,\''+cid+'\')" ondragend="onConnDragEnd(event,\''+cid+'\')">' +
         '<span class="arrow" id="ma_c_'+cid+'" onclick="event.stopPropagation();toggleConnChildren(\''+cid+'\')" style="visibility:hidden">▸</span>' +
         '<span class="my-conn-icon db-icon closed">'+icon+'</span><span class="my-conn-name">'+escapeHtml(c.name)+colorDot+'</span>' +
-        '<span class="my-conn-host">'+escapeHtml(c.host+':'+c.port)+'</span></div>' +
+        '</div>' +
         '<div class="tree-children" id="mc_c_'+cid+'"></div></div>';
 }
 
@@ -220,7 +237,7 @@ function renderDbCats(cid, db, pad, schema) {
     var dbKey = safeBtoa(key);
     var p = pad + 16;
     var sch = schema || '';
-    return catRow('tables','📋',cid,db,dbKey,p,'clickTableCat','tableCatCtx',sch) +
+    return catRow('tables',(window.MQ_ICON&&window.MQ_ICON.table)||'📋',cid,db,dbKey,p,'clickTableCat','tableCatCtx',sch) +
            catRow('views','👁',cid,db,dbKey,p,'clickCat','',sch) +
            catRow('procedures','⚙',cid,db,dbKey,p,'clickCat','',sch) +
            catRow('functions','𝑓',cid,db,dbKey,p,'clickCat','',sch) +
@@ -230,7 +247,7 @@ function renderDbCats(cid, db, pad, schema) {
 function renderOraCats(cid, db, pad) {
     var dbKey = safeBtoa(db);
     var p = pad + 16;
-    return catRow('tables',    '📊',cid,db,dbKey,p,'clickTableCat','tableCatCtx','') +
+    return catRow('tables',    (window.MQ_ICON&&window.MQ_ICON.table)||'📊',cid,db,dbKey,p,'clickTableCat','tableCatCtx','') +
            catRow('views',     '👁',cid,db,dbKey,p,'clickCat','','') +
            catRow('mviews',    '📋',cid,db,dbKey,p,'clickCat','','') +
            catRow('indexes',   '🔍',cid,db,dbKey,p,'clickCat','','') +
@@ -320,5 +337,71 @@ function highlightRow(el) {
     }
 }
 function highlightCat(rowId) { highlightRow(document.getElementById(rowId)); }
+
+// ==================== 连接信息悬浮 Tooltip ====================
+var _connTooltipEl = null;
+var _connTooltipTimer = null;
+
+function _ensureConnTooltip() {
+    if (_connTooltipEl) return;
+    _connTooltipEl = document.createElement('div');
+    _connTooltipEl.className = 'conn-tooltip';
+    document.body.appendChild(_connTooltipEl);
+}
+
+function _buildConnTypeLabel(conn) {
+    var type = (conn.db_type || 'mysql').toLowerCase();
+    var map = {
+        'mysql': 'MySQL', 'ob-mysql': 'OB-MySQL', 'mariadb': 'MariaDB',
+        'postgresql': 'PostgreSQL', 'oracle': 'Oracle', 'mssql': 'SQL Server', 'redis': 'Redis'
+    };
+    return map[type] || (conn.db_type || 'MySQL');
+}
+
+function _showConnTooltip(el, cid) {
+    clearTimeout(_connTooltipTimer);
+    _ensureConnTooltip();
+    var conn = treeData && treeData.connections && treeData.connections[cid];
+    if (!conn) return;
+    var typeLabel = _buildConnTypeLabel(conn);
+    _connTooltipEl.innerHTML =
+        '<div class="conn-tt-row"><span class="conn-tt-label">名称</span><span class="conn-tt-value">' + escapeHtml(conn.name || '') + '</span></div>' +
+        '<div class="conn-tt-row"><span class="conn-tt-label">主机</span><span class="conn-tt-value">' + escapeHtml(conn.host || '') + '</span></div>' +
+        '<div class="conn-tt-row"><span class="conn-tt-label">Port</span><span class="conn-tt-value">' + escapeHtml(conn.port || '') + '</span></div>' +
+        '<div class="conn-tt-row"><span class="conn-tt-label">用户名</span><span class="conn-tt-value">' + escapeHtml(conn.user || '') + '</span></div>' +
+        '<div class="conn-tt-row"><span class="conn-tt-label">类型</span><span class="conn-tt-value">' + escapeHtml(typeLabel) + '</span></div>';
+    _connTooltipEl.style.display = 'block';
+    _positionConnTooltip(el);
+}
+
+function _positionConnTooltip(el) {
+    if (!_connTooltipEl) return;
+    var ttW = _connTooltipEl.offsetWidth || 260;
+    var ttH = _connTooltipEl.offsetHeight || 120;
+    var rect = el.getBoundingClientRect();
+    // ★ 显示在连接行的右侧，垂直方向与该行居中
+    var left = rect.right + 10;
+    var top = rect.top + (rect.height - ttH) / 2;
+    // 右侧放不下时翻到左侧
+    if (left + ttW > window.innerWidth - 6) {
+        left = Math.max(4, rect.left - ttW - 10);
+    }
+    // 垂直越界时贴边
+    if (top < 4) top = 4;
+    if (top + ttH > window.innerHeight - 6) {
+        top = Math.max(4, window.innerHeight - ttH - 6);
+    }
+    _connTooltipEl.style.left = left + 'px';
+    _connTooltipEl.style.top = top + 'px';
+}
+
+function _hideConnTooltip() {
+    clearTimeout(_connTooltipTimer);
+    if (_connTooltipEl) {
+        _connTooltipTimer = setTimeout(function() {
+            if (_connTooltipEl) _connTooltipEl.style.display = 'none';
+        }, 120);
+    }
+}
 
 

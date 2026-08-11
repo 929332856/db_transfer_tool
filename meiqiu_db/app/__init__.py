@@ -5,6 +5,7 @@ Flask 应用工厂 + PyWebView 桌面窗口
 2. 关闭窗口残留进程（PyWebView 用系统 WebView，关闭即清理）
 """
 import os, sys, json, threading, time
+from urllib.parse import quote
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
@@ -52,6 +53,26 @@ def create_app():
     return app
 
 
+def _get_startup_theme():
+    """读取启动时主题，供原生窗口和页面首帧同时使用。"""
+    try:
+        settings_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
+        if getattr(sys, 'frozen', False):
+            settings_path = os.path.join(os.path.dirname(sys.executable), "settings.json")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+        if isinstance(settings, dict) and settings.get("theme") == "light":
+            return "light"
+    except Exception:
+        pass
+    return "dark"
+
+
+def _get_startup_background_color():
+    """返回与用户主题一致的原生窗口底色，避免 WebView 首帧闪黑。"""
+    return "#f5f6fa" if _get_startup_theme() == "light" else "#1e1e2e"
+
+
 def _run_flask(app, port):
     """在独立线程中运行 Flask（不阻塞主线程）"""
     from waitress import serve
@@ -72,14 +93,15 @@ def start_webview(port):
     # ★ 窗口图标：mqdb.ico（Windows 任务栏/标题栏图标）
     ico_path = os.path.join(WEB_DIR, 'mqdb.ico')
     icon_path = ico_path if os.path.isfile(ico_path) else None
+    theme = _get_startup_theme()
     window = webview.create_window(
         "MQDB",
-        f"http://127.0.0.1:{port}",
+        f"http://127.0.0.1:{port}/?theme={quote(theme)}",
         width=1280,
         height=860,
         resizable=True,
         min_size=(900, 600),
-        background_color='#f5f6fa',  # ★ 避免加载时闪黑：设置浅色背景色
+        background_color=_get_startup_background_color(),
         **({'icon': icon_path} if icon_path else {}),
     )
     webview.start()

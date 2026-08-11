@@ -160,7 +160,9 @@ def execute_sql_query(sql: str, data: dict):
                 conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 30000"))
             except Exception:
                 pass
-            result = conn.execute(text(sql))
+            # ★ exec_driver_sql 直接执行原生 SQL：避免 text() 把 SQL 中的
+            #    ":7004"（如 JSON 字符串 "port":7004 的值）误解析为绑定参数
+            result = conn.exec_driver_sql(sql)
             if _query_cancel.is_set():
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
             if result.returns_rows:

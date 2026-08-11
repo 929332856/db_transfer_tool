@@ -406,8 +406,7 @@ function _buildQueryEditorHtml(qid, cid, db, sql, name) {
     var connLabel = '';
     var connData = (cid && treeData && treeData.connections) ? treeData.connections[cid] : null;
     if (connData) {
-        var typeIcons = {'mysql':'🐬','ob-mysql':'🌊','postgresql':'🐘','oracle':'🔴','mssql':'🟢','redis':'📦'};
-        var typeIcon = typeIcons[connData.db_type] || '🗄️';
+        var typeIcon = _dbLogoImg(connData.db_type, 14);
         var connName = connData.name || connData.host || '未知连接';
         var dbName = db || '未选择数据库';
         connLabel = '<span class="conn-label" style="margin-left:auto;font-size:11px;white-space:nowrap;">' +
@@ -524,13 +523,15 @@ function _syncLineGutter(qid, ta) {
     if (!ta) return;
     var gutter = document.getElementById('lng_' + qid);
     if (!gutter) return;
-    var lines = (ta.value.match(/\n/g) || []).length + 1;
+    // textarea 会把换行规范化为 LF，但粘贴/恢复内容时仍兼容 CRLF/CR。
+    // 用 split 计算行数，确保末尾空行也有对应的行号。
+    var lines = ta.value.split(/\r\n|\r|\n/).length;
     var html = '';
     var cursorLine = _getCursorLineNo(ta);
-    var lineH = 18; // 约等于 font-size 12 + line-height 18
+    var lineH = parseFloat(window.getComputedStyle(ta).lineHeight) || 18;
     for (var i = 1; i <= lines; i++) {
         var cls = i === cursorLine ? ' class="ln-row ln-active"' : ' class="ln-row"';
-        html += '<div' + cls + ' data-line="' + i + '" onmousedown="_lnSelectLine(\'' + qid + '\',' + i + ',event)">' + i + '</div>';
+        html += '<div' + cls + ' data-line="' + i + '" style="height:' + lineH + 'px;line-height:' + lineH + 'px;" onmousedown="_lnSelectLine(\'' + qid + '\',' + i + ',event)">' + i + '</div>';
     }
     gutter.innerHTML = html;
     // gutter 滚动位置跟随 textarea

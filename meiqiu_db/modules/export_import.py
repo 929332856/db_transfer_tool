@@ -13,6 +13,7 @@ import tkinter
 from sqlalchemy import text, create_engine
 from modules import _progress_q, BASE_DIR
 from modules.conn_utils import _connect_args, _conn_url, _safe_ident, _build_table_ref, _friendly_error
+from modules.db_explorer import db_explore_get_tables
 from modules.config_state import _log_db_select, _log_db_insert, _log_db_update, _log_db_delete, _db_op_logger
 
 # ==================== 导出导入向导 ====================
@@ -63,6 +64,7 @@ def export_wizard_get_columns(conn_data, database, table_name, schema=''):
 
 def _export_run(data, tables, settings, out_path):
     """后台执行导出（SQL / CSV）"""
+    engine = None
     try:
         cdata = dict(data)
         db_type = cdata.get('db_type', 'mysql')
@@ -122,7 +124,9 @@ def _export_run(data, tables, settings, out_path):
                     f.write(ddl + ";\n\n")
 
                 if scope in ("data", "full"):
-                    with engine.connect() as sconn:
+                    # ★ stream_results：逐行从服务端拉取，避免大表全量 buffered 到内存
+                    #    导致 OOM 崩溃（进程崩溃时残留连接同样会引发元数据锁）
+                    with engine.connect().execution_options(stream_results=True) as sconn:
                         result = sconn.execute(text(f"SELECT {col_quoted} FROM {tbl}"))
                         if export_fmt == "csv" and csv_header:
                             f.write(col_plain + "\n")
@@ -171,10 +175,16 @@ def _export_run(data, tables, settings, out_path):
             if export_fmt == "sql":
                 f.write("\nSET FOREIGN_KEY_CHECKS = 1;\n")
 
-        engine.dispose()
         _progress_q.put(("export_done", {"path": out_path}))
     except Exception as e:
         _progress_q.put(("export_error", {"msg": str(e)}))
+    finally:
+        # ★ 任何路径都释放连接池，防止异常退出后连接积压
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
 
 
 @eel.expose
@@ -288,6 +298,7 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
         return (True, "")
 
     def _run():
+        engine = None
         try:
             cdata = dict(conn_data)
             db_type = cdata.get('db_type', 'mysql')
@@ -312,7 +323,9 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                 total = len(statements)
                 done = 0
                 _progress_q.put(("import_progress", {"total": total, "processed": 0, "time": time.strftime("%H:%M:%S")}))
-                with engine.begin() as conn:
+                # ★ 用 connect + 分批 commit（不用 begin 单事务）：大 SQL 文件单事务会
+                #    撑爆 undo log/行锁导致数据库卡死；DDL 隐式提交也会打断 begin 事务
+                with engine.connect() as conn:
                     for stmt in statements:
                         try:
                             conn.execute(text(stmt))
@@ -331,10 +344,13 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                                 pass
                             else:
                                 _db_op_logger.info(f"[EXEC] {stmt}")
-                            if done % 50 == 0:
+                            # ★ 每 500 条提交一次：避免单事务过大
+                            if done % 500 == 0:
+                                conn.commit()
                                 _progress_q.put(("import_progress", {"total": total, "processed": done, "time": time.strftime("%H:%M:%S")}))
                         except Exception as se:
                             _progress_q.put(("import_log", str(se)[:200]))
+                    conn.commit()  # ★ 收尾提交（含 DDL 隐式提交后的残余语句）
                 _progress_q.put(("import_done", {"total": total, "processed": done}))
 
             elif file_type == "csv":
@@ -355,7 +371,8 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                 batch = []
                 batch_size = 5000
                 processed = 0
-                with engine.begin() as conn:
+                # ★ 用 connect + 分批 commit：CSV 百万行单事务同样会撑爆 undo/行锁
+                with engine.connect() as conn:
                     # 自动建表
                     conn.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
                     _log_db_delete(f"DROP TABLE IF EXISTS {tbl}")
@@ -370,15 +387,23 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                         processed += 1
                         if len(batch) >= batch_size:
                             conn.execute(text(insert_template), batch)
+                            conn.commit()  # ★ 每批提交，避免单事务过大
                             batch = []
                             _progress_q.put(("import_progress", {"total": total, "processed": processed, "time": time.strftime("%H:%M:%S")}))
                     if batch:
                         conn.execute(text(insert_template), batch)
+                        conn.commit()
                 _progress_q.put(("import_done", {"total": total, "processed": processed}))
 
-            engine.dispose()
         except Exception as e:
             _progress_q.put(("import_error", {"msg": str(e)}))
+        finally:
+            # ★ 任何路径都释放连接池
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
 
     _progress_q.queue.clear()
     threading.Thread(target=_run, daemon=True).start()

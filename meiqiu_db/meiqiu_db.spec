@@ -1,6 +1,5 @@
 ﻿# -*- mode: python ; coding: utf-8 -*-
 
-from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 # 收集各包的子模块（字符串列表，用于 hiddenimports）
@@ -40,13 +39,8 @@ all_extra_datas = [
     ('db_transfer_eel.py', '.'),      # ★ 主业务模块（.py 源码）
     ('modules', 'modules'),            # ★ 子模块目录
 ] + eel_datas + sa_datas + py_datas + bt_datas + pg_datas + or_datas + ms_datas + redis_datas
-
-if Path('db_profiles.json').exists():
-    all_extra_datas.append(('db_profiles.json', '.'))
-if Path('dist/navicat_tree.json').exists():
-    all_extra_datas.append(('dist/navicat_tree.json', '.'))
-elif Path('navicat_tree.json').exists():
-    all_extra_datas.append(('navicat_tree.json', '.'))
+# 用户配置不打包进程序：db_profiles.json、navicat_tree.json、settings.json
+# 均由程序从 mqdb.exe 同级目录读取，避免把开发机的连接和同步信息发给其他用户。
 
 a = Analysis(
     ['main.py'],  # ★ 入口改为 main.py（Flask + PyWebView）
@@ -75,10 +69,8 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='mqdb',
     debug=False,
     bootloader_ignore_signals=False,
@@ -93,4 +85,17 @@ exe = EXE(
     codesign_identity=None,
     entitlement_file=None,
     icon='web/mqdb.ico',
+)
+
+# 目录版：将运行库、驱动和 web 资源放在 mqdb 文件夹中，
+# 避免单文件 exe 每次启动都要先解压约 40 MB。
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='mqdb',
 )
