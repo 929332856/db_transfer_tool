@@ -768,7 +768,7 @@ function redisExecCmd(cid) {
     eel.redis_execute(activeConnData, cmd)(function(r) {
         if (!resultDiv) return;
         if (!r || !r.ok) {
-            resultDiv.innerHTML = '<div style="color:#e74c3c;">❌ '+(r?r.msg:'执行失败')+'</div>';
+        resultDiv.innerHTML = '<div style="color:#e74c3c;">❌ '+escapeHtml(r?r.msg:'执行失败')+'</div>';
             return;
         }
         var res = r.result;

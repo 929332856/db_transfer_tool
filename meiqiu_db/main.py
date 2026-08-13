@@ -55,7 +55,9 @@ def find_free_port():
 def _get_startup_theme():
     """读取启动时主题，供原生窗口和页面首帧同时使用。"""
     try:
-        settings_path = os.path.join(BASE_DIR, "settings.json")
+        settings_path = os.path.join(BASE_DIR, "mqdb_settings.json")
+        if not os.path.exists(settings_path):
+            settings_path = os.path.join(BASE_DIR, "settings.json")
         with open(settings_path, "r", encoding="utf-8") as f:
             settings = json.load(f)
         if isinstance(settings, dict) and settings.get("theme") == "light":
@@ -138,7 +140,7 @@ def start_webview(port):
 
     webview.start()
     print("[main] 窗口已关闭，退出")
-    os._exit(0)
+    return
 
 
 def main():

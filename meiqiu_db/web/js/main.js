@@ -9,7 +9,10 @@ const progressText = $('progress_text');
 // ========== 日志（数据库同步专用） ==========
 function appendLog(msg) {
     const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    logBox.innerHTML += `<div>[${time}] ${msg}</div>`;
+    if (!logBox) return;
+    const line = document.createElement('div');
+    line.textContent = `[${time}] ${String(msg == null ? '' : msg)}`;
+    logBox.appendChild(line);
     logBox.scrollTop = logBox.scrollHeight;
 }
 
@@ -479,7 +482,13 @@ function doStartTransfer(data, onlyTables, dropExisting) {
     if (typeof dropExisting === 'boolean') data.drop_existing = dropExisting;
     // ★ 启动进度条平滑动画（每 100ms 追一步）
     _startTransferAnim();
-    eel.start_transfer(data)(function () {
+    eel.start_transfer(data)(function (result) {
+        if (result && result.ok === false) {
+            resetTransferBtns();
+            _stopTransferAnim();
+            showWarnDialog('无法开始同步', result.msg || '同步任务启动失败');
+            return;
+        }
         pollingTimer = setInterval(pollProgress, 100);
     });
 }
@@ -1004,6 +1013,7 @@ var _sqSource = 'ps';      // 数据来源：'ps'=performance_schema聚合 / 'lo
 var _sqSortKey = null;     // 当前排序列名
 var _sqSortDir = 'desc';   // 当前排序方向：'asc' | 'desc'
 var _sqToday = false;     // 是否只看今天
+var _sqTodayHover = false; // “只看今天”按钮是否处于悬停预览状态
 
 /** 填充慢SQL面板的连接下拉列表（从 treeData.connections 读取） */
 function refreshSqConnSelector() {
@@ -1057,8 +1067,7 @@ function onSqConnChange() {
         _sqConnData = null;
         _sqConnected = false;
         _sqToday = false; // 重置今日筛选
-        var todayBtn = $('sq_btn_today');
-        if (todayBtn) { todayBtn.textContent = '📅 今天'; todayBtn.style.background = '#555'; }
+        renderSqTodayButton(false);
         $('sq_conn_status').textContent = '未连接';
         $('sq_conn_status').style.color = '#888';
         $('sq_status_badge').textContent = '--';
@@ -1146,8 +1155,16 @@ function _onConnResult(myToken, myCid, statusEl, data, res) {
     if (myCid !== $('sq_conn_sel').value) return;
     if (res && res.ok) {
         _sqConnected = true;
-        // ★ 连接的瞬间初始化 session id（记录最近 SQL 用）
-        if (!_dashSessionId) _dashSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        // ★ 每次连接成功都创建新的 session：最近 SQL 必须从本次连接成功时重新计数，
+        //    不能复用上一次连接的快照/临时文件。
+        _dashSessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        _dashRowsCache = {};
+        _dashPrev = null; _dashPrevTime = 0;
+        if (typeof _dashHistory === 'object') {
+            for (var hk in _dashHistory) {
+                if (Array.isArray(_dashHistory[hk])) _dashHistory[hk] = [];
+            }
+        }
         statusEl.style.color = '#2ecc71';
         statusEl.textContent = '✅ ' + res.msg;
         $('sq_conn_status').textContent = '✅ 已连接 (' + _sqConnName + ')';
@@ -1161,19 +1178,18 @@ function _onConnResult(myToken, myCid, statusEl, data, res) {
         _sqSortKey = null; _sqSortDir = 'desc';
         document.querySelectorAll('.sq-sort-arrow').forEach(function(el) { el.textContent = ''; });
         slowQueryRefresh();
-        if (typeof _dashSubtab !== 'undefined' && _dashSubtab === 'dash') {
-            _dashPrev = null; _dashPrevTime = 0;
-            for (var k in _dashHistory) _dashHistory[k] = [];
-            // ★ 连接仪表盘时先记录基线（回调确保基线设好后再刷新）
-            if (_sqConnData && _dashSessionId) {
-                eel.dashboard_capture_baseline(_dashSessionId, _sqConnData)(function() {
+        // ★ 无论当前是否已打开仪表盘，都在连接成功后立即记录基线。
+        //    后续打开“查看最近语句”时，窗口起点就是本次连接成功时刻。
+        if (_sqConnData && _dashSessionId) {
+            eel.dashboard_capture_baseline(_dashSessionId, _sqConnData)(function() {
+                if (typeof _dashSubtab !== 'undefined' && _dashSubtab === 'dash') {
                     dashboardRefresh();
                     changeDashInterval();
-                });
-            } else {
-                dashboardRefresh();
-                changeDashInterval();
-            }
+                }
+            });
+        } else if (typeof _dashSubtab !== 'undefined' && _dashSubtab === 'dash') {
+            dashboardRefresh();
+            changeDashInterval();
         }
     } else {
         _sqConnected = false;
@@ -1400,13 +1416,28 @@ function sqSortLogDate(key) {
 }
 
 /** ★ 切换「只看今天」筛选 */
+function renderSqTodayButton(hover) {
+    var btn = $('sq_btn_today');
+    if (!btn) return;
+    var preview = !!hover;
+    if (preview) {
+        btn.textContent = _sqToday ? '↩ 关闭' : '✓ 开启';
+        btn.title = _sqToday ? '关闭“只看今天”筛选' : '开启“只看今天”筛选';
+    } else {
+        btn.textContent = _sqToday ? '📅 ✓今天' : '📅 今天';
+        btn.title = '只显示今天的慢SQL';
+    }
+    btn.style.background = _sqToday ? '#5dade2' : '#555';
+}
+
+function previewSqTodayButton(hover) {
+    _sqTodayHover = !!hover;
+    renderSqTodayButton(_sqTodayHover);
+}
+
 function toggleSqToday() {
     _sqToday = !_sqToday;
-    var btn = $('sq_btn_today');
-    if (btn) {
-        btn.textContent = _sqToday ? '📅 ✓今天' : '📅 今天';
-        btn.style.background = _sqToday ? '#5dade2' : '#555';
-    }
+    renderSqTodayButton(_sqTodayHover);
     slowQueryRefresh();
 }
 
@@ -1760,37 +1791,31 @@ function slowQueryLoadRunning() {
         // ★ 放大弹窗，展示更多进程信息
         var box = $('modal_box');
         if (box) box.classList.add('wide-modal', 'tall-modal');
-        var html = '<div style="max-height:70vh;overflow-y:auto;">' +
-            '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
-            '<thead><tr style="background:#222;position:sticky;top:0;z-index:1;">' +
-            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">ID</th>' +
-            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">用户</th>' +
-            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">数据库</th>' +
-            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">状态</th>' +
-            '<th style="padding:8px 10px;text-align:right;border-bottom:1px solid #444;">耗时(s)</th>' +
-            '<th style="padding:8px 10px;text-align:left;border-bottom:1px solid #444;">SQL</th>' +
-            '<th style="padding:8px 10px;text-align:center;border-bottom:1px solid #444;">操作</th>' +
+        var html = '<div class="process-modal-body">' +
+            '<div class="process-summary"><span><i class="process-live-dot"></i>实时运行进程</span>' +
+            '<span class="process-count">' + rows.length + ' 个会话</span></div>' +
+            '<div class="process-table-wrap"><table class="process-table">' +
+            '<thead><tr>' +
+            '<th>ID</th><th>用户</th><th>数据库</th><th>状态</th>' +
+            '<th class="process-time-col">耗时(s)</th><th>SQL</th><th class="process-action-col">操作</th>' +
             '</tr></thead><tbody>';
         rows.forEach(function(r, i) {
             var timeVal = parseInt(r.time_ || 0);
-            html += '<tr style="' + (i % 2 ? 'background:#1f1f1f;' : '') + 'border-top:1px solid #2c2c2c;">' +
-                '<td style="padding:7px 10px;color:#888;">' + (r.id || '') + '</td>' +
-                '<td style="padding:7px 10px;">' + escapeHtml(r.user_ || '') + '</td>' +
-                '<td style="padding:7px 10px;">' + escapeHtml(r.db || '') + '</td>' +
-                '<td style="padding:7px 10px;color:#f39c12;">' + escapeHtml(r.state || '') + '</td>' +
-                '<td style="padding:7px 10px;text-align:right;font-weight:bold;color:' +
-                    (timeVal >= 10 ? '#e74c3c' : '#f39c12') + '">' + timeVal + '</td>' +
-                '<td style="padding:7px 10px;max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' +
-                    'font-family:Consolas,monospace;font-size:11px;color:#ccc;"' +
-                ' title="' + escapeAttr(r.info || '') + '">' +
-                escapeHtml((r.info || '').substring(0, 160)) + '</td>' +
-                '<td style="padding:7px 10px;text-align:center;"><span class="sq-btn-kill"' +
-                ' onclick="slowQueryKill(' + (r.id || '') + ')">终止</span></td>' +
+            html += '<tr>' +
+                '<td class="process-id">' + escapeHtml(String(r.id || '')) + '</td>' +
+                '<td>' + escapeHtml(r.user_ || '') + '</td>' +
+                '<td>' + escapeHtml(r.db || '') + '</td>' +
+                '<td><span class="process-state">' + escapeHtml(r.state || '') + '</span></td>' +
+                '<td class="process-time ' + (timeVal >= 10 ? 'is-danger' : '') + '">' + timeVal + '</td>' +
+                '<td class="process-sql" title="' + escapeAttr(r.info || '') + '">' +
+                escapeHtml((r.info || '').substring(0, 240)) + '</td>' +
+                '<td class="process-action"><button class="process-kill" onclick="slowQueryKill(' +
+                (parseInt(r.id || 0) || 0) + ')">⏹ 终止</button></td>' +
                 '</tr>';
         });
-        html += '</tbody></table></div>';
-        showModal('🏃 运行进程', '', '', '#5dade2', html +
-            '<button class="btn btn-gray" onclick="hideModal()">关闭</button>');
+        html += '</tbody></table></div></div>';
+        showModal('🖥', '运行进程', html,
+            '#5dade2', '<button class="btn btn-gray" onclick="hideModal()">关闭</button>');
     });
 }
 
@@ -2014,7 +2039,7 @@ function replDelConn(id) {
 function replConnCtx(e,id) { e.preventDefault(); showCtxMenu(e.clientX,e.clientY,[{label:'🗑 删除',action:function(){replDelConn(id);}}]); }
 function replPersistConns() {
     try {
-        // 存到后端 settings.json（不依赖 localStorage）
+        // 存到后端 mqdb_settings.json（不依赖 localStorage）
         eel.settings_get()(function(settings) {
             if (!settings || typeof settings !== 'object') settings = {};
             settings.repl_conns = _replConns;
@@ -2023,7 +2048,7 @@ function replPersistConns() {
     } catch(e) {}
 }
 function replLoadConns() {
-    // 从后端 settings.json 读取
+    // 从后端 mqdb_settings.json 读取
     try {
         eel.settings_get()(function(settings) {
             if (settings && settings.repl_conns && Array.isArray(settings.repl_conns)) {
@@ -2359,7 +2384,7 @@ function dashboardRefresh() {
     }
     _eelAutoAsync(eel.dashboard_get_metrics(_sqConnData), function(r) {
         if (!r || !r.ok) {
-            $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5;color:#e74c3c">❌ '+(r?r.msg:'无响应')+'</div>';
+            $('dash_kpi_grid').innerHTML = '<div class="dash-status-empty" style="grid-column:1/5;color:#e74c3c">❌ '+escapeHtml(r?r.msg:'无响应')+'</div>';
             return;
         }
         renderDashKpis(r.kpis, r.server);
@@ -2965,7 +2990,7 @@ function onDgLocalFileSelected(e) {
 var _settingsData = { theme: 'dark' };
 var _pendingTheme = 'dark';
 
-// ★ 启动时同步 localStorage 主题到 settings.json（确保下次启动背景色正确）
+// ★ 启动时同步 localStorage 主题到 mqdb_settings.json（确保下次启动背景色正确）
 (function() {
     var lsTheme = localStorage.getItem('mqdb_theme');
     if (lsTheme) {
@@ -3182,7 +3207,7 @@ function _saveSettings() {
     }
 }
 
-/** 应用当前主题（即时切换 + 同步 localStorage 防闪烁 + 同步 settings.json 供启动读取） */
+/** 应用当前主题（即时切换 + 同步 localStorage 防闪烁 + 同步 mqdb_settings.json 供启动读取） */
 function _applyTheme(persist) {
     var htmlEl = document.documentElement;
     if (_settingsData.theme === 'light') {
@@ -3192,7 +3217,7 @@ function _applyTheme(persist) {
         htmlEl.classList.remove('light-theme');
         localStorage.setItem('mqdb_theme', 'dark');
     }
-    // ★ 同步到 settings.json，供 PyWebView 启动时读取背景色
+    // ★ 同步到 mqdb_settings.json，供 PyWebView 启动时读取背景色
     if (persist !== false && typeof eel !== 'undefined' && eel.settings_save) {
         eel.settings_save(_settingsData)(function(){});
     }
@@ -3206,10 +3231,10 @@ function _renderFilesTab() {
 
     // 文件列表（初始占位）
     var files = [
-        { id: 'tree_file', name: 'navicat_tree.json', desc: '连接树数据（文件夹、连接、保存的查询）', loading: true },
+        { id: 'tree_file', name: 'mqdb_tree.json', desc: '连接树数据（文件夹、连接、保存的查询）', loading: true },
         { id: 'profiles_file', name: 'db_profiles.json', desc: '数据库同步的配置方案', loading: true },
         { id: 'log_file', name: '当天数据库操作日志', desc: '按日期保存的数据库操作日志', loading: true },
-        { id: 'settings_file', name: 'settings.json', desc: 'MQDB 用户设置（主题等）', loading: true }
+        { id: 'settings_file', name: 'mqdb_settings.json', desc: 'MQDB 用户设置（主题及复制连接）', loading: true }
     ];
 
     files.forEach(function(f) {

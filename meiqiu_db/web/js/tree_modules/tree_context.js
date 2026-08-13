@@ -37,7 +37,7 @@ function showEditDatabase(cid, db) {
 
     eel.db_get_info(conn, db)(function(r) {
         if (!r || !r.ok) {
-            document.getElementById('modal_msg').innerHTML = '<div style="color:#e74c3c;">❌ ' + (r?r.msg:'加载失败') + '</div>';
+            document.getElementById('modal_msg').innerHTML = '<div style="color:#e74c3c;">❌ ' + escapeHtml(r?r.msg:'加载失败') + '</div>';
             return;
         }
         var html =
@@ -150,6 +150,7 @@ function onImportFileSelected(e) {
 }
 
 function startRunSqlFile(cid, db) {
+    var sqlRunOpId = 'sql_file_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
     document.getElementById('btn_run_sql_file').disabled = true;
     if (!window._sqlFileContent) {
         document.getElementById('sql_file_label').textContent = '⚠️ 请先选择文件';
@@ -180,7 +181,7 @@ function startRunSqlFile(cid, db) {
                 '<div id="sql_run_log_area" style="height:140px;overflow-y:auto;padding:6px 10px;background:#0d1117;font-family:Consolas,monospace;font-size:11px;line-height:1.6;"></div>' +
             '</div>' +
         '</div>';
-    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
+    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-red btn-sm" onclick="eel.cancel_query()();this.disabled=true;this.textContent=\'正在终止...\'">⏹ 取消执行</button><button class="btn btn-gray" onclick="hideModal()">关闭</button>';
 
     var tid = setInterval(function() {
         if (!document.getElementById('modal_overlay').classList.contains('show')) { clearInterval(tid); return; }
@@ -245,7 +246,9 @@ function startRunSqlFile(cid, db) {
                         clearInterval(tid);
                         document.getElementById('modal_title').textContent = '运行 SQL 文件';
                         var logArea3 = document.getElementById('sql_run_log_area');
-                        if (logArea3) { logArea3.innerHTML += '<div style="color:#e74c3c;">❌ 执行失败: ' + escapeHtml(m[1].msg) + '</div>'; logArea3.scrollTop = logArea3.scrollHeight; }
+                        var cancelledSql = !!(m[1] && m[1].cancelled);
+                        if (cancelledSql) document.getElementById('modal_title').textContent = 'SQL 文件已取消';
+                        if (logArea3) { logArea3.innerHTML += '<div style="color:' + (cancelledSql ? '#f39c12' : '#e74c3c') + ';">' + (cancelledSql ? '⏸ ' : '❌ 执行失败: ') + escapeHtml(m[1].msg) + '</div>'; logArea3.scrollTop = logArea3.scrollHeight; }
                         document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
                     }
                 }
@@ -263,10 +266,10 @@ function startRunSqlFile(cid, db) {
                 document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
                 return;
             }
-            eel.import_wizard_run(conn, db, path, 'csv', '', window._sqlFileContent)();
+            eel.import_wizard_run(conn, db, path, 'csv', '', window._sqlFileContent, '', false, sqlRunOpId)();
         });
     } else {
-        eel.db_run_sql_file(conn, db, '', window._sqlFileContent)();
+        eel.db_run_sql_file(conn, db, '', window._sqlFileContent, sqlRunOpId)();
     }
 }
 
@@ -1388,7 +1391,17 @@ function _ntDoCreate(tabId) {
     if (!sql) return;
     var conn = st.cid ? (treeData && treeData.connections ? treeData.connections[st.cid] : null) : activeConnData;
     if (!conn) { showErrorDialog('错误', '未找到连接信息'); return; }
-    eel.table_execute_sql(conn, st.db, sql, st.schema)(function(r) {
+    var opId = 'create_table_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+    showModal('⏹', '正在创建表',
+        '<div style="text-align:center;padding:16px;color:#aaa;">正在执行建表 SQL...</div>',
+        '#e67e22',
+        '<button class="btn btn-red btn-sm" onclick="eel.cancel_query()();this.disabled=true;this.textContent=\'正在终止...\'">⏹ 取消执行</button>');
+    eel.table_execute_sql(conn, st.db, sql, st.schema, opId)(function(r) {
+        hideModal();
+        if (r && r.cancelled) {
+            showWarnDialog('已取消', '建表操作已被取消');
+            return;
+        }
         if (r && r.ok) {
             showOkDialog('成功', r.msg);
             // 刷新表列表

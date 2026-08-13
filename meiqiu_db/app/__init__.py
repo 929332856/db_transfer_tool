@@ -4,10 +4,9 @@ Flask 应用工厂 + PyWebView 桌面窗口
 1. 多连接测试互相阻塞（Flask 多线程天然支持并发）
 2. 关闭窗口残留进程（PyWebView 用系统 WebView，关闭即清理）
 """
-import os, sys, json, threading, time
+import os, sys, json, threading, time, secrets
 from urllib.parse import quote
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
 
 # ★ 路径设置（兼容 PyInstaller）
 if getattr(sys, 'frozen', False):
@@ -16,14 +15,53 @@ else:
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR  = os.path.join(BASE_DIR, "web")
 
+
+def _async_job_reaper(app):
+    """统一处理异步任务超时和 TTL 回收，避免每个请求创建 watchdog 线程。"""
+    while True:
+        time.sleep(2)
+        now = time.time()
+        with app.config['ASYNC_LOCK']:
+            jobs = app.config['ASYNC_JOBS']
+            meta_map = app.config['ASYNC_JOB_META']
+            for job_id, meta in list(meta_map.items()):
+                result = jobs.get(job_id)
+                deadline = meta.get('deadline')
+                if result is None and deadline and now >= deadline:
+                    jobs[job_id] = {
+                        "ok": False,
+                        "msg": f"操作超时（{meta.get('timeout', 20)}秒）",
+                    }
+                    meta['updated_at'] = now
+                elif result is not None and now - meta.get('updated_at', now) > app.config['ASYNC_JOB_TTL']:
+                    jobs.pop(job_id, None)
+                    meta_map.pop(job_id, None)
+
 def create_app():
     app = Flask(__name__, static_folder=WEB_DIR, static_url_path='')
-    CORS(app)
+    # API 仅供本应用自己的 WebView 使用。随机 token 通过 HttpOnly、
+    # SameSite cookie 下发，避免本机其他网页无门槛调用危险接口。
+    app.config['API_TOKEN'] = secrets.token_urlsafe(32)
+    app.config['ASYNC_JOB_TTL'] = 300
+
+    @app.before_request
+    def require_api_token():
+        if not request.path.startswith('/api/') or request.path == '/api/ping':
+            return None
+        supplied = request.headers.get('X-MQDB-Token') or request.cookies.get('mqdb_api_token')
+        if not supplied or not secrets.compare_digest(supplied, app.config['API_TOKEN']):
+            return jsonify({"ok": False, "msg": "未授权请求"}), 401
+        return None
 
     # ★ 主页
     @app.route('/')
     def index():
-        return send_from_directory(WEB_DIR, 'index.html')
+        response = send_from_directory(WEB_DIR, 'index.html')
+        response.set_cookie(
+            'mqdb_api_token', app.config['API_TOKEN'],
+            httponly=True, samesite='Strict', secure=False,
+        )
+        return response
 
     # ★ 健康检查
     @app.route('/api/ping')
@@ -33,17 +71,27 @@ def create_app():
     # ★ 异步任务管理（替代 Eel 的 _query_jobs + poll_query_result）
     app.config['ASYNC_JOBS'] = {}
     app.config['ASYNC_LOCK'] = threading.Lock()
+    app.config['ASYNC_JOB_META'] = {}
+    threading.Thread(target=_async_job_reaper, args=(app,), daemon=True).start()
 
     @app.route('/api/poll/<job_id>')
     def poll_job(job_id):
         jobs = app.config['ASYNC_JOBS']
+        now = time.time()
         with app.config['ASYNC_LOCK']:
+            for stale_id, meta in list(app.config['ASYNC_JOB_META'].items()):
+                if now - meta.get('updated_at', meta.get('created_at', now)) > app.config['ASYNC_JOB_TTL']:
+                    jobs.pop(stale_id, None)
+                    app.config['ASYNC_JOB_META'].pop(stale_id, None)
             result = jobs.get(job_id)
+            if job_id in app.config['ASYNC_JOB_META']:
+                app.config['ASYNC_JOB_META'][job_id]['updated_at'] = now
         if result is None:
             return jsonify({"_pending": True})
         # 结果就绪，清理
         with app.config['ASYNC_LOCK']:
             jobs.pop(job_id, None)
+            app.config['ASYNC_JOB_META'].pop(job_id, None)
         return jsonify(result)
 
     # 注册所有业务路由
@@ -56,9 +104,12 @@ def create_app():
 def _get_startup_theme():
     """读取启动时主题，供原生窗口和页面首帧同时使用。"""
     try:
-        settings_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "settings.json")
+        settings_dir = os.path.dirname(os.path.dirname(__file__))
         if getattr(sys, 'frozen', False):
-            settings_path = os.path.join(os.path.dirname(sys.executable), "settings.json")
+            settings_dir = os.path.dirname(sys.executable)
+        settings_path = os.path.join(settings_dir, "mqdb_settings.json")
+        if not os.path.exists(settings_path):
+            settings_path = os.path.join(settings_dir, "settings.json")
         with open(settings_path, "r", encoding="utf-8") as f:
             settings = json.load(f)
         if isinstance(settings, dict) and settings.get("theme") == "light":
@@ -112,7 +163,7 @@ def start_webview(port):
         clean_recent_cmds_tmp()
     except Exception:
         pass
-    os._exit(0)
+    return
 
 
 def main():

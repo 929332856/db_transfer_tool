@@ -32,31 +32,35 @@ def _connect_args(db_type='mysql', timeout=10, read_timeout=None):
 
 # ==================== 表操作 ====================
 def _safe_ident(ident, db_type='mysql'):
-    """安全化列名：检测含特殊字符则用反引号/引号包裹"""
-    if not ident: return ident
-    if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', ident):
-        return ident
+    """按数据库方言安全引用标识符，并转义包围符。"""
+    if ident is None:
+        raise ValueError('标识符不能为空')
+    ident = str(ident)
+    if not ident or len(ident) > 255 or any(ord(ch) < 32 for ch in ident):
+        raise ValueError('标识符为空、过长或包含控制字符')
     if db_type in ('mysql', 'ob-mysql'):
-        return f'`{ident}`'
-    elif db_type in ('postgresql', 'oracle'):
-        return f'"{ident}"'
+        return f'`{ident.replace("`", "``")}`'
+    elif db_type in ('postgresql', 'oracle', 'sqlite'):
+        return f'"{ident.replace(chr(34), chr(34) * 2)}"'
     elif db_type == 'mssql':
-        return f'[{ident}]'
-    return ident
+        return f'[{ident.replace("]", "]]" )}]'
+    raise ValueError(f'不支持的数据库类型: {db_type}')
 
 def _build_table_ref(conn_data, database, table_name, schema=''):
     """构建带正确引号的全限定表名（如 `db`.`tbl` / \"sch\".\"tbl\" / [db].[tbl]）"""
     db_type = conn_data.get("db_type", "mysql")
     if db_type in ('mysql', 'ob-mysql'):
-        return f"`{database}`.`{table_name}`"
+        return f"{_safe_ident(database, db_type)}.{_safe_ident(table_name, db_type)}"
     elif db_type == 'postgresql':
         q = schema if schema else database
-        return f'"{q}"."{table_name}"'
+        return f'{_safe_ident(q, db_type)}.{_safe_ident(table_name, db_type)}'
     elif db_type == 'oracle':
-        return f'"{database}"."{table_name}"'
+        return f'{_safe_ident(database, db_type)}.{_safe_ident(table_name, db_type)}'
     elif db_type == 'mssql':
-        return f"[{database}].[{table_name}]"
-    return f"`{database}`.`{table_name}`"
+        return f'{_safe_ident(database, db_type)}.{_safe_ident(table_name, db_type)}'
+    elif db_type == 'sqlite':
+        return _safe_ident(table_name, db_type)
+    raise ValueError(f'不支持的数据库类型: {db_type}')
 
 
 _DRIVER_HINTS = {

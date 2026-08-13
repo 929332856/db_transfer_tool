@@ -96,7 +96,6 @@ def test_connection(data: dict, side: str):
 def start_transfer(data: dict):
     """开始传输"""
     global _engine, _worker
-    _progress_q.queue.clear()
 
     _engine = TransferEngine(data)
     _worker = threading.Thread(target=_engine.run, daemon=True)

@@ -1,4 +1,14 @@
 // ==================== 查询编辑器分割线拖动 ====================
+function _runCancelableTableDelete(call, onDone) {
+    showModal('⏹', '正在删除数据',
+        '<div style="text-align:center;padding:16px;color:#aaa;">正在执行 DELETE...</div>',
+        '#e67e22',
+        '<button class="btn btn-red btn-sm" onclick="eel.cancel_query()();this.disabled=true;this.textContent=\'正在终止...\'">⏹ 取消执行</button>');
+    call(function(r) {
+        hideModal();
+        onDone(r);
+    });
+}
 // ★ 格式化服务器执行时间：毫秒→友好显示
 function _fmtExecTime(ms) {
     if (ms < 1) return ms.toFixed(2) + 'ms';
@@ -585,7 +595,7 @@ function _showAllBatches(qid, offset) {
                 setTimeout(function() { _showAllBatches(qid, r.page_end); }, 30);
             }
         } else {
-            if (pagBar) pagBar.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + (r ? r.msg : '无响应') + '</span>';
+            if (pagBar) pagBar.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + escapeHtml(r ? r.msg : '无响应') + '</span>';
             es._loadingAll = false;
         }
     });
@@ -610,7 +620,7 @@ function _loadQueryPage(qid, offset, limit, callback) {
             }
         } else {
             var pagBar2 = document.getElementById(qid + '_pagbar');
-            if (pagBar2) pagBar2.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + (r ? r.msg : '无响应') + '</span>';
+            if (pagBar2) pagBar2.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + escapeHtml(r ? r.msg : '无响应') + '</span>';
         }
         if (callback) callback(r);
     });
@@ -1179,8 +1189,9 @@ function _qDoSave(qid) {
             function() {
                 // ★ 执行中：按钮 hover 显示"取消执行"，点击可 Kill 数据库会话
                 _qSaveBtnRunning(btn, qid);
+                var opId = 'query_update_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
                 // 第三步：确认后执行
-                eel.table_exec_save(es.connData, es.execDb, es._tableName || '', '', changes)(function(r2){
+                eel.table_exec_save(es.connData, es.execDb, es._tableName || '', '', changes, opId)(function(r2){
                     _qSaveBtnReset(btn, qid);
                     if (r2 && r2.cancelled) {
                         showWarnDialog('已取消', '操作已被取消');
@@ -1279,13 +1290,17 @@ function _qDoDelete(qid) {
             '<div class="confirm-sql-preview">' + escapeHtml(r.sql||'') + '</div>' +
             '<div class="confirm-sql-warn">⚠ 将删除 ' + r.count + ' 行数据</div>',
             function(){
-                eel.table_exec_delete(es.connData, es.execDb, es._tableName || '', '', rowsData)(function(r2){
+                var opId = 'delete_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+                _runCancelableTableDelete(
+                    eel.table_exec_delete(es.connData, es.execDb, es._tableName || '', '', rowsData, opId),
+                    function(r2){
                     if (!r2 || !r2.ok) { showWarnDialog('执行失败', r2?r2.msg:'无响应'); return; }
                     showOkDialog('删除成功', r2.msg);
                     es.selectedRows = {};
                     _qUpdateBtns(qid);
                     _qRefreshData(qid);
-                });
+                    }
+                );
             }
         );
     });
@@ -1310,7 +1325,7 @@ function _qRefreshData(qid, tabIdx) {
         eel.execute_sql_query(stmt, data)(function(resp){
             function handleRefreshSingle(result) {
                 if (!result || !result.ok) {
-                    if (pane) pane.innerHTML = '<div class="qr-error-msg">❌ '+(result?result.msg:'无响应')+'</div>';
+                    if (pane) pane.innerHTML = '<div class="qr-error-msg">❌ '+escapeHtml(result?result.msg:'无响应')+'</div>';
                     return;
                 }
                 es._multiCols[tabIdx] = result.columns || [];
@@ -1900,7 +1915,7 @@ function _multiFetchBatch(qid, tabIdx, offset) {
                 setTimeout(function() { _multiFetchBatch(qid, tabIdx, offset + BATCH); }, 30);
             }
         } else {
-            if (pagBar) pagBar.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + (r ? r.msg : '无响应') + '</span>';
+            if (pagBar) pagBar.innerHTML = '<span style="color:#e74c3c;">加载失败: ' + escapeHtml(r ? r.msg : '无响应') + '</span>';
             es._loadingAll = false;
         }
     });
@@ -2065,7 +2080,8 @@ function _qDoSaveMulti(qid, tabIdx) {
             function() {
                 // ★ 执行中：hover 变为取消执行，点击 Kill 数据库会话
                 _qSaveBtnRunning(btn, qid);
-                eel.table_exec_save(es.connData, es.execDb, tableName, '', changes)(function(r2){
+                var opId = 'query_multi_update_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+                eel.table_exec_save(es.connData, es.execDb, tableName, '', changes, opId)(function(r2){
                     _qSaveBtnReset(btn, qid);
                     if (r2 && r2.cancelled) {
                         showWarnDialog('已取消', '操作已被取消');
@@ -2133,14 +2149,18 @@ function _qDoDeleteMulti(qid, tabIdx) {
             '<div class="confirm-sql-preview">' + escapeHtml(r.sql||'') + '</div>' +
             '<div class="confirm-sql-warn">⚠ 将删除 ' + r.count + ' 行数据</div>',
             function(){
-                eel.table_exec_delete(es.connData, es.execDb, tableName, '', rowsData)(function(r2){
+                var opId = 'delete_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+                _runCancelableTableDelete(
+                    eel.table_exec_delete(es.connData, es.execDb, tableName, '', rowsData, opId),
+                    function(r2){
                     if (!r2 || !r2.ok) { showWarnDialog('执行失败', r2?r2.msg:'无响应'); return; }
                     showOkDialog('删除成功', r2.msg);
                     es._multiSelected[tabIdx] = {};
                     es._multiChanged[tabIdx] = {};
                     _qUpdateMultiBtns(qid, tabIdx);
                     _qRefreshData(qid, tabIdx);
-                });
+                    }
+                );
             }
         );
     });

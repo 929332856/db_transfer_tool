@@ -1362,6 +1362,37 @@ html.light-theme ::-webkit-scrollbar-thumb:hover { background: #999; }
 .slow-table th[onclick] { user-select: none; }
 .slow-table th[onclick]:hover { color: #f39c12; }
 
+/* ========== 运行进程弹窗 ========== */
+.process-modal-body { display: flex; flex-direction: column; gap: 10px; min-height: 0; text-align: left; }
+.process-summary {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 9px 12px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); color: var(--text-primary); font-size: 12px;
+}
+.process-live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--green); vertical-align: 1px; box-shadow: 0 0 0 3px rgba(46,204,113,.14); }
+.process-count { color: var(--text-secondary); font-size: 11px; }
+.process-table-wrap { flex: 1; min-height: 100px; max-height: 66vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.process-table { width: 100%; min-width: 760px; border-collapse: collapse; table-layout: fixed; font-size: 12px; color: var(--text-primary); }
+.process-table th { position: sticky; top: 0; z-index: 1; padding: 9px 10px; background: var(--header-bg); color: var(--text-secondary); border-bottom: 1px solid var(--border); text-align: left; font-weight: 600; white-space: nowrap; }
+.process-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); vertical-align: middle; }
+.process-table tbody tr:nth-child(even) td { background: var(--bg-primary); }
+.process-table tbody tr:hover td { background: rgba(93,173,226,.12); }
+.process-table th:nth-child(1), .process-table td:nth-child(1) { width: 9%; }
+.process-table th:nth-child(2), .process-table td:nth-child(2) { width: 11%; }
+.process-table th:nth-child(3), .process-table td:nth-child(3) { width: 13%; }
+.process-table th:nth-child(4), .process-table td:nth-child(4) { width: 13%; }
+.process-table th:nth-child(5), .process-table td:nth-child(5) { width: 9%; }
+.process-table th:nth-child(6), .process-table td:nth-child(6) { width: 35%; }
+.process-table th:nth-child(7), .process-table td:nth-child(7) { width: 10%; }
+.process-id { color: var(--text-secondary); font-family: Consolas, monospace; }
+.process-state { color: var(--orange); font-weight: 600; }
+.process-time { color: var(--orange); font-weight: 700; text-align: right; font-family: Consolas, monospace; }
+.process-time.is-danger { color: var(--red); }
+.process-sql { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font: 11px Consolas, monospace; }
+.process-action { text-align: center; }
+.process-kill { padding: 4px 8px; border: 1px solid rgba(231,76,60,.45); border-radius: 4px; background: transparent; color: var(--red); cursor: pointer; font-size: 11px; white-space: nowrap; }
+.process-kill:hover { background: rgba(231,76,60,.12); border-color: var(--red); }
+
 /* ========== 慢SQL子Tab（慢SQL分析 / 仪表盘） ========== */
 .sq-subtabs { display: flex; gap: 2px; background: #0d1218; border-bottom: 1px solid #333; padding: 0 10px; flex-shrink: 0; }
 .sq-subtab { background: transparent; border: none; color: #888; padding: 8px 16px; font-size: 12px; cursor: pointer; border-bottom: 2px solid transparent; transition: all .15s; font-family: "Microsoft YaHei", sans-serif; }
@@ -1938,11 +1969,6 @@ html.light-theme .design-table td { border-bottom-color: #e8e8e8; }
 html.light-theme .design-table tr:hover td { background: #e8f0f8; }
 html.light-theme .design-input, html.light-theme .design-select { background: #fff; color: #333; border-color: #ccc; }
 html.light-theme .design-input:focus, html.light-theme .design-select:focus { border-color: #5dade2; background: #fff; }
-/* 设计表工具栏按钮 */
-.btn-design-sql { background: #555; color: #ccc; }
-.btn-design-sql:hover { background: #666; }
-html.light-theme .btn-design-sql { background: #e0e0e0; color: #333; }
-html.light-theme .btn-design-sql:hover { background: #ccc; }
 /* ========== 浅色主题 - 列筛选 ========== */
 html.light-theme .col-filter-input { background: #fff; color: #333; border-color: #ccc; }
 html.light-theme .col-filter-input::placeholder { color: #aaa; }

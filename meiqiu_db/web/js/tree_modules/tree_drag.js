@@ -106,7 +106,7 @@ function _pasteTableShortcut(e) {
         var newTn = src.table_name + '_' + stamp;
         showConfirmDialog('备份表', '将创建备份表 <b>[' + newTn + ']</b>？',
             function(){
-                showModal('💾','正在备份表 <b>'+escapeHtml(src.table_name)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在创建备份 <code class="code-inline">'+escapeHtml(newTn)+'</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','');
+                showModal('💾','正在备份表 <b>'+escapeHtml(src.table_name)+'</b>','<div style="text-align:center;padding:20px 0;"><div style="font-size:28px;margin-bottom:10px;">⏳</div><div style="color:#aaa;font-size:12px;">正在创建备份 <code class="code-inline">'+escapeHtml(newTn)+'</code></div><div style="color:#666;font-size:10px;margin-top:12px;">大表备份可能耗时较长，请耐心等待...</div></div>','#e67e22','<button class="btn btn-red btn-sm" onclick="eel.cancel_query()();this.disabled=true;this.textContent=\'正在终止...\'">⏹ 取消执行</button>');
                 eel.drag_copy_table(srcConn, src.src_db, src.table_name, dstConn, targetDb, true, newTn)(function(r) {
                     if (r && r.ok) {
                         document.getElementById('modal_title').innerHTML = '✅ 备份完成';

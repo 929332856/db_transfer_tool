@@ -9,13 +9,22 @@ import time
 from datetime import datetime
 from modules import BASE_DIR
 
+
+def _transform_secrets(value, protect=True):
+    """延迟复用核心 DPAPI 实现，避免导入树模块时触发 Eel 循环注册。"""
+    try:
+        from db_transfer_eel import _transform_secrets as transform
+        return transform(value, protect=protect)
+    except ImportError:
+        return value
+
 # ==================== 树形栏目持久化（含自动备份恢复） ====================
 if getattr(sys, 'frozen', False):
     # 打包exe环境：exe在dist/目录，直接读取同目录下的文件
-    TREE_FILE = os.path.join(BASE_DIR, "navicat_tree.json")
+    TREE_FILE = os.path.join(BASE_DIR, "mqdb_tree.json")
 else:
     # 源码运行环境：从dist/目录读取
-    TREE_FILE = os.path.join(BASE_DIR, "dist", "navicat_tree.json")
+    TREE_FILE = os.path.join(BASE_DIR, "dist", "mqdb_tree.json")
 TREE_BACKUP_DIR = os.path.join(BASE_DIR, ".tree_backups")
 MAX_BACKUPS = 5  # 最多保留 5 份备份
 
@@ -56,7 +65,7 @@ def _is_empty_shell(data):
     return _validate_tree(data) and not _tree_has_content(data)
 
 def _backup_tree():
-    """备份当前的 navicat_tree.json（如果文件有有效数据）"""
+    """备份当前的 mqdb_tree.json（如果文件有有效数据）"""
     try:
         if not os.path.exists(TREE_FILE) or os.path.getsize(TREE_FILE) == 0:
             return
@@ -69,12 +78,12 @@ def _backup_tree():
             return
         # 生成备份文件名
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = os.path.join(TREE_BACKUP_DIR, f"navicat_tree_{timestamp}.json")
+        backup_path = os.path.join(TREE_BACKUP_DIR, f"mqdb_tree_{timestamp}.json")
         with open(backup_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(_transform_secrets(data, protect=True), f, ensure_ascii=False, indent=2)
         # 清理旧备份：只保留最新的 MAX_BACKUPS 份
         backups = sorted(
-            [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_") and b.endswith(".json")],
+            [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("mqdb_tree_") and b.endswith(".json")],
             reverse=True
         )
         for old_bak in backups[MAX_BACKUPS:]:
@@ -104,14 +113,14 @@ def _recover_from_backup():
     try:
         if os.path.exists(TREE_BACKUP_DIR):
             backups = sorted(
-                [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_") and b.endswith(".json")],
+                [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("mqdb_tree_") and b.endswith(".json")],
                 reverse=True
             )
             for bak_file in backups:
                 bak_path = os.path.join(TREE_BACKUP_DIR, bak_file)
                 try:
                     with open(bak_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                        data = _transform_secrets(json.load(f), protect=False)
                     if _validate_tree(data) and _tree_has_content(data):
                         # 恢复成功：用备份覆盖主文件
                         with open(TREE_FILE, "w", encoding="utf-8") as f:
@@ -166,7 +175,8 @@ def _load_tree():
             if recovered:
                 return recovered
             return {"folders": [], "connections": {}, "saved_queries": []}
-        data = json.loads(content)
+        raw_data = json.loads(content)
+        data = _transform_secrets(raw_data, protect=False)
         conn_count = len(data.get("connections", {}))
         print(f"[tree] _load_tree: 解析成功，connections={conn_count}, folders={len(data.get('folders',[]))}, queries={len(data.get('saved_queries',[]))}")
         if not _validate_tree(data):
@@ -175,6 +185,9 @@ def _load_tree():
             if recovered:
                 return recovered
             return {"folders": [], "connections": {}, "saved_queries": []}
+        # 兼容旧版本树文件：读取旧明文后立即用 DPAPI 回写。
+        if _transform_secrets(data, protect=True) != raw_data:
+            _save_tree(data)
         # 【关键】结构合法但内容为空（空壳），尝试恢复
         if _is_empty_shell(data):
             print("[tree] _load_tree: 空壳数据，尝试恢复")
@@ -223,7 +236,7 @@ def _save_tree(data):
         # 原子写入：先写临时文件，再替换（防止写入中途崩溃损坏数据）
         tmp_file = TREE_FILE + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(_transform_secrets(data, protect=True), f, ensure_ascii=False, indent=2)
         # Windows 需要先删除目标文件再重命名
         if os.path.exists(TREE_FILE):
             os.replace(tmp_file, TREE_FILE)
@@ -274,7 +287,7 @@ def tree_diag():
     info["backups"] = []
     try:
         if os.path.exists(TREE_BACKUP_DIR):
-            backups = sorted([b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_")], reverse=True)[:5]
+            backups = sorted([b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("mqdb_tree_")], reverse=True)[:5]
             info["backups"] = backups
     except Exception:
         pass
@@ -301,7 +314,7 @@ def tree_get_backups():
         if not os.path.exists(TREE_BACKUP_DIR):
             return {"ok": True, "backups": []}
         backups = sorted(
-            [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_") and b.endswith(".json")],
+            [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("mqdb_tree_") and b.endswith(".json")],
             reverse=True
         )
         result = []
@@ -309,7 +322,7 @@ def tree_get_backups():
             path = os.path.join(TREE_BACKUP_DIR, b)
             try:
                 size = os.path.getsize(path)
-                ts_str = b.replace("navicat_tree_", "").replace(".json", "")
+                ts_str = b.replace("mqdb_tree_", "").replace(".json", "")
                 result.append({"name": b, "size": size, "ts": ts_str})
             except Exception:
                 pass
@@ -329,7 +342,7 @@ def tree_force_recover():
         return {"ok": False, "msg": str(e)}
 @eel.expose
 def tree_check_integrity():
-    """检查 navicat_tree.json 完整性，返回诊断信息"""
+    """检查 mqdb_tree.json 完整性，返回诊断信息"""
     result = {"file_exists": os.path.exists(TREE_FILE), "issues": []}
     try:
         if result["file_exists"]:
@@ -345,12 +358,12 @@ def tree_check_integrity():
             # 检查是否有备份可用
             has_backup = False
             if os.path.exists(TREE_BACKUP_DIR):
-                backups = [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("navicat_tree_") and b.endswith(".json")]
+                backups = [b for b in os.listdir(TREE_BACKUP_DIR) if b.startswith("mqdb_tree_") and b.endswith(".json")]
                 has_backup = len(backups) > 0
             result["has_backup"] = has_backup
         else:
             result["file_size"] = 0
-            result["issues"].append("navicat_tree.json 不存在")
+            result["issues"].append("mqdb_tree.json 不存在")
         result["ok"] = len(result["issues"]) == 0
     except Exception as e:
         result["issues"].append(str(e))

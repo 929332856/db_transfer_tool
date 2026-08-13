@@ -317,7 +317,7 @@ def table_get_ddl(conn_data, database, table_name, schema=''):
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
         if db_type in ('mysql', 'ob-mysql'):
             with engine.connect() as conn:
-                row = conn.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
+                row = conn.execute(text(f"SHOW CREATE TABLE {_safe_ident(database, 'mysql')}.{_safe_ident(table_name, 'mysql')}")).fetchone()
             ddl = row[1] if row else ""
         elif db_type == 'postgresql':
             q = schema if schema else database
@@ -339,7 +339,7 @@ def table_get_ddl(conn_data, database, table_name, schema=''):
                 ddl = '\n'.join(lines)
         else:
             with engine.connect() as conn:
-                row = conn.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
+                row = conn.execute(text(f"SHOW CREATE TABLE {_safe_ident(database, 'mysql')}.{_safe_ident(table_name, 'mysql')}")).fetchone()
             ddl = row[1] if row else ""
         engine.dispose()
         return {"ok": True, "ddl": ddl}

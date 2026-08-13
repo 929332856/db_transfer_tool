@@ -25,9 +25,10 @@ function _getDataTypesForDB(dbType) {
             defaultLen: '255',
             types: ['INTEGER', 'BIGINT', 'SMALLINT', 'SERIAL', 'BIGSERIAL',
                 'NUMERIC', 'DECIMAL', 'REAL', 'DOUBLE PRECISION', 'MONEY',
-                'VARCHAR', 'CHAR', 'TEXT',
+                'VARCHAR', 'CHAR', 'CHARACTER VARYING', 'TEXT',
                 'BOOLEAN',
-                'DATE', 'TIME', 'TIMESTAMP', 'TIMESTAMPTZ', 'TIME WITH TIME ZONE', 'INTERVAL',
+                'DATE', 'TIME', 'TIMESTAMP', 'TIMESTAMPTZ', 'TIMESTAMP WITH TIME ZONE',
+                'TIMESTAMP WITHOUT TIME ZONE', 'TIME WITH TIME ZONE', 'TIME WITHOUT TIME ZONE', 'INTERVAL',
                 'BYTEA', 'JSON', 'JSONB', 'XML', 'UUID']
         };
     } else if (dbType === 'mssql') {
@@ -48,7 +49,8 @@ function _getDataTypesForDB(dbType) {
             types: ['INT', 'BIGINT', 'TINYINT', 'SMALLINT', 'MEDIUMINT', 'FLOAT', 'DOUBLE', 'DECIMAL',
                 'VARCHAR', 'CHAR', 'TEXT', 'MEDIUMTEXT', 'LONGTEXT', 'TINYTEXT',
                 'DATE', 'TIME', 'DATETIME', 'TIMESTAMP', 'YEAR',
-                'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'TINYBLOB', 'JSON', 'ENUM', 'SET', 'BOOLEAN']
+                'BLOB', 'MEDIUMBLOB', 'LONGBLOB', 'TINYBLOB', 'BINARY', 'VARBINARY',
+                'JSON', 'ENUM', 'SET', 'BOOLEAN']
         };
     }
 }
@@ -192,7 +194,7 @@ function designRemoveIndex(j) {
 // ★ 各数据库不支持长度的类型（这些类型不拼接 (length)）
 var _NO_LEN_TYPES = {
     oracle: ['DATE','CLOB','NCLOB','LONG','BLOB','LONG RAW','BINARY_FLOAT','BINARY_DOUBLE','ROWID'],
-    mysql: ['TEXT','MEDIUMTEXT','LONGTEXT','TINYTEXT','BLOB','MEDIUMBLOB','LONGBLOB','TINYBLOB',
+    mysql: ['TEXT','MEDIUMTEXT','LONGTEXT','TINYTEXT','BLOB','MEDIUMBLOB','LONGBLOB','TINYBLOB','ENUM','SET',
             'DATE','TIME','DATETIME','TIMESTAMP','YEAR','JSON','BOOLEAN'],
     postgresql: ['TEXT','DATE','TIME','TIMESTAMP','TIMESTAMPTZ','TIME WITH TIME ZONE',
                  'INTERVAL','BYTEA','JSON','JSONB','XML','UUID','BOOLEAN'],
@@ -227,15 +229,21 @@ function designCollect() {
         var colName = nameEl ? nameEl.value.trim() : ('col_' + i);
         var dt = typeEl ? typeEl.value : 'VARCHAR';
         var len = lenEl ? lenEl.value.trim() : '';
+        var originalType = row.getAttribute('data-original-type') || '';
+        var originalLen = row.getAttribute('data-original-len') || '';
+        var originalBase = originalType.split('(')[0].trim().toUpperCase();
+        var aliases = {'CHARACTER VARYING':'VARCHAR', 'TIMESTAMP WITHOUT TIME ZONE':'TIMESTAMP', 'TIME WITHOUT TIME ZONE':'TIME'};
+        var preserveOriginalType = originalType && (aliases[originalBase] || originalBase) === dt && originalLen === len;
         // ★ 无长度类型不拼接括号（如 Oracle DATE/TIMESTAMP/CLOB 等）
         var useLen = len && _typeSupportsLen(dbType, dt);
         d.columns.push({
             name: colName,
             data_type: dt,
-            col_type: useLen ? dt + '(' + len + ')' : dt,
+            col_type: preserveOriginalType ? originalType : (useLen ? dt + '(' + len + ')' : dt),
             length: useLen ? len : '',
             nullable: nullEl ? nullEl.checked : true,
             default_val: defEl ? (defEl.value.trim() || null) : null,
+            position: i + 1,
             auto_increment: aiEl ? aiEl.checked : false,
             comment: cmtEl ? cmtEl.value.trim() : ''
         });
@@ -370,24 +378,6 @@ function designRefresh() {
     addTableDDLTab(ds.tn, ds.db, ds.schema, ds.cid);
 }
 
-function designViewDDL() {
-    var ds = _getDesignDS();
-    if (!ds) return;
-    document.getElementById('modal_icon').innerHTML = '📄';
-    document.getElementById('modal_title').textContent = '建表 SQL：' + ds.tn;
-    document.getElementById('modal_title').style.color = '#4fc3f7';
-    document.getElementById('modal_msg').innerHTML = '<div style="color:#888;padding:20px;text-align:center;">⏳ 加载中...</div>';
-    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
-    document.getElementById('modal_overlay').classList.add('show');
-
-    eel.table_get_ddl(ds.conn, ds.db, ds.tn, ds.schema)(function(r) {
-        var ddl = '<div style="color:#e74c3c;">❌ ' + escapeHtml(r ? r.msg : '加载失败') + '</div>';
-        if (r && r.ok && r.ddl) {
-            ddl = '<pre style="background:#0d1117;border:1px solid #333;border-radius:6px;padding:12px;font-family:Consolas,monospace;font-size:11px;color:#e0e0e0;white-space:pre-wrap;word-break:break-all;max-height:450px;overflow-y:auto;margin:0;">' + escapeHtml(r.ddl) + '</pre>';
-        }
-        document.getElementById('modal_msg').innerHTML = ddl;
-    });
-}
 
 function openQueryInTab(qid) {
     console.log('[openQueryInTab] 尝试打开查询, qid=', qid);

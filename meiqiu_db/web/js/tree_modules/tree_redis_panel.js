@@ -369,7 +369,7 @@ function selectDatabase(cid, db, dbId, arrowId) {
         el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#999;font-size:11px;">⏳ 加载架构...</div>';
         _eelAutoAsync(eel.db_explore_get_schemas(activeConnData, db), function (r) {
             if (!r || !r.ok) {
-                el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'加载失败')+'，双击重试</div>';
+                el.innerHTML = '<div style="padding-left:'+(dbPad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+escapeHtml(r?r.msg:'加载失败')+'，双击重试</div>';
                 el.classList.remove('open');
                 el._schemaLoading = false;
                 return;

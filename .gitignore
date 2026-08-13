@@ -31,3 +31,9 @@ venv/
 config*.json
 *.pem
 *.key
+
+# Local runtime output
+meiqiu_db/logs/
+meiqiu_db/db_operation.log
+meiqiu_db/.tree_backups/
+meiqiu_db/generated-images/

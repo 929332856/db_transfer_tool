@@ -84,19 +84,13 @@ def _export_run(data, tables, settings, out_path):
             if export_fmt == "sql":
                 f.write("-- 导出时间: " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
                 f.write("-- 数据库: " + str(data.get("db", "")) + "\n\n")
-                f.write("SET FOREIGN_KEY_CHECKS = 0;\n\n")
+                if db_type in ('mysql', 'ob-mysql'):
+                    f.write("SET FOREIGN_KEY_CHECKS = 0;\n\n")
 
             for ti, tn in enumerate(tables):
                 tbl = _build_table_ref(cdata, data.get("db", ""), tn)
                 # 输出 SQL 中使用裸表名（不含数据库前缀）
-                if db_type in ('mysql', 'ob-mysql'):
-                    tbl_out = f"`{tn}`"
-                elif db_type == 'postgresql':
-                    tbl_out = f'"{tn}"'
-                elif db_type == 'mssql':
-                    tbl_out = f"[{tn}]"
-                else:
-                    tbl_out = tn
+                tbl_out = _safe_ident(tn, db_type)
                 cols = col_selections.get(tn, [])
                 if not cols:
                     with engine.connect() as conn:
@@ -118,7 +112,7 @@ def _export_run(data, tables, settings, out_path):
                 if scope in ("structure", "full") and export_fmt == "sql":
                     # 结构和数据
                     with engine.connect() as conn:
-                        row = conn.execute(text(f"SHOW CREATE TABLE `{data.get('db','')}`.`{tn}`")).fetchone()
+                        row = conn.execute(text(f"SHOW CREATE TABLE {_safe_ident(data.get('db',''), 'mysql')}.{_safe_ident(tn, 'mysql')}")).fetchone()
                         ddl = row[1] if row else ""
                     f.write(f"DROP TABLE IF EXISTS {tbl_out};\n")
                     f.write(ddl + ";\n\n")
@@ -145,7 +139,7 @@ def _export_run(data, tables, settings, out_path):
                             row_count += 1
                             if len(batch) >= 500:
                                 if export_fmt == "sql":
-                                    f.write(f"INSERT INTO {tbl_out} ({col_plain}) VALUES\n")
+                                    f.write(f"INSERT INTO {tbl_out} ({col_quoted}) VALUES\n")
                                     f.write(",\n".join(batch) + ";\n")
                                 else:
                                     f.write("\n".join(batch) + "\n")
@@ -158,7 +152,7 @@ def _export_run(data, tables, settings, out_path):
                                 }))
                         if batch:
                             if export_fmt == "sql":
-                                f.write(f"INSERT INTO {tbl_out} ({col_plain}) VALUES\n")
+                                f.write(f"INSERT INTO {tbl_out} ({col_quoted}) VALUES\n")
                                 f.write(",\n".join(batch) + ";\n")
                             else:
                                 f.write("\n".join(batch) + "\n")
@@ -172,7 +166,7 @@ def _export_run(data, tables, settings, out_path):
                 }))
                 _progress_q.put(("export_log", {"msg": f"✅ {tn} 导出完成，共 {total_all} 行", "level": "ok"}))
 
-            if export_fmt == "sql":
+            if export_fmt == "sql" and db_type in ('mysql', 'ob-mysql'):
                 f.write("\nSET FOREIGN_KEY_CHECKS = 1;\n")
 
         _progress_q.put(("export_done", {"path": out_path}))
@@ -196,7 +190,6 @@ def export_wizard_start(conn_data, database, tables, settings, schema=''):
     ext = ".sql" if settings.get("format", "sql") == "sql" else ".csv"
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_path = os.path.join(BASE_DIR, f"export_{database}_{ts}{ext}")
-    _progress_q.queue.clear()
     threading.Thread(target=_export_run, args=(data, tables, settings, out_path), daemon=True).start()
     return {"ok": True, "msg": "导出已启动"}  
 
@@ -349,7 +342,7 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                                 conn.commit()
                                 _progress_q.put(("import_progress", {"total": total, "processed": done, "time": time.strftime("%H:%M:%S")}))
                         except Exception as se:
-                            _progress_q.put(("import_log", str(se)[:200]))
+                            raise RuntimeError(f"第 {done + 1} 条 SQL 执行失败，事务已回滚：{str(se)[:200]}") from se
                     conn.commit()  # ★ 收尾提交（含 DDL 隐式提交后的残余语句）
                 _progress_q.put(("import_done", {"total": total, "processed": done}))
 
@@ -365,8 +358,9 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                 tbl = _build_table_ref(cdata, database, tbl_name)
                 cols = ", ".join(_safe_ident(h, db_type) for h in header)
                 ph = ", ".join(":" + h for h in header)
-                rows = list(reader)
-                total = len(rows)
+                # 流式读取，避免大 CSV 一次性占满内存。
+                rows = reader
+                total = None
                 _progress_q.put(("import_progress", {"total": total, "processed": 0, "time": time.strftime("%H:%M:%S")}))
                 batch = []
                 batch_size = 5000
@@ -393,7 +387,7 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                     if batch:
                         conn.execute(text(insert_template), batch)
                         conn.commit()
-                _progress_q.put(("import_done", {"total": total, "processed": processed}))
+                _progress_q.put(("import_done", {"total": processed, "processed": processed}))
 
         except Exception as e:
             _progress_q.put(("import_error", {"msg": str(e)}))
@@ -405,6 +399,5 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                 except Exception:
                     pass
 
-    _progress_q.queue.clear()
     threading.Thread(target=_run, daemon=True).start()
     return True

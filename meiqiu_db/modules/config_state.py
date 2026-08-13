@@ -15,18 +15,18 @@ from typing import Optional, List
 from datetime import datetime
 import sqlalchemy as sa
 from sqlalchemy import text, inspect, create_engine
+from modules import BASE_DIR
 
 # ==================== 配置路径 ====================
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILES_FILE = os.path.join(BASE_DIR, "db_profiles.json")
 
 # ★ 日志函数和工具函数：从主模块导入（主模块已初始化 logs/ 目录和按日期轮转的 logger）
 try:
     from db_transfer_eel import (_log_db_select, _log_db_insert, _log_db_update, _log_db_delete,
-                                 _log_db_error, _db_op_logger, _sql_value, _safe_ident)
+                                 _log_db_error, _db_op_logger, _sql_value, _safe_ident,
+                                 _transform_secrets)
 except ImportError:
     # 兼容独立运行（如测试），回退到简单 console 日志
     import logging
@@ -43,6 +43,7 @@ except ImportError:
         _db_op_logger.info(f"[DELETE] {sql}")
         if rollback_sql: _db_op_logger.info(f"[ROLLBACK] {rollback_sql}")
     def _log_db_error(label: str, msg: str): _db_op_logger.warning(f"[{label}] {msg}")
+    def _transform_secrets(value, protect=True): return value
 
 
 def _gen_rollback_update(tbl: str, db_type: str, columns: list, orig_row: list, where_cols: list = None):
@@ -71,12 +72,17 @@ class ProfileManager:
             return {"profiles": [], "last_used": ""}
         try:
             with open(PROFILES_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                raw_data = json.load(f)
+            data = _transform_secrets(raw_data, protect=False)
+            protected_data = _transform_secrets(data, protect=True)
+            if protected_data != raw_data:
+                ProfileManager._write_protected_json(protected_data)
+            return data
         except Exception:
             return {"profiles": [], "last_used": ""}
 
     @staticmethod
-    def _write_json(data: dict):
+    def _write_protected_json(data: dict):
         # 原子写入：先写临时文件，再替换
         tmp_file = PROFILES_FILE + ".tmp"
         with open(tmp_file, "w", encoding="utf-8") as f:
@@ -85,6 +91,10 @@ class ProfileManager:
             os.replace(tmp_file, PROFILES_FILE)
         else:
             os.rename(tmp_file, PROFILES_FILE)
+
+    @staticmethod
+    def _write_json(data: dict):
+        ProfileManager._write_protected_json(_transform_secrets(data, protect=True))
 
     @staticmethod
     def load_all() -> List[dict]:

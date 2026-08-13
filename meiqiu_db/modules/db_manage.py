@@ -113,7 +113,7 @@ def db_explore_get_table_ddl(conn_data, database, table_name):
         if cdata.get("db_type") != 'oracle':
             cdata["db"] = database
         engine = create_engine(_conn_url(cdata), connect_args=_connect_args(cdata.get("db_type","mysql"), timeout=10))
-        with engine.connect() as c: row = c.execute(text(f"SHOW CREATE TABLE `{database}`.`{table_name}`")).fetchone()
+        with engine.connect() as c: row = c.execute(text(f"SHOW CREATE TABLE {_safe_ident(database, 'mysql')}.{_safe_ident(table_name, 'mysql')}")).fetchone()
         engine.dispose()
         return {"ok": True, "ddl": row[1] if row else ""}
     except Exception as e: return {"ok": False, "msg": _friendly_error(e, cdata.get('db_type','mysql'))}
@@ -217,7 +217,6 @@ def db_run_sql_file(conn_data, database, file_path, content=''):
             _progress_q.put(("sql_run_done", {"total": total, "processed": done}))
         except Exception as e:
             _progress_q.put(("sql_run_error", {"msg": str(e)}))
-    _progress_q.queue.clear()
     threading.Thread(target=_run, daemon=True).start()
     return True
 

@@ -160,7 +160,7 @@ function expandConn(cid, pad) {
                 console.log('Redis DB列表回调触发', r);
                 clearTimeout(redisTimeoutId);
                 if (!r) { console.error('Redis DB列表返回null'); children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ 返回null</div>'; children.classList.remove('open'); return; }
-                if (!r.ok) { console.error('Redis DB列表返回ok=false:', r.msg); children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'')+'</div>'; children.classList.remove('open'); return; }
+                if (!r.ok) { console.error('Redis DB列表返回ok=false:', r.msg); children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+escapeHtml(r?r.msg:'')+'</div>'; children.classList.remove('open'); return; }
                 console.log('Redis DB列表成功:', (r.databases||[]).length, '个DB');
                 var html = '';
                 // 顶部信息栏
@@ -190,7 +190,7 @@ function expandConn(cid, pad) {
     _eelAutoAsync(eel.db_explore_get_databases(conn), function (r) {
         console.log('[expandConn] db_explore_get_databases callback:', JSON.stringify(r).substring(0, 200));
         if (!r || !r.ok) {
-            children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+(r?r.msg:'无响应')+'</div>';
+            children.innerHTML = '<div style="padding-left:'+(pad+20)+'px;color:#e74c3c;font-size:11px;">❌ '+escapeHtml(r?r.msg:'无响应')+'</div>';
             // ★ 失败时移除 open class，允许用户重试双击展开
             children.classList.remove('open');
             return;

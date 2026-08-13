@@ -205,8 +205,10 @@
                                    style="width:60px;height:26px;" title="慢查询时间阈值（秒）">
                         </span>
                         <button class="btn btn-sm btn-blue" id="sq_btn_refresh" onclick="slowQueryRefresh()">🔄 刷新</button>
-                        <button class="btn btn-sm" id="sq_btn_today" onclick="toggleSqToday()" style="background:#555;color:#fff;" title="只显示今天的慢SQL">📅 今天</button>
-                        <button class="btn btn-sm" id="sq_btn_running" onclick="slowQueryLoadRunning()" title="查看当前正在运行的进程（相当于 SHOW PROCESSLIST，仅显示有 SQL 在执行且 TIME≥1s 的会话，支持一键终止）">🏃 运行进程</button>
+                        <button class="btn btn-sm" id="sq_btn_today" onclick="toggleSqToday()"
+                                onmouseenter="previewSqTodayButton(true)" onmouseleave="previewSqTodayButton(false)"
+                                style="background:#555;color:#fff;" title="只显示今天的慢SQL">📅 今天</button>
+                        <button class="btn btn-sm" id="sq_btn_running" onclick="slowQueryLoadRunning()" title="查看当前正在运行的 SQL 进程（仅显示执行超过 1 秒的会话）">🖥 运行进程</button>
                     </div>
                 </div>
 

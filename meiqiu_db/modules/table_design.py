@@ -249,7 +249,11 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
                 name = _safe_ident(col_name, db_type)
                 col_type = col.get("col_type", col.get("data_type", "VARCHAR(255)"))
                 nullable = " NULL" if col.get("nullable", True) else " NOT NULL"
-                default = f" DEFAULT {col['default_val']}" if col.get("default_val") else ""
+                has_default = "default_val" in col and col.get("default_val") is not None
+                default_value = col.get("default_val")
+                if has_default and str(default_value).strip() == '':
+                    default_value = "''"
+                default = f" DEFAULT {default_value}" if has_default else ""
                 auto_inc = " AUTO_INCREMENT" if col.get("auto_increment") else ""
                 cmt_raw = col.get('comment', '')
                 if cmt_raw:
@@ -336,7 +340,11 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
                 name = _safe_ident(col["name"], db_type)
                 col_type = col.get("col_type", col.get("data_type", "VARCHAR(255)"))
                 nullable = " DROP NOT NULL" if col.get("nullable", True) else " SET NOT NULL"
-                default = f" SET DEFAULT {col['default_val']}" if col.get("default_val") else " DROP DEFAULT"
+                has_default = "default_val" in col and col.get("default_val") is not None
+                default_value = col.get("default_val")
+                if has_default and str(default_value).strip() == '':
+                    default_value = "''"
+                default = f" SET DEFAULT {default_value}" if has_default else " DROP DEFAULT"
                 sqls.append(f"ALTER TABLE {tbl} ALTER COLUMN {name} TYPE {col_type}, ALTER COLUMN {name}{nullable}, ALTER COLUMN {name}{default}")
 
         else:

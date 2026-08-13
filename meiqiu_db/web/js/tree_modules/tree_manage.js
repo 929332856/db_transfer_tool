@@ -236,7 +236,7 @@ function doCreateDatabase(cid, dbType) {
     eel.db_create(conn, dbName, charset, collation)(function(r) {
         var resultEl = document.getElementById('create_db_result');
         if (r && r.ok) {
-            if (resultEl) resultEl.innerHTML = '<span style="color:#2ecc71;">✅ ' + r.msg + '</span>';
+            if (resultEl) resultEl.innerHTML = '<span style="color:#2ecc71;">✅ ' + escapeHtml(r.msg || '') + '</span>';
             if (btnEl) btnEl.innerHTML = '<button class="btn btn-green btn-sm" onclick="hideModal()">完成</button>';
             // 如果连接已展开，刷新数据库列表
             var children = document.getElementById('mc_c_' + cid);
@@ -244,7 +244,7 @@ function doCreateDatabase(cid, dbType) {
                 refreshDatabaseList(cid);
             }
         } else {
-            if (resultEl) resultEl.innerHTML = '<span style="color:#e74c3c;">❌ ' + (r ? r.msg : '创建失败') + '</span>';
+            if (resultEl) resultEl.innerHTML = '<span style="color:#e74c3c;">❌ ' + escapeHtml(r ? r.msg : '创建失败') + '</span>';
             if (btnEl) btnEl.innerHTML =
                 '<button class="btn btn-gray" onclick="hideModal()">取消</button>' +
                 '<button class="btn btn-blue" onclick="doCreateDatabase(\''+cid+'\',\''+escapeAttr(dbType)+'\')">重试</button>';
@@ -443,7 +443,7 @@ function exportWizStep3() {
     var conn = treeData && treeData.connections ? treeData.connections[es.cid] : null;
     eel.export_wizard_get_tables(conn, es.db, es.schema)(function(r) {
         if (!r || !r.ok) {
-            document.getElementById('modal_msg').innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ ' + (r ? r.msg : '加载失败') + '</div>';
+            document.getElementById('modal_msg').innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ ' + escapeHtml(r ? r.msg : '加载失败') + '</div>';
             document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
             return;
         }
@@ -692,6 +692,7 @@ function importWizardStart() {
     var conn = treeData && treeData.connections ? treeData.connections[ds.cid] : null;
     var fileName = window._importFileName || 'import.sql';
     var content = window._importFileContent;
+    var importOpId = 'import_file_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
     var dropEl = document.getElementById('imp_drop_existing');
     var dropExisting = !!(dropEl && dropEl.checked);  // 只删除目标库同名表，默认不删除
 
@@ -708,7 +709,7 @@ function importWizardStart() {
             '</div>' +
         '</div>';
     document.getElementById('modal_msg').innerHTML = html;
-    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
+    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-red btn-sm" onclick="eel.cancel_query()();this.disabled=true;this.textContent=\'正在终止...\'">⏹ 取消执行</button><button class="btn btn-gray" onclick="hideModal()">关闭</button>';
 
     var tid = setInterval(function() {
         if (!document.getElementById('modal_overlay').classList.contains('show')) { clearInterval(tid); return; }
@@ -739,14 +740,15 @@ function importWizardStart() {
                 } else if (m && m[0] === 'import_error') {
                     clearInterval(tid);
                     var area2 = document.getElementById('import_log_area');
-                    if (area2) { area2.innerHTML += '<div style="color:#e74c3c;">❌ ' + escapeHtml(m[1].msg) + '</div>'; area2.scrollTop = area2.scrollHeight; }
+                    var cancelledImport = !!(m[1] && m[1].cancelled);
+                    if (area2) { area2.innerHTML += '<div style="color:' + (cancelledImport ? '#f39c12' : '#e74c3c') + ';">' + (cancelledImport ? '⏸ ' : '❌ ') + escapeHtml(m[1].msg) + '</div>'; area2.scrollTop = area2.scrollHeight; }
                     document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
                 }
             }
         });
     }, 300);
 
-    eel.import_wizard_run(conn, ds.db, '', fileType, ds.schema, content || '', window._importFileName || '', dropExisting)();
+    eel.import_wizard_run(conn, ds.db, '', fileType, ds.schema, content || '', window._importFileName || '', dropExisting, importOpId)();
 }
 
 // ==================== 数据加载 ====================

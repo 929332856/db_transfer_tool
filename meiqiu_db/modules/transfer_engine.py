@@ -8,7 +8,7 @@ from urllib.parse import quote_plus
 from typing import List
 from sqlalchemy import text, inspect, create_engine
 from modules import _progress_q
-from modules.conn_utils import _connect_args
+from modules.conn_utils import _connect_args, _safe_ident
 
 
 def _get_pk_columns(engine, table_name: str):
@@ -44,9 +44,97 @@ class TransferEngine:
         # ★ 多表并行传输开关：多张表时每表独立连接同时传输（默认关闭）
         self.parallel = config.get("parallel", False)
         self._stop_event = threading.Event()
+        self._conn_ids_lock = threading.RLock()
+        self._src_conn_ids = set()
+        self._dst_conn_ids = set()
+        self._dst_database_ready = False
+
+    @staticmethod
+    def _backend_pid(conn):
+        """Return the current MySQL/OceanBase server session ID."""
+        try:
+            return int(conn.execute(text("SELECT CONNECTION_ID()")).scalar())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _live_conn_ids(ids):
+        return sorted(pid for pid in set(ids or []) if pid)
+
+    def _kill_server_sessions(self, host, port, user, pwd, database, pids,
+                              kill_connection=False):
+        """Kill the transfer sessions through a separate administrative connection."""
+        pids = self._live_conn_ids(pids)
+        if not pids:
+            return
+        killer = None
+        try:
+            u = quote_plus(str(user or ""))
+            p = quote_plus(str(pwd or ""))
+            url = (f"mysql+mysqldb://{u}:{p}@{host}:{port}/{database}"
+                   f"?charset=utf8mb4&connect_timeout=5&read_timeout=5")
+            killer = create_engine(url, connect_args=_connect_args("mysql", timeout=5))
+            command = "KILL CONNECTION" if kill_connection else "KILL QUERY"
+            with killer.connect() as conn:
+                for pid in pids:
+                    try:
+                        conn.exec_driver_sql(f"{command} {int(pid)}")
+                    except Exception:
+                        # The session may have ended naturally; continue killing the rest.
+                        pass
+        except Exception:
+            pass
+        finally:
+            if killer is not None:
+                try:
+                    killer.dispose()
+                except Exception:
+                    pass
+
+    def _record_src_conn_id(self, conn):
+        pid = self._backend_pid(conn)
+        if not pid:
+            return None
+        with self._conn_ids_lock:
+            self._src_conn_ids.add(pid)
+            stopped = self._stop_event.is_set()
+        if stopped:
+            self._kill_server_sessions(
+                self.src_host, self.src_port, self.src_user, self.src_pwd,
+                self.src_db, [pid], kill_connection=False
+            )
+        return pid
+
+    def _record_dst_conn_id(self, conn):
+        pid = self._backend_pid(conn)
+        if not pid:
+            return None
+        with self._conn_ids_lock:
+            self._dst_conn_ids.add(pid)
+            stopped = self._stop_event.is_set()
+        if stopped:
+            self._kill_server_sessions(
+                self.dst_host, self.dst_port, self.dst_user, self.dst_pwd,
+                self.dst_db, [pid], kill_connection=True
+            )
+        return pid
 
     def stop(self):
         self._stop_event.set()
+        with self._conn_ids_lock:
+            src_pids = self._live_conn_ids(self._src_conn_ids)
+            dst_pids = self._live_conn_ids(self._dst_conn_ids)
+        # Event checks only run between batches; KILL interrupts SQL currently
+        # running on the source and target sessions immediately.
+        self._kill_server_sessions(
+            self.src_host, self.src_port, self.src_user, self.src_pwd,
+            self.src_db, src_pids, kill_connection=False
+        )
+        self._kill_server_sessions(
+            self.dst_host, self.dst_port, self.dst_user, self.dst_pwd,
+            self.dst_db if self._dst_database_ready else "", dst_pids,
+            kill_connection=True
+        )
 
     @property
     def src_url(self) -> str:
@@ -71,11 +159,13 @@ class TransferEngine:
         try:
             tmp_engine = create_engine(self.dst_url_no_db, connect_args=_connect_args("mysql", timeout=10))
             with tmp_engine.connect() as conn:
+                self._record_dst_conn_id(conn)
                 conn.execute(text("COMMIT"))
                 conn.execute(text(
-                    f"CREATE DATABASE IF NOT EXISTS `{self.dst_db}` "
+                    f"CREATE DATABASE IF NOT EXISTS {_safe_ident(self.dst_db, 'mysql')} "
                     f"DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
                 ))
+            self._dst_database_ready = True
             _progress_q.put(("log", f"📦 目标数据库 [{self.dst_db}] 已就绪"))
         finally:
             # ★ 无论成功/异常都必须关闭连接：否则残留连接会持有元数据锁
@@ -105,7 +195,7 @@ class TransferEngine:
         return ddl.strip()
 
     def _get_table_ddl(self, conn, table_name: str) -> str:
-        result = conn.execute(text(f"SHOW CREATE TABLE `{table_name}`"))
+        result = conn.execute(text(f"SHOW CREATE TABLE {_safe_ident(table_name, 'mysql')}"))
         row = result.fetchone()
         return row[1] if row else ""
 
@@ -113,6 +203,7 @@ class TransferEngine:
         _progress_q.put(("log", "📋 阶段1：检查/创建表结构..."))
         ddls = {}
         with src_engine.connect() as src_conn:
+            self._record_src_conn_id(src_conn)
             for table_name in tables:
                 if self._stop_event.is_set():
                     return False
@@ -131,6 +222,7 @@ class TransferEngine:
             _progress_q.put(("done", "同步已取消"))
             return False
         with dst_engine.connect() as dst_conn:
+            self._record_dst_conn_id(dst_conn)
             dst_conn.execute(text("COMMIT"))
             dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
             for table_name in tables:
@@ -177,7 +269,7 @@ class TransferEngine:
                 part_rows += 1
                 i += 1
                 part_bytes += sum(len(str(v)) if v is not None else 4 for v in row)
-            sql = f"INSERT IGNORE INTO `{table_name}` ({col_list}) VALUES " + ", ".join([values_tmpl] * part_rows)
+            sql = f"INSERT IGNORE INTO {_safe_ident(table_name, 'mysql')} ({col_list}) VALUES " + ", ".join([values_tmpl] * part_rows)
             flat = [v for row in part for v in row]
             # ★ 参数必须是「tuple 列表」（每组一个 tuple）：扁平 list 会被 SQLAlchemy
             #    误判为 executemany 参数组而报 "List argument must consist only of tuples"
@@ -199,18 +291,20 @@ class TransferEngine:
         skipped = 0
         last = None
         with src_engine.connect() as src_conn:
+            self._record_src_conn_id(src_conn)
             # 先取列名：LIMIT 0 快速返回，不拉数据
-            result = src_conn.exec_driver_sql(f"SELECT * FROM `{table_name}` LIMIT 0")
+            qtable = _safe_ident(table_name, 'mysql')
+            result = src_conn.exec_driver_sql(f"SELECT * FROM {qtable} LIMIT 0")
             columns = list(result.keys())
-            col_list = ', '.join(f'`{c}`' for c in columns)
+            col_list = ', '.join(_safe_ident(c, 'mysql') for c in columns)
             values_tmpl = "(" + ", ".join(["%s"] * len(columns)) + ")"
             pk_index = columns.index(pk) if pk in columns else None
             while not self._stop_event.is_set():
                 if last is None:
-                    sql = f"SELECT * FROM `{table_name}` ORDER BY `{pk}` LIMIT {batch}"
+                    sql = f"SELECT * FROM {qtable} ORDER BY {_safe_ident(pk, 'mysql')} LIMIT {batch}"
                     rows = src_conn.exec_driver_sql(sql).fetchall()
                 else:
-                    sql = f"SELECT * FROM `{table_name}` WHERE `{pk}` > %s ORDER BY `{pk}` LIMIT {batch}"
+                    sql = f"SELECT * FROM {qtable} WHERE {_safe_ident(pk, 'mysql')} > %s ORDER BY {_safe_ident(pk, 'mysql')} LIMIT {batch}"
                     rows = src_conn.exec_driver_sql(sql, [(last,)]).fetchall()
                 if not rows:
                     break
@@ -228,9 +322,10 @@ class TransferEngine:
         skipped = 0
         src_conn = src_engine.connect().execution_options(stream_results=True)
         try:
-            result = src_conn.execute(text(f"SELECT * FROM `{table_name}`"))
+            self._record_src_conn_id(src_conn)
+            result = src_conn.execute(text(f"SELECT * FROM {_safe_ident(table_name, 'mysql')}"))
             columns = list(result.keys())
-            col_list = ', '.join(f'`{c}`' for c in columns)
+            col_list = ', '.join(_safe_ident(c, 'mysql') for c in columns)
             values_tmpl = "(" + ", ".join(["%s"] * len(columns)) + ")"
             while not self._stop_event.is_set():
                 rows = result.fetchmany(batch)
@@ -248,6 +343,7 @@ class TransferEngine:
         """并行传输单张表：独立连接 + 独立事务（导完即提交，互不影响）"""
         conn = dst_engine.connect()
         try:
+            self._record_dst_conn_id(conn)
             conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
             rows = self._transfer_single_table(
                 src_engine, dst_engine, table_name, table_index, total_tables, conn)
@@ -327,6 +423,7 @@ class TransferEngine:
                 else:
                     # ★ 串行模式：共享连接，每导完一张表 commit 一次，避免一张表失败导致全部回滚
                     with dst_engine.connect() as dst_conn:
+                        self._record_dst_conn_id(dst_conn)
                         dst_conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
                         try:
                             for i, table in enumerate(tables, 1):

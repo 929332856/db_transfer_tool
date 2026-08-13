@@ -1,4 +1,14 @@
 // ==================== 表操作 ====================
+function _runCancelableRowDelete(call, onDone) {
+    showModal('⏹', '正在删除数据',
+        '<div style="text-align:center;padding:16px;color:#aaa;">正在执行 DELETE...</div>',
+        '#e67e22',
+        '<button class="btn btn-red btn-sm" onclick="eel.cancel_query()();this.disabled=true;this.textContent=\'正在终止...\'">⏹ 取消执行</button>');
+    call(function(r) {
+        hideModal();
+        onDone(r);
+    });
+}
 function _runCancelableTableOperation(kind, conn, db, tn, sch, cid) {
     var opId = 'table_op_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
     var isDelete = kind === 'delete';
@@ -49,14 +59,12 @@ function _runCancelableTableOperation(kind, conn, db, tn, sch, cid) {
         window._currentTableOperation = null;
     });
 }
-
 function tableCtx(e, tn, db, schema, cid) {
     e.preventDefault(); e.stopPropagation();
     var sch = schema || '';
     var conn = cid ? (treeData && treeData.connections ? treeData.connections[cid] : null) : activeConnData;
     showCtxMenu(e.clientX, e.clientY, [
         {label:'📄 打开表',action:function(){addTableDataTab(tn,db,sch,cid);}},
-        {label:'📄 查看DDL',action:function(){showTableDDLDialog(tn,db,sch,cid,conn);}},
         {label:'🔧 设计表',action:function(){addTableDDLTab(tn,db,sch,cid);}},
         {label:'✏️ 重命名',action:function(){showInputDialog('重命名表','新表名：',function(newName){if(!newName||!newName.trim()||newName.trim()===tn)return;eel.table_rename(conn,db,tn,newName.trim(),sch)(function(r){if(r&&r.ok){showOkDialog('成功',r.msg);setTimeout(function(){refreshTableFolder(cid,db,sch);refreshObjPanel();},500);}else showErrorDialog('失败',r?r.msg:'');});},tn);}},
         '---',
@@ -1275,7 +1283,24 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                     '<div class="confirm-sql-preview">' + escapeHtml(sql) + '</div>' +
                     '<div class="confirm-sql-count">共 ' + r.count + ' 处修改</div>',
                     function() {
-                        eel.table_exec_save(conn, db||activeDatabase, tn, sch, changes)(function(r2) {
+                        var opId = 'update_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+                        var execBtn = document.getElementById(tid + '_save_btn');
+                        if (execBtn) {
+                            execBtn.textContent = '⏹ 取消执行';
+                            execBtn.style.background = '#e74c3c';
+                            execBtn.disabled = false;
+                            execBtn.onclick = function() {
+                                eel.cancel_query()();
+                                execBtn.disabled = true;
+                                execBtn.textContent = '⏹ 正在终止...';
+                            };
+                        }
+                        eel.table_exec_save(conn, db||activeDatabase, tn, sch, changes, opId)(function(r2) {
+                            if (execBtn) { execBtn.onclick = null; }
+                            if (r2 && r2.cancelled) {
+                                showWarnDialog('已取消', '操作已被取消');
+                                return;
+                            }
                             if (!r2 || !r2.ok) {
                                 showWarnDialog('保存失败', (r2?r2.msg:'无响应'));
                                 var btn2 = document.getElementById(tid + '_save_btn');
@@ -1354,7 +1379,14 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                 showConfirmDialog('确认删除行',
                     sql + '\n\n⚠ 将删除 ' + r.count + ' 行数据，此操作不可撤销',
                     function() {
-                        eel.table_exec_delete(conn, db||activeDatabase, tn, sch, rowsData)(function(r2) {
+                        var opId = 'delete_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+                        _runCancelableRowDelete(
+                            eel.table_exec_delete(conn, db||activeDatabase, tn, sch, rowsData, opId),
+                            function(r2) {
+                            if (r2 && r2.cancelled) {
+                                showWarnDialog('已取消', '操作已被取消');
+                                return;
+                            }
                             if (!r2 || !r2.ok) {
                                 var btn2 = document.getElementById(tid + '_del_btn');
                                 if (btn2) { btn2.textContent = '❌ '+(r2?r2.msg:'失败'); btn2.style.background = '#e74c3c'; }
@@ -1372,7 +1404,8 @@ function _buildTableDataUI(tn, conn, sch, r, db, cid) {
                                     render();
                                 }
                             });
-                        });
+                            }
+                        );
                     }
                 );
             });
@@ -2405,7 +2438,6 @@ function buildDesignerUI(tabId, tn, design) {
             '<div class="designer-toolbar">' +
                 '<b style="font-size:13px;">🔧 设计表：' + escapeHtml(tn) + '</b>' +
                 '<div style="display:flex;gap:6px;">' +
-                    '<button class="btn btn-sm btn-design-sql" style="font-size:10px;" onclick="designViewDDL()">📄 查看SQL</button>' +
                     '<button class="btn btn-sm" style="background:#2980b9;color:#fff;" onclick="designRefresh()">🔄 刷新</button>' +
                     '<button class="btn btn-sm" style="background:#27ae60;color:#fff;" onclick="designSave()">💾 保存</button>' +
                 '</div>' +
@@ -2433,18 +2465,32 @@ function buildDesignerUI(tabId, tn, design) {
 }
 
 function buildFieldRow(i, c, dataTypes) {
+    var originalType = String(c.col_type || c.data_type || '');
+    var rawDataType = String(c.data_type || '').toUpperCase();
+    var typeAlias = {
+        'CHARACTER VARYING': 'VARCHAR',
+        'TIMESTAMP WITHOUT TIME ZONE': 'TIMESTAMP',
+        'TIME WITHOUT TIME ZONE': 'TIME'
+    };
+    var displayType = typeAlias[rawDataType] || rawDataType;
     var typeOpts = dataTypes.map(function(t) {
-        return '<option value="' + t + '"' + ((c.data_type || '').toUpperCase() === t ? ' selected' : '') + '>' + t + '</option>';
+        return '<option value="' + t + '"' + (displayType === t ? ' selected' : '') + '>' + t + '</option>';
     }).join('');
-    var len = c.length || '';
-    if (!len && c.col_type && typeof c.col_type === 'string') {
-        var m = c.col_type.match(/\((\d+)(?:,(\d+))?\)/);
+    var len = (c.length === -1 || c.length === '-1') ? '' : (c.length || '');
+    if (displayType === 'ENUM' || displayType === 'SET') len = '';
+    if (c.precision !== null && c.precision !== undefined && c.precision !== '') {
+        len = (c.scale !== null && c.scale !== undefined && c.scale !== '') ? String(c.precision) + ',' + String(c.scale) : String(c.precision);
+    }
+    if (!len && originalType) {
+        var m = originalType.match(/\((\d+)(?:,(\d+))?\)/);
         if (m) len = m[2] ? m[1] + ',' + m[2] : m[1];
     }
-    var defVal = c.default_val || '';
+    var defVal = (c.default_val === null || c.default_val === undefined) ? '' : String(c.default_val);
+    // 信息架构中空字符串默认值也是有效值，显示为两个引号，用户删除后才表示移除默认值。
+    if (defVal === '') defVal = "''";
     // 清理 default 值（去掉多余的单引号包裹层）
     if (defVal && typeof defVal === 'string' && defVal.startsWith("'") && defVal.length > 2) defVal = defVal.slice(1, -1);
-    return '<tr data-row="' + i + '">' +
+    return '<tr data-row="' + i + '" data-original-type="' + escapeAttr(originalType) + '" data-original-len="' + escapeAttr(String(len)) + '">' +
         '<td style="text-align:center;color:#888;">' + (i + 1) + '</td>' +
         '<td><input class="design-input field-name" value="' + escapeAttr(c.name) + '" data-row="' + i + '" data-field="name"></td>' +
         '<td><select class="design-select field-type" data-row="' + i + '" data-field="data_type">' + typeOpts + '</select></td>' +
@@ -2458,35 +2504,4 @@ function buildFieldRow(i, c, dataTypes) {
             '<button class="btn btn-sm" style="background:#e67e22;color:#fff;font-size:10px;padding:2px 5px;" onclick="designInsertField(' + (i + 1) + ')" title="下方插入">⬇</button> ' +
             '<button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:2px 5px;" onclick="designRemoveField(' + i + ')">✕</button>' +
         '</td></tr>';
-}
-
-// ==================== 查看DDL弹窗 ====================
-function showTableDDLDialog(tn, db, schema, cid, conn) {
-    var sch = schema || '';
-    var theDb = db;
-    var theCid = cid || activeConnId || '';
-    var theConn = conn || activeConnData;
-    document.getElementById('modal_icon').innerHTML = '📄';
-    document.getElementById('modal_title').textContent = 'DDL：' + tn;
-    document.getElementById('modal_title').style.color = '#4fc3f7';
-    document.getElementById('modal_msg').innerHTML = '<div style="color:#888;padding:20px;text-align:center;">⏳ 加载中...</div>';
-    document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
-    document.getElementById('modal_overlay').classList.add('show');
-    eel.table_get_ddl(theConn, theDb, tn, sch)(function(r) {
-        var ddlHtml;
-        if (r && r.ok && r.ddl) {
-            ddlHtml = '<pre id="ddl_viewer_pre" style="background:#0d1117;border:1px solid #333;border-radius:6px;padding:12px;font-family:Consolas,monospace;font-size:11px;color:#e0e0e0;white-space:pre-wrap;word-break:break-all;max-height:450px;overflow-y:auto;margin:0 0 12px 0;text-align:left;">' + escapeHtml(r.ddl) + '</pre>';
-            document.getElementById('modal_btns').innerHTML =
-                '<button class="btn btn-gray" onclick="hideModal()">关闭</button>' +
-                '<button class="btn btn-blue" onclick="copyDDLContent()">📋 复制DDL</button>';
-        } else {
-            ddlHtml = '<div style="color:#e74c3c;">❌ ' + escapeHtml(r ? r.msg : '加载失败') + '</div>';
-            document.getElementById('modal_btns').innerHTML = '<button class="btn btn-gray" onclick="hideModal()">关闭</button>';
-        }
-        document.getElementById('modal_msg').innerHTML = ddlHtml;
-    });
-}
-function copyDDLContent() {
-    var pre = document.getElementById('ddl_viewer_pre');
-    if (pre) { copyToClipboard(pre.textContent); showOkDialog('成功', 'DDL 已复制到剪贴板'); }
 }
