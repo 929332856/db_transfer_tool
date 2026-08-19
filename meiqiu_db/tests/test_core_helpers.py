@@ -80,6 +80,36 @@ class CoreHelperTests(unittest.TestCase):
         self.assertEqual(guarded(), {"ok": True})
         self.assertEqual(len(calls), 2)
 
+    def test_progress_queue_drops_oldest_when_ui_is_not_polling(self):
+        progress = db._DroppingProgressQueue(maxsize=2)
+        progress.put("first")
+        progress.put("second")
+        progress.put("latest")
+        self.assertEqual(progress.qsize(), 2)
+        self.assertEqual(progress.get_nowait(), "second")
+        self.assertEqual(progress.get_nowait(), "latest")
+
+    def test_long_running_sql_uses_ddl_timeout_classification(self):
+        self.assertTrue(db._is_long_running_sql(
+            "/* add index */ ALTER TABLE day_k_line "
+            "ADD INDEX idx_stock_market_day (securitycode, marketcode, day)"
+        ))
+        self.assertTrue(db._is_long_running_sql("CREATE INDEX idx_a ON t (a)"))
+        self.assertFalse(db._is_long_running_sql("SELECT * FROM day_k_line"))
+
+    def test_mysql_read_timeout_is_replaced_not_duplicated(self):
+        url = "mysql+mysqldb://u:p@127.0.0.1/db?charset=utf8mb4&read_timeout=120"
+        updated = db._set_mysql_read_timeout(url, db._MYSQL_DDL_READ_TIMEOUT)
+        self.assertEqual(updated.count("read_timeout="), 1)
+        self.assertIn("read_timeout=86400", updated)
+
+    def test_connection_key_supports_src_fields(self):
+        key = db._make_conn_key({
+            "src_host": "127.0.0.1", "src_port": 3306,
+            "src_user": "root", "src_db": "market", "db_type": "mysql",
+        })
+        self.assertEqual(key, "mysql:127.0.0.1:3306:root:market")
+
 
 if __name__ == "__main__":
     unittest.main()

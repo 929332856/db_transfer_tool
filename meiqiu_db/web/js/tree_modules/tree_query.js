@@ -807,11 +807,18 @@ function _vtOnScrollM(qid, tabIdx) {
 /** 释放查询结果缓存（切换 tab 或关闭结果时调用） */
 function _releaseQueryStore(qid) {
     var es = _qState(qid);
-    var jid = es._jobId;
-    if (jid) {
-        eel.release_query_result(jid)();
-        es._jobId = null;
+    var jobIds = [];
+    if (es._jobId) jobIds.push(es._jobId);
+    if (Array.isArray(es._multiJobIds)) {
+        es._multiJobIds.forEach(function(jid) {
+            if (jid && jobIds.indexOf(jid) < 0) jobIds.push(jid);
+        });
     }
+    jobIds.forEach(function(jid) {
+        eel.release_query_result(jid)();
+    });
+    es._jobId = null;
+    if (Array.isArray(es._multiJobIds)) es._multiJobIds = [];
 }
 
 // 查询结果编辑状态（按 qid）

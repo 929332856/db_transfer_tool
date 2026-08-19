@@ -959,12 +959,14 @@ function _qsExportToFile(content, fmt) {
  * @param {function} onTimeout 超时回调，默认用 callback({ok:false, msg:"超时"})
  */
 function _eelAutoAsync(eelCall, callback, timeoutMs, onTimeout) {
-    timeoutMs = timeoutMs || 15000;
+    // Long-running DDL must keep polling until the server returns its result.
+    // A timeout remains available when the caller explicitly supplies one.
+    timeoutMs = (timeoutMs === undefined || timeoutMs === null) ? 0 : timeoutMs;
     eelCall(function(resp) {
         if (resp && resp._async && resp._job_id) {
             var startTime = Date.now();
             (function poll() {
-                if (Date.now() - startTime > timeoutMs) {
+                if (timeoutMs > 0 && Date.now() - startTime > timeoutMs) {
                     if (onTimeout) onTimeout();
                     else callback({"ok": false, "msg": "\u64cd\u4f5c\u8d85\u65f6\uff08" + Math.round(timeoutMs/1000) + "\u79d2\uff09"});
                     return;
@@ -3130,7 +3132,6 @@ function _renderShortcutsTab() {
                 {key:'双击连接',       desc:'展开/选中数据库连接'},
                 {key:'双击数据库',       desc:'展开数据库分类（表/视图/存储过程/函数/查询）'},
                 {key:'右键菜单',        desc:'更多操作（编辑/删除/刷新/新建查询等）'},
-                {key:'拖拽表名',        desc:'将表拖到查询编辑器生成 SELECT 语句'},
             ]
         },
         {

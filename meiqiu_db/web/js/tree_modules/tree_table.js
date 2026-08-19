@@ -596,6 +596,8 @@ function addTableDataTab(tn, db, schema, cid) {
     
     try {
         eel.table_preview_data_fast(conn, theDb, tn, sch, '', '')(function(r){
+            // 关闭数据库/连接后，异步回调不能把已删除的 tab 重新创建回来。
+            if (!objectTabs.some(function(t) { return t.id === tabId; })) return;
             if(!r||!r.ok){addOrUpdateTab(tabId,label,'data','<div style="padding:20px;color:#e74c3c;">❌ '+(r?r.msg:'')+'</div>',theDb,theCid);return;}
             _buildTableDataUI(tn, conn, sch, r, theDb, theCid);
         });
@@ -2321,6 +2323,8 @@ function addTableDDLTab(tn, db, schema, cid) {
     try {
         eel.table_get_design_info(conn, theDb, tn, sch)(function(r) {
             try {
+                // 关闭数据库/连接后，异步回调不能把已删除的 tab 重新创建回来。
+                if (!objectTabs.some(function(t) { return t.id === tabId; })) return;
                 if (!r || !r.ok) {
                     addOrUpdateTab(tabId, label, 'ddl', '<div style="padding:20px;color:#e74c3c;">❌ ' + (r ? escapeHtml(r.msg) : '加载失败，请检查连接') + '</div>', theDb, theCid);
                     return;
@@ -2485,20 +2489,21 @@ function buildFieldRow(i, c, dataTypes) {
         var m = originalType.match(/\((\d+)(?:,(\d+))?\)/);
         if (m) len = m[2] ? m[1] + ',' + m[2] : m[1];
     }
-    var defVal = (c.default_val === null || c.default_val === undefined) ? '' : String(c.default_val);
-    // 信息架构中空字符串默认值也是有效值，显示为两个引号，用户删除后才表示移除默认值。
-    if (defVal === '') defVal = "''";
+    var hasDefault = c.default_val !== null && c.default_val !== undefined;
+    var defVal = hasDefault ? String(c.default_val) : '';
+    // 空字符串默认值是有效值，显示为两个引号；无默认值保持为空。
+    if (hasDefault && defVal === '') defVal = "''";
     // 清理 default 值（去掉多余的单引号包裹层）
     if (defVal && typeof defVal === 'string' && defVal.startsWith("'") && defVal.length > 2) defVal = defVal.slice(1, -1);
-    return '<tr data-row="' + i + '" data-original-type="' + escapeAttr(originalType) + '" data-original-len="' + escapeAttr(String(len)) + '">' +
+    return '<tr data-row="' + i + '" data-original-type="' + escapeHtml(originalType) + '" data-original-len="' + escapeHtml(String(len)) + '">' +
         '<td style="text-align:center;color:#888;">' + (i + 1) + '</td>' +
-        '<td><input class="design-input field-name" value="' + escapeAttr(c.name) + '" data-row="' + i + '" data-field="name"></td>' +
+        '<td><input class="design-input field-name" value="' + escapeHtml(c.name) + '" data-row="' + i + '" data-field="name"></td>' +
         '<td><select class="design-select field-type" data-row="' + i + '" data-field="data_type">' + typeOpts + '</select></td>' +
-        '<td><input class="design-input field-len" value="' + escapeAttr(len) + '" data-row="' + i + '" data-field="length" style="width:55px;"></td>' +
+        '<td><input class="design-input field-len" value="' + escapeHtml(len) + '" data-row="' + i + '" data-field="length" style="width:55px;"></td>' +
         '<td style="text-align:center;"><input type="checkbox" class="field-null" data-row="' + i + '" data-field="nullable"' + (c.nullable ? ' checked' : '') + '></td>' +
-        '<td><input class="design-input field-default" value="' + escapeAttr(defVal) + '" data-row="' + i + '" data-field="default_val"></td>' +
+        '<td><input class="design-input field-default" value="' + escapeHtml(defVal) + '" data-row="' + i + '" data-field="default_val"></td>' +
         '<td style="text-align:center;"><input type="checkbox" class="field-autoinc" data-row="' + i + '" data-field="auto_increment"' + (c.auto_increment ? ' checked' : '') + '></td>' +
-        '<td><input class="design-input field-comment" value="' + escapeAttr(c.comment || '') + '" data-row="' + i + '" data-field="comment"></td>' +
+        '<td><input class="design-input field-comment" value="' + escapeHtml(c.comment || '') + '" data-row="' + i + '" data-field="comment"></td>' +
         '<td style="white-space:nowrap;">' +
             '<button class="btn btn-sm" style="background:#2980b9;color:#fff;font-size:10px;padding:2px 5px;" onclick="designInsertField(' + i + ')" title="上方插入">⬆</button> ' +
             '<button class="btn btn-sm" style="background:#e67e22;color:#fff;font-size:10px;padding:2px 5px;" onclick="designInsertField(' + (i + 1) + ')" title="下方插入">⬇</button> ' +

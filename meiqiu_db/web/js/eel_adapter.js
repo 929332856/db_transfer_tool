@@ -10,10 +10,13 @@
     var _asyncJobs = {};
 
     window._pollAsyncJob = function(jobId, callback, timeoutMs, onTimeout) {
-        timeoutMs = timeoutMs || 15000;
+        // No implicit client timeout: DDL such as CREATE INDEX may legitimately
+        // take much longer than 15 seconds. Callers can still pass a timeout
+        // explicitly for operations that need one.
+        timeoutMs = (timeoutMs === undefined || timeoutMs === null) ? 0 : timeoutMs;
         var startTime = Date.now();
         (function poll() {
-            if (Date.now() - startTime > timeoutMs) {
+            if (timeoutMs > 0 && Date.now() - startTime > timeoutMs) {
                 if (onTimeout) onTimeout();
                 else callback({"ok": false, "msg": "操作超时（" + Math.round(timeoutMs/1000) + "秒）"});
                 return;

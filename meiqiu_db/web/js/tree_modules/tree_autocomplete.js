@@ -22,18 +22,45 @@ var _SQL_KEYWORDS = [
 var _acState = {
     qid: null, visible: false, items: [], selectedIdx: 0,
     prefix: '', popup: null, cid: null, db: null, tableCache: null,
-    _triggerTimer: null  // 防抖定时器
+    ta: null, _triggerTimer: null, _requestToken: 0
 };
+
+// Close a floating completion popup when the user clicks outside the editor/popup.
+(function _initAutocompleteOutsideClick() {
+    document.addEventListener('mousedown', function(e) {
+        if (!_acState.visible) return;
+        var target = e.target;
+        var ta = _acState.ta;
+        var popup = _acState.popup;
+        if ((ta && (target === ta || (ta.contains && ta.contains(target)))) ||
+            (popup && (target === popup || (popup.contains && popup.contains(target))))) return;
+        _acHide();
+    });
+})();
 
 // ★ 初始化
 function _initAutocomplete(ta, qid, cid, db) {
     if (!ta) return;
+    if (ta._autocompleteInitialized) return;
+    ta._autocompleteInitialized = true;
     // ★ 使用捕获阶段+stopImmediatePropagation，确保先于 _editorIndent 触发，阻止 Tab 触发插入空格
     ta.addEventListener('keydown', function(e) {
         if (_acState.visible) {
             if (e.key === 'ArrowDown') { e.preventDefault(); e.stopImmediatePropagation(); _acSelect((_acState.selectedIdx + 1) % _acState.items.length); return; }
             if (e.key === 'ArrowUp') { e.preventDefault(); e.stopImmediatePropagation(); _acSelect((_acState.selectedIdx - 1 + _acState.items.length) % _acState.items.length); return; }
-            if (e.key === 'Tab') { e.preventDefault(); e.stopImmediatePropagation(); _acApply(ta, true); return; }
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                if (e.shiftKey) {
+                    _acHide();
+                    if (typeof _editorOutdent === 'function') _editorOutdent(ta);
+                } else {
+                    _acApply(ta, true);
+                }
+                return;
+            }
+            // Let the browser handle native undo; only hide the completion popup.
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { _acHide(); return; }
             if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); _acHide(); return; }
             if (e.key === 'Enter') { e.preventDefault(); e.stopImmediatePropagation(); _acApply(ta, false); return; }
         }
@@ -57,6 +84,7 @@ function _acDebounceTrigger(ta, qid, cid, db) {
 // ★ 触发补全
 function _acTrigger(ta, qid, cid, db) {
     var prefix = _acGetPrefix(ta);
+    var requestToken = ++_acState._requestToken;
     // 至少输入 2 个字符才提示
     if (!prefix || prefix.length < 2) { _acHide(); return; }
 
@@ -76,6 +104,9 @@ function _acTrigger(ta, qid, cid, db) {
 
     if (needTables) {
         _acLoadTables(cid, db, function(tables) {
+            if (requestToken !== _acState._requestToken ||
+                document.getElementById('sq_' + qid) !== ta ||
+                document.activeElement !== ta || _acGetPrefix(ta) !== prefix) return;
             var matched = (tables || []).filter(function(t) {
                 return t.toUpperCase().indexOf(prefix.toUpperCase()) === 0;
             });
@@ -132,7 +163,7 @@ function _acLoadTables(cid, db, callback) {
 
 // ★ 显示下拉
 function _acShow(ta, qid, items, prefix) {
-    _acState.qid = qid; _acState.prefix = prefix; _acState.items = items;
+    _acState.qid = qid; _acState.ta = ta; _acState.prefix = prefix; _acState.items = items;
     _acState.cid = _acGetCurrentCid(); _acState.db = activeDatabase || '';
     _acRender(items, 0);
     _acState.visible = true;
@@ -154,7 +185,7 @@ function _acRender(items, selectedIdx) {
     }).join('');
     popup.style.display = 'block';
 
-    var ta = document.getElementById('sq_' + _acState.qid);
+    var ta = _acState.ta || document.getElementById('sq_' + _acState.qid);
     if (ta) {
         var rect = ta.getBoundingClientRect();
         var pos = ta.selectionStart, val = ta.value;
@@ -198,7 +229,7 @@ function _acSelect(idx) {
 }
 
 function _acClickItem(idx) {
-    var ta = document.getElementById('sq_' + _acState.qid);
+    var ta = _acState.ta || document.getElementById('sq_' + _acState.qid);
     _acState.selectedIdx = idx;
     if (ta) _acApply(ta, false);
 }
@@ -211,12 +242,28 @@ function _acApply(ta, tabKey) {
     if (!item) { _acHide(); return; }
     var prefix = _acState.prefix || '';
     var pos = ta.selectionStart;
-    var before = ta.value.substring(0, pos - prefix.length);
+    var replaceStart = Math.max(0, pos - prefix.length);
+    var before = ta.value.substring(0, replaceStart);
     var after = ta.value.substring(pos);
-    ta.value = before + item + after;
-    ta.selectionStart = ta.selectionEnd = before.length + item.length;
+    var expected = before + item + after;
+
+    // Use the browser editing command so completion is added to textarea's native undo stack.
     ta.focus();
+    ta.setSelectionRange(replaceStart, pos);
+    var inputSeen = false;
+    var markInput = function() { inputSeen = true; };
+    ta.addEventListener('input', markInput);
+    var commandOk = false;
+    try { commandOk = document.execCommand('insertText', false, item); } catch (ignore) {}
+    ta.removeEventListener('input', markInput);
+    if (!commandOk || ta.value !== expected) {
+        if (typeof ta.setRangeText === 'function') ta.setRangeText(item, replaceStart, pos, 'end');
+        else ta.value = expected;
+    }
+    ta.selectionStart = ta.selectionEnd = replaceStart + item.length;
     _acHide();
+    if (!inputSeen) ta.dispatchEvent(new Event('input', { bubbles: true }));
+    if (_acState._triggerTimer) { clearTimeout(_acState._triggerTimer); _acState._triggerTimer = null; }
     // ★ 清除防抖定时器，避免重新触发下拉框
     if (_acState._triggerTimer) { clearTimeout(_acState._triggerTimer); _acState._triggerTimer = null; }
     // ★ 这里是代码修改 textarea.value，不会自动触发 input；手动同步编辑器状态和行号。
@@ -229,6 +276,8 @@ function _acApply(ta, tabKey) {
 
 function _acHide() {
     _acState.visible = false;
+    _acState.ta = null;
+    _acState._requestToken++;
     if (_acState.popup) _acState.popup.style.display = 'none';
     if (_acState._triggerTimer) { clearTimeout(_acState._triggerTimer); _acState._triggerTimer = null; }
 }

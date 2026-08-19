@@ -19,6 +19,46 @@ var _DB_INFO_ICONS = {
     'mssql':      '<img src="database/sqlserver.svg" width="32" height="32" style="vertical-align:middle;display:inline-block">',
     'redis':      '<img src="database/redis.svg" width="32" height="32" style="vertical-align:middle;display:inline-block">'
 };
+var _infoRequestSeq = 0;
+var _activeInfoRequest = null;
+
+function _cancelInfoRequest(request) {
+    if (!request || !request.operationId || typeof eel === 'undefined' ||
+        typeof eel.cancel_connection_info !== 'function') return;
+    try { eel.cancel_connection_info(request.operationId)(function() {}); } catch (e) {}
+}
+
+function _beginInfoRequest(kind, cid, db) {
+    _cancelInfoRequest(_activeInfoRequest);
+    var request = {
+        seq: ++_infoRequestSeq,
+        operationId: 'info_' + Date.now() + '_' + _infoRequestSeq,
+        kind: kind,
+        cid: cid,
+        db: db || ''
+    };
+    _activeInfoRequest = request;
+    return request;
+}
+
+function _isCurrentInfoRequest(request) {
+    return _activeInfoRequest === request && request.seq === _infoRequestSeq;
+}
+
+// 关闭连接/数据库时，取消该范围内的后台信息请求并清空右侧面板。
+function clearInfoPanelForConnection(cid, db) {
+    var request = _activeInfoRequest;
+    if (!request || request.cid !== cid) return;
+    if (db !== undefined && (request.kind !== 'database' || request.db !== db)) return;
+    _cancelInfoRequest(request);
+    _activeInfoRequest = null;
+    _infoRequestSeq++;
+    var panel = document.getElementById('info_panel');
+    if (panel) {
+        panel.innerHTML = '<div class="info-empty"><div class="info-empty-icon">i</div><div class="info-empty-title">请选择一个连接或数据库</div><div class="info-empty-subtitle">选中左侧连接或数据库后，这里将显示详细信息</div></div>';
+    }
+}
+
 function _getDbInfoIcon(dbType) {
     return _DB_INFO_ICONS[dbType] || '<span style="font-size:30px;">🗄️</span>';
 }
@@ -44,6 +84,7 @@ function _fmtNum(n) {
 function showConnInfo(cid) {
     var panel = document.getElementById('info_panel');
     if (!panel) return;
+    var request = _beginInfoRequest('connection', cid, '');
     panel.innerHTML = '<div class="info-loading"><div style="font-size:28px;margin-bottom:8px;">⏳</div><div>加载连接信息...</div></div>';
 
     var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
@@ -79,7 +120,8 @@ function showConnInfo(cid) {
     // ★ 异步获取服务器级信息
     try {
         if (typeof eel !== 'undefined' && typeof eel.get_connection_info === 'function') {
-            eel.get_connection_info(conn)(function(r) {
+            eel.get_connection_info(conn, request.operationId)(function(r) {
+                if (!_isCurrentInfoRequest(request)) return;
                 var infoEl = document.getElementById('conn_server_info');
                 if (!infoEl) return;
                 if (!r || !r.ok) {
@@ -127,6 +169,7 @@ function showConnInfo(cid) {
 function showDbInfo(cid, db) {
     var panel = document.getElementById('info_panel');
     if (!panel) return;
+    var request = _beginInfoRequest('database', cid, db);
     panel.innerHTML = '<div class="info-loading"><div style="font-size:28px;margin-bottom:8px;">⏳</div><div>加载数据库信息...</div></div>';
 
     var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
@@ -159,7 +202,8 @@ function showDbInfo(cid, db) {
     // ★ 异步获取数据库详情（后端走 _with_db_timeout 线程池，不阻塞 Eel 主线程）
     try {
         if (typeof eel !== 'undefined' && typeof eel.get_database_info === 'function') {
-            _eelAutoAsync(eel.get_database_info(conn, db), function(r) {
+            _eelAutoAsync(eel.get_database_info(conn, db, request.operationId), function(r) {
+                if (!_isCurrentInfoRequest(request)) return;
                 var infoEl = document.getElementById('db_detail_info');
                 if (!infoEl) return;
                 if (!r || !r.ok) {

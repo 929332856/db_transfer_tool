@@ -10,7 +10,9 @@ function clickCat(cid, db, cat, schema) {
     _activeObjCat = cat; _activeObjSchema = sch;
     loadCategoryItems(conn, db, cat, function (items) {
         // ★ 防止异步回调晚于 closeConnection 执行，导致面板被旧数据回填
-        if (activeConnId !== cid) return;
+        // 关闭数据库后 activeConnId 仍可能是同一连接，必须同时确认数据库仍是当前库，
+        // 避免迟到的异步回调把已关闭数据库的内容写回默认页。
+        if (activeConnId !== cid || activeDatabase !== db) return;
         var content = buildObjHomeContent(items, cat, db, sch, cid);
         var home = objectTabs.find(function(t){return t.id==='obj_home';});
         if (home) home.content = content;
@@ -29,6 +31,7 @@ function clickQueries(cid, db, schema) {
     activeConnId = cid; activeConnData = treeData.connections[cid]; activeDatabase = db;
     // ★ 从文件系统加载查询列表
     eel.tree_list_queries(cid, db)(function(queries) {
+        if (activeConnId !== cid || activeDatabase !== db) return;
         var content = '<table class="exp-table"><thead><tr><th>名称</th></tr></thead><tbody>';
         (queries || []).forEach(function(q){content += '<tr ondblclick="openQueryInTab(\''+q.id+'\')" oncontextmenu="queryCtx2(event,\''+q.id+'\',\''+cid+'\',\''+escapeAttr(sch)+'\')"><td>'+escapeHtml(q.name)+'</td></tr>';});
         content += '</tbody></table>';

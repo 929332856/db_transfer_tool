@@ -278,7 +278,30 @@ class ProfileManager:
 
 
 # ==================== 全局状态 ====================
-_progress_q = queue.Queue()
+class _DroppingProgressQueue(queue.Queue):
+    """有界进度队列，前端失联时丢弃最旧消息而不是无限占用内存。"""
+
+    def __init__(self, maxsize=2000):
+        super().__init__(maxsize=maxsize)
+
+    def put(self, item, block=True, timeout=None):
+        # 进度消息是瞬时状态，不能因为 UI 停止轮询而阻塞数据库任务。
+        try:
+            queue.Queue.put(self, item, block=False)
+            return
+        except queue.Full:
+            pass
+        try:
+            self.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            queue.Queue.put(self, item, block=False)
+        except queue.Full:
+            pass
+
+
+_progress_q = _DroppingProgressQueue()
 _progress_task_lock = threading.Lock()
 _progress_task_name = None
 _engine = None
@@ -293,6 +316,9 @@ _query_state_time = {}         # {job_id: last_activity_timestamp}
 _db_operation_states = {}       # {operation_id: {cancel_event, sessions, ...}}
 _db_operation_lock = threading.RLock()
 _QUERY_STATE_TTL = 15 * 60
+_MYSQL_NORMAL_READ_TIMEOUT = 120
+# DDL may spend hours on the server without sending a packet back to the client.
+_MYSQL_DDL_READ_TIMEOUT = 24 * 60 * 60
 _query_columns = []
 _query_rows = []
 _query_conn_id = None       # 当前查询的数据库连接 ID（用于 kill）
@@ -501,12 +527,22 @@ class TransferEngine:
         self._conn_ids_lock = threading.Lock()
         self._dst_database_ready = False
 
+    def _clear_conn_records(self):
+        """同步结束后释放已关闭 Connection 对象的引用。"""
+        with self._conn_ids_lock:
+            self._src_conn_ids.clear()
+            self._dst_conn_ids.clear()
+
     def _record_src_conn_id(self, src_conn):
         """记录源库连接的服务端线程 ID，供 stop() 时 KILL QUERY 立即中断"""
         try:
             pid = src_conn.exec_driver_sql("SELECT CONNECTION_ID()").scalar()
             if pid:
                 with self._conn_ids_lock:
+                    self._src_conn_ids = [
+                        (old_pid, conn) for old_pid, conn in self._src_conn_ids
+                        if not getattr(conn, "closed", True)
+                    ]
                     self._src_conn_ids.append((int(pid), src_conn))
                     stopped = self._stop_event.is_set()
                 if stopped:
@@ -523,6 +559,10 @@ class TransferEngine:
             pid = dst_conn.exec_driver_sql("SELECT CONNECTION_ID()").scalar()
             if pid:
                 with self._conn_ids_lock:
+                    self._dst_conn_ids = [
+                        (old_pid, conn) for old_pid, conn in self._dst_conn_ids
+                        if not getattr(conn, "closed", True)
+                    ]
                     self._dst_conn_ids.append((int(pid), dst_conn))
                     stopped = self._stop_event.is_set()
                 if stopped:
@@ -761,12 +801,10 @@ class TransferEngine:
         # ★ 主键分页拉取：每次查询是独立短往返且 buffered 读取，I/O 等待期间不持有 GIL。
         #    源库为公网/大表时，流式读取（SSCursor fetch 不释放 GIL）会锁死整个进程导致 UI 无响应；
         #    无主键/唯一索引的表回退流式读取（批次减半缓解卡顿）
-        try:
-            # ★ 元数据查询加 15s 硬超时：公网源库连接异常时快速失败，避免整个传输卡死
-            pk_fut = _get_db_thread_pool().submit(_get_pk_columns, src_engine, table_name)
-            pk_cols = pk_fut.result(timeout=15)
-        except concurrent.futures.TimeoutError:
-            raise Exception(f"获取表 [{table_name}] 主键信息超时（>15s），源库连接可能异常")
+        # 不把元数据查询再套一层“可返回但不可取消”的 future。
+        # 连接本身由数据库驱动控制超时，避免同步主流程报错后后台查询仍占用
+        # 共享数据库线程池。
+        pk_cols = _get_pk_columns(src_engine, table_name)
         if pk_cols:
             transferred, skipped = self._transfer_by_pk(src_engine, dst_conn, table_name, pk_cols)
         else:
@@ -896,14 +934,9 @@ class TransferEngine:
             _progress_q.put(("log", "✅ 源库连接成功"))
 
             _progress_q.put(("log", "🔗 正在连接目标库..."))
-            # ★ 目标库连接包装硬超时：connect_timeout 在丢包/防火墙场景下可能不生效，
-            #    用线程池 + 30 秒超时保证不会无限挂起
-            _connect_dst_timeout = 30
-            _connect_dst_future = _get_db_thread_pool().submit(self._create_dst_database)
-            try:
-                _connect_dst_future.result(timeout=_connect_dst_timeout)
-            except concurrent.futures.TimeoutError:
-                raise Exception(f"目标库连接超时（>{_connect_dst_timeout}s），请检查地址、端口、防火墙")
+            # 连接参数本身已有 connect_timeout；这里直接执行，避免 future
+            # 超时后底层连接线程仍继续占用共享数据库线程池。
+            self._create_dst_database()
             dst_engine = create_engine(self.dst_url, pool_pre_ping=True,
                                        connect_args=_connect_args("mysql", timeout=10, read_timeout=3600))
             _progress_q.put(("log", "✅ 目标库连接成功"))
@@ -943,6 +976,7 @@ class TransferEngine:
             else:
                 _progress_q.put(("log", "📊 阶段2：传输数据..."))
                 total_rows = 0
+                failed_tables = []
                 if self.parallel and len(tables) > 1:
                     # ★ 多表并行：每表独立连接同时传输（每表独立事务，导完一张提交一张）
                     max_workers = min(len(tables), 4)
@@ -963,6 +997,7 @@ class TransferEngine:
                                     # ★ 停止引发的查询中断不算错误
                                     _progress_q.put(("log", "⏸ 用户停止传输"))
                                 else:
+                                    failed_tables.append(futures[fut])
                                     _progress_q.put(("error", f"❌ 表 [{futures[fut]}] 传输失败: {e}"))
                 else:
                     # ★ 串行模式：共享连接，每导完一张表 commit 一次，避免一张表失败导致全部回滚
@@ -986,13 +1021,18 @@ class TransferEngine:
                             except Exception:
                                 pass
 
-                if not self._stop_event.is_set():
+                if not self._stop_event.is_set() and not failed_tables:
                     elapsed = time.time() - start_time
                     speed = total_rows / elapsed if elapsed > 0 else 0
                     msg = (f"✅ 全部完成！共 {len(tables)} 张表，{total_rows:,} 行，"
                            f"耗时 {elapsed:.1f}s (平均 {speed:,.0f} 行/秒)")
                     _progress_q.put(("done", msg))
                     _progress_q.put(("total", total_rows))
+                elif not self._stop_event.is_set() and failed_tables:
+                    _progress_q.put((
+                        "error",
+                        f"❌ 同步未完成，失败表：{', '.join(failed_tables)}"
+                    ))
 
             src_engine.dispose()
             dst_engine.dispose()
@@ -1012,6 +1052,7 @@ class TransferEngine:
                         eng.dispose()
                     except Exception:
                         pass
+            self._clear_conn_records()
 
 
 # ==================== Eel 暴露接口 ====================
@@ -1101,9 +1142,16 @@ def start_transfer(data: dict):
 
     _engine = TransferEngine(data)
     def _run_transfer():
+        global _engine
+        engine = _engine
         try:
-            _engine.run()
+            if engine is not None:
+                engine.run()
         finally:
+            if engine is not None:
+                engine._clear_conn_records()
+            if _engine is engine:
+                _engine = None
             _release_progress_task('transfer')
     _worker = threading.Thread(target=_run_transfer, daemon=True)
     _worker.start()
@@ -1188,6 +1236,34 @@ def _is_cancelled(conn_key=''):
     return _query_cancel.is_set()
 
 
+def _is_long_running_sql(sql: str) -> bool:
+    """Return whether SQL is a schema-changing statement that may run for a long time."""
+    if not isinstance(sql, str):
+        return False
+    # Ignore leading whitespace and common SQL comments before checking the verb.
+    stripped = re.sub(
+        r"^(?:\s|--[^\r\n]*(?:\r?\n|$)|#[^\r\n]*(?:\r?\n|$)|/\*.*?\*/)*",
+        "", sql, flags=re.DOTALL,
+    )
+    return bool(re.match(
+        r"(?is)^(?:ALTER|CREATE|DROP|TRUNCATE|RENAME|OPTIMIZE|REPAIR|ANALYZE)\b",
+        stripped,
+    ))
+
+
+def _set_mysql_read_timeout(url: str, seconds: int) -> str:
+    """Set the MySQL driver's socket read timeout in a SQLAlchemy URL."""
+    seconds = max(1, int(seconds))
+    if re.search(r"([?&])read_timeout=", url, flags=re.IGNORECASE):
+        return re.sub(
+            r"([?&])read_timeout=\d+",
+            rf"\g<1>read_timeout={seconds}",
+            url,
+            flags=re.IGNORECASE,
+        )
+    return f"{url}&read_timeout={seconds}" if "?" in url else f"{url}?read_timeout={seconds}"
+
+
 def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str = ''):
     """在独立线程中执行 SQL 查询（核心逻辑）。
 
@@ -1236,9 +1312,10 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
             }
         db_type = data.get("db_type", "mysql")
         url = _conn_url(data)
-        # ★ 增加 read_timeout=120 以适应复杂慢查询
         if db_type in ('mysql', 'ob-mysql'):
-            url = url.replace("?charset=utf8mb4", "?charset=utf8mb4&read_timeout=120") if "?" in url else url + "?charset=utf8mb4&read_timeout=120"
+            read_timeout = (_MYSQL_DDL_READ_TIMEOUT if _is_long_running_sql(sql)
+                            else _MYSQL_NORMAL_READ_TIMEOUT)
+            url = _set_mysql_read_timeout(url, read_timeout)
         engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
         with engine.connect() as conn:
             if _is_cancelled(conn_key):
@@ -1251,7 +1328,8 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
                     _query_conn_pid_map[conn_key] = query_pid
             # ★ 增加 MySQL 服务器端执行超时为 120 秒（30秒对复杂查询太短）
             try:
-                conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 120000"))
+                if not _is_long_running_sql(sql):
+                    conn.execute(text("SET SESSION MAX_EXECUTION_TIME = 120000"))
             except Exception:
                 pass
             # ★ PG：自动回滚失败的事务，然后开启新事务（避免 "current transaction is aborted" 和 "DECLARE CURSOR" 错误）
@@ -1315,6 +1393,9 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
         if job_id:
             # 清理旧的同名缓存（防止内存泄漏）
             with _query_state_lock:
+                if job_id not in _query_jobs:
+                    # 前端已经关闭 Tab/释放结果，放弃保存迟到的大结果。
+                    return {"ok": False, "msg": "查询结果已释放", "cancelled": True}
                 _query_result_store.pop(job_id, None)
                 _query_result_store[job_id] = {
                     "columns": query_columns,
@@ -1379,6 +1460,7 @@ def _cleanup_query_state():
                     if conn_key and not any(v == conn_key for v in _query_job_conn.values()):
                         _query_conn_data_map.pop(conn_key, None)
                         _query_conn_pid_map.pop(conn_key, None)
+                        _query_conn_cancel_flags.pop(conn_key, None)
 
 
 threading.Thread(target=_cleanup_query_state, daemon=True, name="query_state_cleanup").start()
@@ -1417,7 +1499,14 @@ def execute_sql_query(sql: str, data: dict):
 
 def _make_conn_key(data):
     """从连接数据生成唯一标识（用于区分不同连接的查询）"""
-    return f"{data.get('host','')}:{data.get('port','')}:{data.get('user','')}:{data.get('db','')}"
+    # SQL editor calls use src_* fields. Do not collapse all of them into :::;
+    # cancellation must only affect the selected database connection.
+    host = data.get('host') or data.get('src_host', '')
+    port = data.get('port') or data.get('src_port', '3306')
+    user = data.get('user') or data.get('src_user', '')
+    database = data.get('db') or data.get('src_db', '')
+    db_type = data.get('db_type', 'mysql')
+    return f"{db_type}:{host}:{port}:{user}:{database}"
 
 
 @eel.expose
@@ -1434,10 +1523,13 @@ def poll_query_result(job_id: str):
     with _query_state_lock:
         del _query_jobs[job_id]
         _query_state_time[job_id] = time.time()
-        conn_key = _query_job_conn.get(job_id)
-        if conn_key and not any(v == conn_key for v in _query_job_conn.values() if v is not None):
+        # 任务已经完成，立即移除 job -> connection 映射；结果缓存仍由
+        # release_query_result()/TTL 管理，避免连接信息额外保留 15 分钟。
+        conn_key = _query_job_conn.pop(job_id, None)
+        if conn_key and not any(v == conn_key for v in _query_job_conn.values()):
             _query_conn_data_map.pop(conn_key, None)
             _query_conn_pid_map.pop(conn_key, None)
+            _query_conn_cancel_flags.pop(conn_key, None)
     return result
 
 
@@ -1476,13 +1568,36 @@ def get_query_page(job_id: str, offset: int = 0, limit: int = 200):
 @eel.expose
 def release_query_result(job_id: str):
     """释放查询结果缓存（用户关闭查询 tab 或执行新查询时调用）"""
+    cancel_conn = None
     with _query_state_lock:
+        pending = job_id in _query_jobs and _query_jobs[job_id] is None
+        conn_key = _query_job_conn.get(job_id)
+        other_jobs_on_conn = bool(
+            conn_key and any(
+                jid != job_id and value == conn_key
+                for jid, value in _query_job_conn.items()
+            )
+        )
+        if pending and conn_key and not other_jobs_on_conn:
+            # 关闭仍在执行的查询时，先标记并在锁外 KILL，避免后台 SQL
+            # 在前端已经释放 job 后继续占用数据库连接。
+            _query_conn_cancel_flags[conn_key] = True
+            cancel_conn = conn_key
+        _query_jobs.pop(job_id, None)
         _query_result_store.pop(job_id, None)
-        conn_key = _query_job_conn.pop(job_id, None)
+        _query_job_conn.pop(job_id, None)
         _query_state_time.pop(job_id, None)
-        if conn_key and not any(v == conn_key for v in _query_job_conn.values()):
+        if conn_key and not other_jobs_on_conn and cancel_conn is None:
             _query_conn_data_map.pop(conn_key, None)
             _query_conn_pid_map.pop(conn_key, None)
+            _query_conn_cancel_flags.pop(conn_key, None)
+    if cancel_conn:
+        _kill_db_query_for_conn(cancel_conn)
+        with _query_state_lock:
+            if not any(v == cancel_conn for v in _query_job_conn.values()):
+                _query_conn_data_map.pop(cancel_conn, None)
+                _query_conn_pid_map.pop(cancel_conn, None)
+                _query_conn_cancel_flags.pop(cancel_conn, None)
     return True
 
 
@@ -1712,6 +1827,19 @@ def _cancel_registered_db_operations():
         _kill_db_operation(state)
 
 
+def _cancel_registered_db_operation(operation_id):
+    """取消指定的数据库操作，供信息面板切换连接时释放旧请求。"""
+    if not operation_id:
+        return False
+    with _db_operation_lock:
+        state = _db_operation_states.get(str(operation_id))
+        if state is None:
+            return False
+        state['cancel_event'].set()
+    _kill_db_operation(state)
+    return True
+
+
 def _connect_args(db_type='mysql', timeout=10, read_timeout=None):
     """返回 create_engine 的 connect_args，MySQL 禁用 SSL"""
     if db_type == 'oracle':
@@ -1760,14 +1888,9 @@ def _with_db_timeout(func, *args, timeout=15, **kwargs):
                 _query_state_time[job_id] = time.time()
 
     _get_db_thread_pool().submit(_run)
-    # 看门狗：timeout+5 秒后强制写入超时
-    def _watchdog():
-        time.sleep(timeout + 5)
-        with _query_state_lock:
-            if job_id in _query_jobs and _query_jobs[job_id] is None:
-                _query_jobs[job_id] = {"ok": False, "msg": f"操作超时（{timeout}秒）"}
-                _query_state_time[job_id] = time.time()
-    threading.Thread(target=_watchdog, daemon=True, name=f"wd_{job_id}").start()
+    # 不再启动“假超时”看门狗：Python 线程无法安全取消正在执行的数据库
+    # 调用，提前返回失败会让前端误以为任务结束，而底层 SQL 仍占用连接和
+    # worker。数据库驱动自身的 connect/read timeout 负责真正的超时控制。
     return {"ok": True, "_async": True, "_job_id": job_id}
 
 # ==================== 表操作 ====================
@@ -7769,6 +7892,8 @@ def _drag_copy_table_impl(src_conn_data, src_db, table_name, dst_conn_data, dst_
     """
     """拖拽复制表：支持跨数据库类型（MySQL/OB/PG/Oracle/MSSQL 互相同步）"""
     op_state = None
+    src_engine = None
+    dst_engine = None
     try:
         # 来源连接
         src_data = dict(src_conn_data)
@@ -8044,6 +8169,12 @@ def _drag_copy_table_impl(src_conn_data, src_db, table_name, dst_conn_data, dst_
             return {"ok": False, "msg": "操作已取消", "cancelled": True}
         return {"ok": False, "msg": str(e)}
     finally:
+        for eng in (src_engine, dst_engine):
+            if eng is not None:
+                try:
+                    eng.dispose()
+                except Exception:
+                    pass
         _finish_db_operation(op_state)
 
 
@@ -8190,6 +8321,7 @@ def _batch_insert(conn, tbl, columns, batch):
 @eel.expose
 def export_wizard_get_tables(conn_data, database, schema=''):
     """获取数据库中的表列表"""
+    engine = None
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
@@ -8204,11 +8336,18 @@ def export_wizard_get_tables(conn_data, database, schema=''):
         return {"ok": False, "msg": "获取失败"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
 
 
 @eel.expose
 def export_wizard_get_columns(conn_data, database, table_name, schema=''):
     """获取表的列信息"""
+    engine = None
     try:
         cdata = dict(conn_data)
         db_type = cdata.get('db_type', 'mysql')
@@ -8232,10 +8371,17 @@ def export_wizard_get_columns(conn_data, database, table_name, schema=''):
         return {"ok": True, "columns": [r[0] for r in rows]}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
 
 
 def _export_run(data, tables, settings, out_path):
     """后台执行导出（SQL / CSV）"""
+    engine = None
     try:
         cdata = dict(data)
         db_type = cdata.get('db_type', 'mysql')
@@ -8343,6 +8489,12 @@ def _export_run(data, tables, settings, out_path):
         _progress_q.put(("export_done", {"path": out_path}))
     except Exception as e:
         _progress_q.put(("export_error", {"msg": str(e)}))
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
 
 
 @eel.expose
@@ -9707,9 +9859,20 @@ def dashboard_get_metrics(conn_data: dict):
 # ==================== 右侧信息面板：连接/数据库详情 ====================
 
 @eel.expose
-def get_connection_info(conn_data):
+def get_connection_info(conn_data, operation_id=None):
+    op_id = str(operation_id or ('connection_info_' + str(time.time_ns())))
+    op_state = _register_db_operation(op_id, conn_data, 'connection_info')
+    try:
+        return _get_connection_info_impl(conn_data, op_state)
+    finally:
+        _finish_db_operation(op_state)
+
+
+def _get_connection_info_impl(conn_data, op_state=None):
     """获取连接级别的详情信息（版本、状态等）
     支持: mysql / ob-mysql / oracle / postgresql / redis"""
+    engine = None
+    redis_clients = []
     try:
         db_type = conn_data.get("db_type", "mysql")
 
@@ -9730,11 +9893,26 @@ def get_connection_info(conn_data):
                     socket_connect_timeout=5, socket_timeout=10,
                     decode_responses=True, encoding='utf-8', encoding_errors='replace'
                 )
+            redis_clients.append(r)
+            if _db_operation_cancelled(op_state):
+                for client in redis_clients:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                return {"ok": False, "msg": "连接信息请求已取消", "cancelled": True}
             info = r.info('server')
             db_count = int(r.config_get('databases').get('databases', 16))
             db_count = min(db_count, 16)
             keys_total = 0
             for i in range(db_count):
+                if _db_operation_cancelled(op_state):
+                    for client in redis_clients:
+                        try:
+                            client.close()
+                        except Exception:
+                            pass
+                    return {"ok": False, "msg": "连接信息请求已取消", "cancelled": True}
                 try:
                     _r2 = rds.Redis(
                         host=conn_data['host'], port=int(conn_data.get('port', '6379')),
@@ -9749,15 +9927,25 @@ def get_connection_info(conn_data):
                         socket_connect_timeout=3, socket_timeout=5,
                         decode_responses=True
                     )
+                redis_clients.append(_r2)
                 try:
                     keys_total += _r2.dbsize()
                 except Exception:
                     pass
+                finally:
+                    try:
+                        _r2.close()
+                    except Exception:
+                        pass
+            try:
+                r.close()
+            except Exception:
+                pass
             return {"ok": True, "info": {
                 "type": "Redis",
                 "version": info.get('redis_version', ''),
                 "os": info.get('os', ''),
-                "arch": info.get('arch_bits', '') + ' bits',
+                "arch": str(info.get('arch_bits', '')) + ' bits',
                 "uptime_days": str(int(info.get('uptime_in_seconds', 0)) // 86400) + ' 天',
                 "db_count": db_count,
                 "keys_total": keys_total,
@@ -9780,6 +9968,11 @@ def get_connection_info(conn_data):
         info = {"type": db_type.upper() if db_type == 'ob-mysql' else db_type.title()}
 
         with engine.connect() as c:
+            pid = _get_backend_pid(c, db_type)
+            _add_db_operation_session(op_state, cdata, pid, kill_connection=True)
+            if _db_operation_cancelled(op_state):
+                engine.dispose()
+                return {"ok": False, "msg": "连接信息请求已取消", "cancelled": True}
             if db_type in ('mysql', 'ob-mysql'):
                 ver = c.execute(text("SELECT VERSION()")).fetchone()[0]
                 charset = c.execute(text("SELECT @@character_set_server")).fetchone()[0]
@@ -9834,7 +10027,23 @@ def get_connection_info(conn_data):
         engine.dispose()
         return {"ok": True, "info": info}
     except Exception as e:
+        for client in redis_clients:
+            try:
+                client.close()
+            except Exception:
+                pass
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
         return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
+
+
+@eel.expose
+def cancel_connection_info(operation_id=None):
+    """取消右侧信息面板的旧连接请求，并终止其数据库会话。"""
+    return _cancel_registered_db_operation(operation_id)
 
 
 def _format_memory(size_bytes):
@@ -9851,11 +10060,22 @@ def _format_memory(size_bytes):
 
 
 @eel.expose
-def get_database_info(conn_data, database):
+def get_database_info(conn_data, database, operation_id=None):
     """获取数据库级别的详情（大小、对象数量等）
     支持: mysql / ob-mysql / oracle / postgresql / redis
     ★ 异步执行，避免 INFO_SCHEMA 查询阻塞 Eel 主线程
     """
+    op_id = str(operation_id or ('database_info_' + str(time.time_ns())))
+    op_state = _register_db_operation(operation_id=op_id, conn_data=conn_data, kind='database_info')
+
+    def _run_info(func):
+        def _runner():
+            try:
+                return func()
+            finally:
+                _finish_db_operation(op_state)
+        return _runner
+
     try:
         db_type = conn_data.get("db_type", "mysql")
 
@@ -9879,11 +10099,17 @@ def get_database_info(conn_data, database):
                         socket_connect_timeout=5, socket_timeout=10,
                         decode_responses=True, encoding='utf-8', encoding_errors='replace'
                     )
+                if _db_operation_cancelled(op_state):
+                    r.close()
+                    return {"ok": False, "msg": "数据库信息请求已取消", "cancelled": True}
                 dbsize = r.dbsize()
+                if _db_operation_cancelled(op_state):
+                    r.close()
+                    return {"ok": False, "msg": "数据库信息请求已取消", "cancelled": True}
                 info_result = r.info('keyspace')
                 db_key = f"db{database}"
                 keyspace_info = info_result.get(db_key, {}) if isinstance(info_result, dict) else {}
-                return {"ok": True, "info": {
+                result = {"ok": True, "info": {
                     "name": f"DB{database}",
                     "type": "Redis DB",
                     "key_count": dbsize,
@@ -9891,7 +10117,9 @@ def get_database_info(conn_data, database):
                     "avg_ttl": keyspace_info.get('avg_ttl', 0) if isinstance(keyspace_info, dict) else 0,
                     "db_index": int(database),
                 }}
-            return _with_db_timeout(_redis_info, timeout=15)
+                r.close()
+                return result
+            return _with_db_timeout(_run_info(_redis_info), timeout=15)
 
         cdata = dict(conn_data)
         if db_type != 'oracle':
@@ -9903,8 +10131,16 @@ def get_database_info(conn_data, database):
                 connect_args=_connect_args(db_type, timeout=10)
             )
             try:
+                if _db_operation_cancelled(op_state):
+                    engine.dispose()
+                    return {"ok": False, "msg": "数据库信息请求已取消", "cancelled": True}
                 info = {"name": database, "type": db_type.upper() if db_type == 'ob-mysql' else db_type.title()}
                 with engine.connect() as c:
+                    pid = _get_backend_pid(c, db_type)
+                    _add_db_operation_session(op_state, cdata, pid, kill_connection=True)
+                    if _db_operation_cancelled(op_state):
+                        engine.dispose()
+                        return {"ok": False, "msg": "数据库信息请求已取消", "cancelled": True}
                     if db_type == 'mysql':
                         charset_row = c.execute(text(
                             "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
@@ -10076,9 +10312,10 @@ def get_database_info(conn_data, database):
                 engine.dispose()
                 return {"ok": False, "msg": _friendly_error(e, db_type)}
 
-        return _with_db_timeout(_get_db_info, timeout=15)
+        return _with_db_timeout(_run_info(_get_db_info), timeout=15)
 
     except Exception as e:
+        _finish_db_operation(op_state)
         return {"ok": False, "msg": _friendly_error(e, conn_data.get('db_type', 'mysql'))}
 
 

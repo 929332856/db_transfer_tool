@@ -45,6 +45,8 @@ var activeConnData = null;
 var activeDatabase = null;
 var objectTabs = [];
 var activeObjTab = null;
+// 每个数据表 tab 独立保存滚动位置，切换 tab 时不丢失视图状态。
+var _tableScrollStates = {};
 var activeCatId = null;   // 当前高亮的分类行 ID  （如 'cat_tables_' + dbKey）
 var _activeObjCat = null;   // 当前对象面板显示的类别（tables/views/procedures/functions/queries 等）
 var _activeObjSchema = '';  // 当前对象面板显示的 schema

@@ -7,6 +7,11 @@ function clickRedisKeysGroup(cid, dbIdx, dbId) {
     var cache = _redisKeysCache[dbId];
     if (!cache || !cache.keys) return;
 
+    // 切换 Redis 键面板时丢弃上一次搜索及其异步回调，避免旧结果再次覆盖当前列表。
+    clearTimeout(_redisSearchTimer);
+    _redisSearchSeq++;
+    _objSearchKw = '';
+
     activeConnId = cid;
     activeConnData = conn;
     activeDatabase = 'DB' + dbIdx;
@@ -70,14 +75,14 @@ function buildRedisKeyListContent(cid, dbIdx, dbId, keys, total, hasMore, cache)
 
     // 工具栏
     var toolbar = '<div class="redis-kl-toolbar" style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid #333;flex-shrink:0;flex-wrap:wrap;">' +
-        '<select id="'+panelId+'_typeFilter" onchange="redisKLFilter(\''+cid+'\','+dbIdx+',\''+dbId+'\')" style="height:26px;background:#1a1a1a;border:1px solid #444;color:#e0e0e0;border-radius:3px;font-size:11px;outline:none;padding:0 4px;">' +
+        '<select class="redis-kl-type-filter" id="'+panelId+'_typeFilter" onchange="redisKLFilter(\''+cid+'\','+dbIdx+',\''+dbId+'\')" style="height:26px;background:#1a1a1a;border:1px solid #444;color:#e0e0e0;border-radius:3px;font-size:11px;outline:none;padding:0 4px;">' +
         '<option value="">所有类型</option>' +
         '<option value="string">String</option>' +
         '<option value="hash">Hash</option>' +
         '<option value="list">List</option>' +
         '<option value="set">Set</option>' +
         '<option value="zset">ZSet</option></select>' +
-        '<input type="text" id="'+panelId+'_kw" placeholder="🔍 键包含..." value="" ' +
+        '<input class="redis-kl-key-filter" type="text" id="'+panelId+'_kw" placeholder="🔍 键包含..." value="" ' +
             'style="height:26px;background:#1a1a1a;border:1px solid #444;color:#e0e0e0;border-radius:3px;font-size:11px;outline:none;padding:0 8px;min-width:140px;flex:1;" ' +
             'onkeydown="if(event.key===\'Enter\')redisKLFilter(\''+cid+'\','+dbIdx+',\''+dbId+'\')">' +
         '<button class="btn btn-sm" onclick="redisKLFilter(\''+cid+'\','+dbIdx+',\''+dbId+'\')" style="height:26px;padding:2px 10px;">筛选</button>';

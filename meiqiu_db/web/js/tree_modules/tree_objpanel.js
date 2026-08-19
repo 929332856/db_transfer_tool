@@ -171,6 +171,37 @@ function _updateTabBar() {
     collapseOverflowTabs();
 }
 
+// 记录/恢复数据表滚动容器的位置。表格 tab 的内容切换时会重建 DOM，
+// 因此不能依赖浏览器自动保留 scrollTop/scrollLeft。
+function _saveTableScrollPosition(tabId) {
+    if (!tabId || typeof _tableScrollStates === 'undefined') return;
+    var contentDiv = document.getElementById('obj_content');
+    if (!contentDiv) return;
+    var scrollWrap = contentDiv.querySelector('.data-table-scroll');
+    if (!scrollWrap) return;
+    _tableScrollStates[tabId] = {
+        top: scrollWrap.scrollTop,
+        left: scrollWrap.scrollLeft
+    };
+}
+
+function _restoreTableScrollPosition(tabId) {
+    if (!tabId || typeof _tableScrollStates === 'undefined') return;
+    var state = _tableScrollStates[tabId];
+    if (!state) return;
+    var apply = function() {
+        if (activeObjTab !== tabId) return;
+        var contentDiv = document.getElementById('obj_content');
+        var scrollWrap = contentDiv && contentDiv.querySelector('.data-table-scroll');
+        if (!scrollWrap) return;
+        scrollWrap.scrollTop = state.top || 0;
+        scrollWrap.scrollLeft = state.left || 0;
+    };
+    // 本地 render 也会重建 tbody，放到下一个任务中恢复，确保表格高度已经更新。
+    setTimeout(apply, 0);
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(apply);
+}
+
 function renderObjectPanel() {
     // ★ 保存当前 tab 的编辑状态
     _saveCurrentTabState(activeObjTab);
@@ -421,13 +452,25 @@ var _objSearchKw = '';
 
 function filterObjectTable() {
     var kw = (document.getElementById('obj_search')||{}).value||'';
+    kw = String(kw).trim();
     _objSearchKw = kw;
 
     // ★ Redis 面板：服务端搜索，遍历所有 key
     if (_redisPanelCtx && activeObjTab === 'obj_home') {
         clearTimeout(_redisSearchTimer);
+        if (!kw) {
+            _redisSearchSeq++;
+            _restoreRedisKeysPanel(_redisPanelCtx);
+            return;
+        }
+        var searchCtx = {
+            cid: _redisPanelCtx.cid,
+            dbIdx: _redisPanelCtx.dbIdx,
+            dbId: _redisPanelCtx.dbId
+        };
+        var searchSeq = ++_redisSearchSeq;
         _redisSearchTimer = setTimeout(function() {
-            _redisDoServerSearch(_redisPanelCtx.cid, _redisPanelCtx.dbIdx, _redisPanelCtx.dbId, kw);
+            _redisDoServerSearch(searchCtx.cid, searchCtx.dbIdx, searchCtx.dbId, kw, searchSeq);
         }, 300);
         return;
     }
@@ -468,30 +511,60 @@ function _restoreObjSearch() {
     if (!input) return;
     if (!_objSearchKw) return;
     input.value = _objSearchKw;
+    // Redis 搜索结果已经由服务端生成，重建 DOM 时只恢复输入框，不能再次触发搜索。
+    if (_redisPanelCtx && activeObjTab === 'obj_home') return;
     filterObjectTable();
 }
 
 // ★ 切换其他库/分类时清空对象面板搜索（避免旧关键词过滤到新库的表）
 function clearObjSearch() {
     _objSearchKw = '';
+    clearTimeout(_redisSearchTimer);
+    _redisSearchSeq++;
     var input = document.getElementById('obj_search');
     if (input) input.value = '';
+    if (_redisPanelCtx && activeObjTab === 'obj_home') {
+        _restoreRedisKeysPanel(_redisPanelCtx);
+    }
 }
 
 var _redisSearchTimer = null;
+var _redisSearchSeq = 0;
+
+// Restore the cached Redis key list without issuing another SCAN request.
+function _restoreRedisKeysPanel(ctx) {
+    if (!ctx || activeObjTab !== 'obj_home') return;
+    if (!_redisPanelCtx || _redisPanelCtx.dbId !== ctx.dbId ||
+        _redisPanelCtx.cid !== ctx.cid || _redisPanelCtx.dbIdx !== ctx.dbIdx) return;
+
+    var cache = _redisKeysCache[ctx.dbId];
+    if (!cache || !cache.keys) return;
+    var home = objectTabs.find(function(t) { return t.id === 'obj_home'; });
+    if (!home) return;
+
+    var displayKeys = cache.keys.slice(0, 100);
+    home.content = buildRedisKeyListContent(
+        ctx.cid, ctx.dbIdx, ctx.dbId, displayKeys, cache.total,
+        cache.keys.length < cache.total, cache
+    );
+    renderObjectPanel();
+    redisLoadKeysMeta(ctx.cid, ctx.dbIdx, ctx.dbId, displayKeys);
+}
 // 服务端搜索：用 SCAN + match pattern 遍历全部 key
-function _redisDoServerSearch(cid, dbIdx, dbId, kw) {
+function _redisDoServerSearch(cid, dbIdx, dbId, kw, searchSeq) {
     var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
     if (!conn) return;
 
     var pattern = kw ? '*' + kw + '*' : '*';
     // 搜索时限制放宽到 500 条，用 SCAN 遍历全部
     eel.redis_get_keys(conn, pattern, 500, dbIdx)(function(r) {
+        if (searchSeq !== _redisSearchSeq || !_redisPanelCtx ||
+            _redisPanelCtx.cid !== cid || _redisPanelCtx.dbIdx !== dbIdx ||
+            _redisPanelCtx.dbId !== dbId || activeObjTab !== 'obj_home') return;
         if (!r || !r.ok) return;
         var keys = [];
         (r.groups || []).forEach(function(g) { keys = keys.concat(g.keys); });
-        var total = r.total;
-
+        var total = keys.length;
         var displayKeys = keys.slice(0, 500);
         var content = '<div style="padding:2px 10px;color:#888;font-size:11px;">搜索 "' + escapeHtml(kw) + '"：共 ' + total + ' 个 key'
             + (keys.length > 500 ? '（显示前 500 个）' : '') + '</div>';
@@ -528,7 +601,11 @@ function objTabContextMenu(e, tabId) {
     if (closeLeft.length) menu.push({label:'关闭左侧 Tab', action:function(){_closeTabGroup(closeLeft);}});
     if (closeRight.length) menu.push({label:'关闭右侧 Tab', action:function(){_closeTabGroup(closeRight);}});
     if (closeOthers.length) menu.push({label:'关闭其他 Tab', action:function(){_closeTabGroup(closeOthers);}});
-    showCtxMenu(e.clientX, e.clientY, menu);
+    // Tab 菜单放到 Tab 栏下方，避免遮挡当前 Tab 的名称
+    var tabBar = document.getElementById('obj_tabs_bar');
+    var tabBarRect = tabBar ? tabBar.getBoundingClientRect() : null;
+    var menuTop = tabBarRect ? Math.max(e.clientY, tabBarRect.bottom + 4) : e.clientY + 24;
+    showCtxMenu(e.clientX, menuTop, menu);
 }
 
 function _closeTabGroup(tabIds) {
@@ -667,6 +744,9 @@ function _closeTabInternal(tabId, skipRender) {
         // ★ 清理 textarea 和 results 的 DOM 缓存，防止重新打开时恢复旧内容
         delete _textareaCache['sq_' + qid2];
         delete _textareaCache['qr_' + qid2];
+        if (typeof _releaseQueryStore === 'function') {
+            _releaseQueryStore(qid2);
+        }
         delete _queryEditStates[qid2];
         // ★ 清理高亮防抖定时器
         if (_sqlHighlightTimers && _sqlHighlightTimers[qid2]) {
@@ -677,6 +757,7 @@ function _closeTabInternal(tabId, skipRender) {
     // ★ 清理 data tab 的 _tabIdToTid 和 _whereStates
     var tid2 = _tabIdToTid[tabId];
     if (tid2) { delete _whereStates[tid2]; delete _tabIdToTid[tabId]; }
+    if (typeof _tableScrollStates !== 'undefined') delete _tableScrollStates[tabId];
     // ★ 清理 redis tab 的编辑状态
     for (var i = 0; i < objectTabs.length; i++) {
         if (objectTabs[i].id === tabId && objectTabs[i].type === 'redis' && objectTabs[i].tid) {
@@ -783,6 +864,7 @@ function _restoreTextareas(contentDiv) {
 function _saveCurrentTabState(tabId) {
     var panel = document.getElementById('object_panel');
     if (!panel) return;
+    _saveTableScrollPosition(tabId);
     var layouts = panel.querySelectorAll('[id^="ql_"]');
     for (var li = 0; li < layouts.length; li++) {
         var layoutId = layouts[li].id;
@@ -819,6 +901,7 @@ function _afterContentUpdate(targetTab, contentDiv) {
             // ★ 只做本地 DOM 渲染，不触发服务端查询
             var renderLocalFn = window['_renderLocal_'+tid2];
             if (renderLocalFn) setTimeout(function(){ renderLocalFn(); }, 0);
+            _restoreTableScrollPosition(targetTab.id);
             var bindSortFn = window['_bindSort_'+tid2];
             if (bindSortFn) setTimeout(function(){ bindSortFn(); }, 50);
             // ★ 分页按钮使用内联 onclick，无需重新绑定

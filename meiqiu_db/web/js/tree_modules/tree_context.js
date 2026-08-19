@@ -3,7 +3,9 @@ function dbCtx(e, cid, db, dbId) {
     e.preventDefault(); e.stopPropagation();
     var el = document.getElementById(dbId);
     var domOpen = el && el.classList.contains('open');
-    var isActive = (activeDatabase === db);
+    // 数据库名可能在多个连接中重复，必须同时判断连接 ID，避免误把其他连接
+    // 下的同名数据库当成当前数据库。
+    var isActive = (activeConnId === cid && activeDatabase === db);
     var isOpen = domOpen || isActive;
     var menu;
     if (isOpen) {
@@ -275,6 +277,9 @@ function startRunSqlFile(cid, db) {
 
 function closeDatabase(cid, db, dbId) {
     // 折叠数据库节点，图标变灰，保留箭头以便再次展开
+    if (typeof clearInfoPanelForConnection === 'function') {
+        clearInfoPanelForConnection(cid, db);
+    }
     var el = document.getElementById(dbId);
     if (el) {
         el.classList.remove('open');
@@ -298,17 +303,28 @@ function closeDatabase(cid, db, dbId) {
         }
     });
     // ★ 始终移除该连接+数据库下所有相关 tab（data_/ddl_/query_/redis_ 等），不区分当前活跃数据库
+    var removedDbTabIds = [];
     objectTabs = objectTabs.filter(function(t) {
         if (t.id === 'obj_home') return true;
-        return !(t.cid === cid && t.db === db);
+        var remove = (t.cid === cid && t.db === db);
+        if (remove) removedDbTabIds.push(t.id);
+        return !remove;
     });
-    // ★ 关闭数据库后强制切回 home（清空对象面板中的表/查询残留）
-    var homeContent2 = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
-    var homeTab2 = objectTabs.find(function(t){return t.id==='obj_home';});
-    if (!homeTab2) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent2,db:''}); }
-    else { homeTab2.content = homeContent2; }
-    activeObjTab = 'obj_home';
-    activeCatId = null;
+    removedDbTabIds.forEach(function(tabId) {
+        if (typeof _tableScrollStates !== 'undefined') delete _tableScrollStates[tabId];
+        if (window._tableDesigns) delete window._tableDesigns[tabId];
+    });
+    // 只有关闭当前正在查看的数据库时才切回 home。关闭其他数据库时，
+    // 仍然保留用户当前正在查看的表 tab，避免 tab 变成空白默认页。
+    var stillHasCurrentTab = objectTabs.some(function(t) { return t.id === activeObjTab; });
+    if (wasActiveDb || !stillHasCurrentTab) {
+        var homeContent2 = '<div style="padding:40px;text-align:center;color:#666;"><div style="font-size:36px;margin-bottom:10px;">📄</div><div>点击表、视图等分类查看对象</div></div>';
+        var homeTab2 = objectTabs.find(function(t){return t.id==='obj_home';});
+        if (!homeTab2) { objectTabs.push({id:'obj_home',label:'对象',type:'home',content:homeContent2,db:''}); }
+        else { homeTab2.content = homeContent2; }
+        activeObjTab = 'obj_home';
+        activeCatId = null;
+    }
     renderObjectPanel();
 }
 

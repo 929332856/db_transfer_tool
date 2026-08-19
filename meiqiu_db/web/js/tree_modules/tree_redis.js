@@ -30,10 +30,12 @@ function redisShowKey(cid, key, dbIdx) {
     var html = '<div style="padding:8px 12px;overflow:auto;height:100%;">' +
         '<div style="color:#888;font-size:11px;">⏳ 加载中...</div></div>';
     // ★ 改为新增 tab 而非替换全部
-    addOrUpdateTab(tabId, label, 'redis', html, '');
+    // 在 tab 创建时就绑定连接 ID，避免多连接场景下关闭连接无法清理该 tab。
+    addOrUpdateTab(tabId, label, 'redis', html, '', cid);
     var newTab = objectTabs.find(function(t){return t.id===tabId;});
     if (newTab) { newTab.key = key; newTab.cid = cid; newTab.db = dbIdx; newTab.tid = tid; }
     eel.redis_get_key_info(activeConnData, key, dbIdx)(function(r) {
+        if (!objectTabs.some(function(t) { return t.id === tabId; })) return;
         if (!r || !r.ok) {
             var content = '<div style="padding:8px 12px;color:#e74c3c;">❌ '+(r?r.msg:'加载失败')+'</div>';
             updateRedisTab(tid, content);

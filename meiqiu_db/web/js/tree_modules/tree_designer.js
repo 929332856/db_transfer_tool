@@ -1514,6 +1514,30 @@ function _editorDeleteLine(ta) {
     document.execCommand('insertText', false, '');
 }
 
+// Replace a textarea range through the native editing command so Ctrl+Z can undo it.
+// setRangeText is kept as a compatibility fallback for embedded browser versions that
+// do not implement execCommand('insertText') for textarea elements.
+function _editorReplaceRangeWithUndo(ta, start, end, text, nextStart, nextEnd) {
+    var oldValue = ta.value;
+    var expected = oldValue.substring(0, start) + text + oldValue.substring(end);
+    ta.focus();
+    ta.setSelectionRange(start, end);
+    var inputSeen = false;
+    var markInput = function() { inputSeen = true; };
+    ta.addEventListener('input', markInput);
+    var commandOk = false;
+    try { commandOk = document.execCommand('insertText', false, text); } catch (ignore) {}
+    ta.removeEventListener('input', markInput);
+    if (!commandOk || ta.value !== expected) {
+        if (typeof ta.setRangeText === 'function') ta.setRangeText(text, start, end, 'end');
+        else ta.value = expected;
+    }
+    if (!inputSeen) ta.dispatchEvent(new Event('input', { bubbles: true }));
+    var max = ta.value.length;
+    ta.selectionStart = Math.max(0, Math.min(max, nextStart));
+    ta.selectionEnd = Math.max(ta.selectionStart, Math.min(max, nextEnd));
+}
+
 /** Tab: 缩进选中行（插入4个空格） */
 function _editorIndent(ta) {
     var start = ta.selectionStart, end = ta.selectionEnd;
@@ -1524,10 +1548,8 @@ function _editorIndent(ta) {
     var selText = val.substring(lineStart, lineEnd);
     var lines = selText.split('\n');
     var newText = lines.map(function(l) { return '    ' + l; }).join('\n');
-    // ★ 用 execCommand('insertText') 替代 setRangeText，产生原生撤销记录
-    ta.focus();
-    ta.setSelectionRange(lineStart, lineEnd);
-    document.execCommand('insertText', false, newText);
+    var delta = lines.length * 4;
+    _editorReplaceRangeWithUndo(ta, lineStart, lineEnd, newText, start + 4, end + delta);
 }
 
 /** Shift+Tab: 减少缩进（移除最多4个前导空格） */
@@ -1539,11 +1561,19 @@ function _editorOutdent(ta) {
     if (lineEnd === -1) lineEnd = val.length;
     var selText = val.substring(lineStart, lineEnd);
     var lines = selText.split('\n');
-    var newText = lines.map(function(l) { return l.replace(/^ {1,4}/, ''); }).join('\n');
-    // ★ 用 execCommand('insertText') 替代 setRangeText，产生原生撤销记录
-    ta.focus();
-    ta.setSelectionRange(lineStart, lineEnd);
-    document.execCommand('insertText', false, newText);
+    var removed = lines.map(function(l) {
+        if (l.charAt(0) === '\t') return 1;
+        var m = l.match(/^ {1,4}/);
+        return m ? m[0].length : 0;
+    });
+    var newText = lines.map(function(l) {
+        if (l.charAt(0) === '\t') return l.substring(1);
+        return l.replace(/^ {1,4}/, '');
+    }).join('\n');
+    var removedTotal = removed.reduce(function(sum, n) { return sum + n; }, 0);
+    var firstRemoved = removed.length ? removed[0] : 0;
+    _editorReplaceRangeWithUndo(ta, lineStart, lineEnd, newText,
+        Math.max(lineStart, start - firstRemoved), Math.max(lineStart, end - removedTotal));
 }
 
 // 查询执行取消标记（按 qid）

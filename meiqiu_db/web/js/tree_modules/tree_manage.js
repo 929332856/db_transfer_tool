@@ -85,6 +85,9 @@ function connCtx(e, cid) {
 function closeConnection(cid) {
     // ★ 不再全局取消查询 — 关闭连接只是折叠树节点 UI，SQL 查询继续正常运行
     //    如需取消特定连接的查询，可调用 eel.cancel_query(cid)() 单独操作
+    if (typeof clearInfoPanelForConnection === 'function') {
+        clearInfoPanelForConnection(cid);
+    }
     var children = document.getElementById('mc_c_' + cid);
     var arrow = document.getElementById('ma_c_' + cid);
     if (children) {
@@ -119,14 +122,19 @@ function closeConnection(cid) {
         }
     });
     // ★ 同时清理 cid 为空字符串或 undefined 的孤立 tab（这些 tab 所属连接已不可用，点击无反应）
+    var removedConnTabIds = [];
     objectTabs = objectTabs.filter(function(t) {
         if (t.id === 'obj_home') return true;
         // 如果 tab 的 cid 匹配正在关闭的连接，移除
-        if (t.cid === cid) return false;
+        if (t.cid === cid) { removedConnTabIds.push(t.id); return false; }
         // ★ 如果 tab 没有 cid 或 cid 为空，且当前关闭的连接就是上次激活的，也移除
         //    因为这类 tab 通常是 activeConnId 被清空后残留的
-        if (!t.cid && wasActive) return false;
+        if (!t.cid && wasActive) { removedConnTabIds.push(t.id); return false; }
         return true;
+    });
+    removedConnTabIds.forEach(function(tabId) {
+        if (typeof _tableScrollStates !== 'undefined') delete _tableScrollStates[tabId];
+        if (window._tableDesigns) delete window._tableDesigns[tabId];
     });
     if (wasActive) {
         activeConnId = '';
@@ -394,13 +402,13 @@ function showExportWizard(cid, db, schema, preSelectedTable) {
 function exportWizStep1() {
     var es = _exportState;
     var html =
-        '<div style="padding:10px 0;">' +
-            '<h4 style="margin:0 0 12px;color:#4fc3f7;">📤 导出向导 - 第 1 步：选择格式</h4>' +
-            '<div style="display:flex;flex-direction:column;gap:10px;">' +
-                '<label style="display:flex;align-items:center;gap:8px;padding:0;font-size:13px;"><input type="radio" name="exp_fmt" value="sql" '+(es.format==='sql'?'checked':'')+' onchange="_exportState.format=this.value;exportFmtChanged()" style="flex-shrink:0;width:16px;height:16px;"><span>SQL 脚本 (.sql)</span></label>' +
-                '<label style="display:flex;align-items:center;gap:8px;padding:0;font-size:13px;"><input type="radio" name="exp_fmt" value="csv" '+(es.format==='csv'?'checked':'')+' onchange="_exportState.format=this.value;exportFmtChanged()" style="flex-shrink:0;width:16px;height:16px;"><span>CSV 文件 (.csv)</span></label>' +
-                '<div id="export_csv_opts" style="display:'+(es.format==='csv'?'block':'none')+';margin-left:24px;">' +
-                    '<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#aaa;"><input type="checkbox" id="exp_csv_header" '+(es.csvHeader?'checked':'')+' onchange="_exportState.csvHeader=this.checked" style="flex-shrink:0;width:14px;height:14px;"><span>包含标题行（首行为列名）</span></label>' +
+        '<div class="export-wizard-step export-format-step">' +
+            '<h4 class="export-wizard-step-title">📤 导出向导 - 第 1 步：选择格式</h4>' +
+            '<div class="export-format-options">' +
+                '<label class="export-format-option"><input type="radio" name="exp_fmt" value="sql" '+(es.format==='sql'?'checked':'')+' onchange="_exportState.format=this.value;exportFmtChanged()"><span>SQL 脚本 (.sql)</span></label>' +
+                '<label class="export-format-option"><input type="radio" name="exp_fmt" value="csv" '+(es.format==='csv'?'checked':'')+' onchange="_exportState.format=this.value;exportFmtChanged()"><span>CSV 文件 (.csv)</span></label>' +
+                '<div id="export_csv_opts" class="export-csv-options'+(es.format==='csv'?' is-visible':'')+'">' +
+                    '<label class="export-csv-header-option"><input type="checkbox" id="exp_csv_header" '+(es.csvHeader?'checked':'')+' onchange="_exportState.csvHeader=this.checked"><span>包含标题行（首行为列名）</span></label>' +
                 '</div>' +
             '</div>' +
         '</div>';
@@ -416,7 +424,7 @@ function exportFmtChanged() {
     if (cb) es.csvHeader = cb.checked;
     // 显示/隐藏 CSV 选项
     var opts = document.getElementById('export_csv_opts');
-    if (opts) opts.style.display = es.format === 'csv' ? 'block' : 'none';
+    if (opts) opts.classList.toggle('is-visible', es.format === 'csv');
 }
 
 function exportWizStep2() {
@@ -450,7 +458,7 @@ function exportWizStep3() {
         var tables = r.tables || [];
         var rows = tables.map(function(t) {
             var checked = (es.preSelected && t === es.preSelected) ? ' checked' : '';
-            return '<div style="display:flex;align-items:center;gap:6px;padding:3px 0;">' +
+            return '<div class="export-table-item">' +
                 '<input type="checkbox" class="exp_tbl_cb" value="' + escapeAttr(t) + '"' + checked + ' style="flex-shrink:0;width:15px;height:15px;">' +
                 '<span style="font-size:12px;">📊 ' + escapeHtml(t) + '</span></div>';
         }).join('');
@@ -461,7 +469,7 @@ function exportWizStep3() {
                 '<div style="margin-bottom:6px;">' +
                     '<label style="font-size:12px;color:#4fc3f7;" onclick="exportToggleAll(this)"><input type="checkbox" style="vertical-align:middle;margin-right:4px;width:14px;height:14px;"> 全选 / 取消全选</label>' +
                 '</div>' +
-                '<div style="max-height:260px;overflow-y:auto;border:1px solid #333;border-radius:4px;padding:6px 10px;background:#0d1117;">' +
+                '<div class="export-table-list">' +
                     (rows || '<div style="color:#888;">（无表）</div>') +
                 '</div>' +
             '</div>';
@@ -514,11 +522,11 @@ function exportWizRenderStep4() {
                 '<input type="checkbox" class="exp_col_cb" data-tbl="' + escapeAttr(tn) + '" value="' + escapeAttr(c) + '" checked style="flex-shrink:0;width:14px;height:14px;">' +
                 '<span style="font-size:12px;">' + escapeHtml(c) + '</span></div>';
         }).join('');
-        return '<div style="margin-bottom:10px;background:#0d1117;border:1px solid #333;border-radius:4px;padding:8px 10px;">' +
+        return '<div class="export-column-panel">' +
             '<div style="margin-bottom:4px;"><b style="color:#4fc3f7;">📊 ' + escapeHtml(tn) + '</b> ' +
             '<a href="#" onclick="event.preventDefault();exportToggleCols(\'' + escapeAttr(tn) + '\',true)" style="font-size:11px;color:#4fc3f7;">全选</a> | ' +
             '<a href="#" onclick="event.preventDefault();exportToggleCols(\'' + escapeAttr(tn) + '\',false)" style="font-size:11px;color:#e74c3c;">取消全选</a></div>' +
-            '<div style="max-height:150px;overflow-y:auto;padding:4px 0;">' + rows + '</div></div>';
+            '<div class="export-column-list">' + rows + '</div></div>';
     }).join('');
 
     var html =
@@ -582,9 +590,9 @@ function exportWizStart() {
                     '<thead><tr><th>源表</th><th>总计</th><th>已处理</th><th>时间</th></tr></thead>' +
                     '<tbody id="export_progress_tbody"><tr><td colspan="4" style="color:#888;">正在导出...</td></tr></tbody>' +
                 '</table>' +
-                '<div style="margin-top:12px;border:1px solid #333;border-radius:4px;overflow:hidden;">' +
-                    '<div style="background:#2a2a2a;padding:4px 10px;font-size:11px;color:#aaa;border-bottom:1px solid #333;">📋 导出日志</div>' +
-                    '<div id="export_log_area" style="height:120px;overflow-y:auto;padding:6px 10px;background:#0d1117;font-family:Consolas,monospace;font-size:11px;line-height:1.6;"></div>' +
+                '<div class="export-log-wrap">' +
+                    '<div class="export-log-header">📋 导出日志</div>' +
+                    '<div id="export_log_area" class="export-log-area"></div>' +
                 '</div>' +
             '</div>';
         document.getElementById('modal_msg').innerHTML = html;

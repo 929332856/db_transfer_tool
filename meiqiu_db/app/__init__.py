@@ -28,11 +28,11 @@ def _async_job_reaper(app):
                 result = jobs.get(job_id)
                 deadline = meta.get('deadline')
                 if result is None and deadline and now >= deadline:
-                    jobs[job_id] = {
-                        "ok": False,
-                        "msg": f"操作超时（{meta.get('timeout', 20)}秒）",
-                    }
-                    meta['updated_at'] = now
+                    # Do not turn a still-running worker into a fake failure.
+                    # Python threads cannot be safely cancelled; long DDL must
+                    # remain pending until the worker publishes its real result.
+                    meta['overdue'] = True
+                    continue
                 elif result is not None and now - meta.get('updated_at', now) > app.config['ASYNC_JOB_TTL']:
                     jobs.pop(job_id, None)
                     meta_map.pop(job_id, None)
