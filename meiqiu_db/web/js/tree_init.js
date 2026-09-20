@@ -39,7 +39,11 @@
                     'redis_set_string', 'redis_set_hash', 'redis_set_list',
                     'redis_set_set', 'redis_set_zset', 'redis_append_list',
                     'redis_append_set', 'redis_append_zset',
-                    'execute_sql_query', 'cancel_query', 'clear_cancel', 'poll_queue',
+                    'execute_sql_query', 'execute_sql_batch',
+                    'mysql_user_list', 'mysql_user_databases', 'mysql_user_tables', 'mysql_user_grants',
+                    'mysql_user_apply_privileges', 'mysql_user_create', 'mysql_user_update_password',
+                    'mysql_user_set_lock', 'mysql_user_delete',
+                    'cancel_query', 'clear_cancel', 'poll_queue',
                     'drag_copy_table', 'db_run_sql_file',
                     'get_profiles', 'get_last_used', 'save_profile', 'delete_profile',
                     'find_profile', 'test_connection', 'start_transfer', 'stop_transfer',
@@ -114,14 +118,16 @@
         try {
             if (typeof eel !== 'undefined' && typeof eel.settings_get === 'function') {
                 eel.settings_get()(function(data) {
+                    if (data && typeof data === 'object' && typeof _settingsData !== 'undefined') {
+                        _settingsData = Object.assign({}, _settingsData, data);
+                    }
+                    if (typeof _settingsLoaded !== 'undefined') _settingsLoaded = true;
                     if (data && data.theme === 'light') {
                         document.documentElement.classList.add('light-theme');
                         localStorage.setItem('mqdb_theme', 'light');
-                        if (typeof _settingsData !== 'undefined') _settingsData.theme = 'light';
                     } else {
                         document.documentElement.classList.remove('light-theme');
                         localStorage.setItem('mqdb_theme', 'dark');
-                        if (typeof _settingsData !== 'undefined') _settingsData.theme = 'dark';
                     }
                 });
             }

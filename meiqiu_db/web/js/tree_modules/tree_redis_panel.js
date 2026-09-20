@@ -384,7 +384,7 @@ function selectDatabase(cid, db, dbId, arrowId) {
             r.schemas.forEach(function (sch) {
                 var sk = safeBtoa(db+'/'+sch);
                 var schId = cid + '_sch_' + sk;
-                html += '<div class="tree-node"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px" onclick="highlightRow(this)">' +
+                html += '<div class="tree-node pg-schema-node" data-cid="'+cid+'" data-db="'+escapeAttr(db)+'" data-schema="'+escapeAttr(sch)+'"><div class="my-conn-row" style="padding-left:'+(pad+20)+'px" onclick="highlightRow(this)">' +
                     '<span class="arrow" id="ar_'+schId+'" onclick="event.stopPropagation();toggleChildren(\''+schId+'\',\'ar_'+schId+'\')">▸</span><span class="my-conn-icon">📂</span><span class="my-conn-name">'+escapeHtml(sch)+'</span></div>' +
                     '<div class="tree-children" id="'+schId+'">' + renderDbCats(cid, db, pad+40, sch) + '</div></div>';
             });

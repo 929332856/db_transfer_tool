@@ -236,16 +236,45 @@ function designCollect() {
         var preserveOriginalType = originalType && (aliases[originalBase] || originalBase) === dt && originalLen === len;
         // ★ 无长度类型不拼接括号（如 Oracle DATE/TIMESTAMP/CLOB 等）
         var useLen = len && _typeSupportsLen(dbType, dt);
+        var hasOriginal = row.getAttribute('data-original-existing') === '1';
+        var originalName = row.getAttribute('data-original-name') || '';
+        var originalNullable = row.getAttribute('data-original-nullable') === '1';
+        var originalDefaultPresent = row.getAttribute('data-original-default-present') === '1';
+        var originalDefault = row.getAttribute('data-original-default') || '';
+        var originalAutoinc = row.getAttribute('data-original-autoinc') === '1';
+        var originalPosition = parseInt(row.getAttribute('data-original-position') || '', 10);
+        var originalComment = row.getAttribute('data-original-comment') || '';
+        var currentColType = preserveOriginalType ? originalType : (useLen ? dt + '(' + len + ')' : dt);
+        var normalizeType = function(v) {
+            return String(v || '').toUpperCase().replace(/\s+/g, '').replace(/,\s*/g, ',');
+        };
+        var normalizeDefault = function(v) {
+            var value = v === null || v === undefined ? '' : String(v).trim();
+            if (value.length >= 2 && value[0] === "'" && value[value.length - 1] === "'") value = value.slice(1, -1);
+            return value;
+        };
+        var currentDefault = defEl ? (defEl.value.trim() || null) : null;
+        var fieldChanged = !hasOriginal ||
+            originalName !== colName ||
+            normalizeType(originalType) !== normalizeType(currentColType) ||
+            originalLen !== (useLen ? len : '') ||
+            originalNullable !== (nullEl ? nullEl.checked : true) ||
+            originalDefaultPresent !== (currentDefault !== null) ||
+            normalizeDefault(originalDefault) !== normalizeDefault(currentDefault) ||
+            originalAutoinc !== (aiEl ? aiEl.checked : false) ||
+            (originalPosition && originalPosition !== i + 1) ||
+            originalComment !== (cmtEl ? cmtEl.value.trim() : '');
         d.columns.push({
             name: colName,
             data_type: dt,
-            col_type: preserveOriginalType ? originalType : (useLen ? dt + '(' + len + ')' : dt),
+            col_type: currentColType,
             length: useLen ? len : '',
             nullable: nullEl ? nullEl.checked : true,
             default_val: defEl ? (defEl.value.trim() || null) : null,
             position: i + 1,
             auto_increment: aiEl ? aiEl.checked : false,
-            comment: cmtEl ? cmtEl.value.trim() : ''
+            comment: cmtEl ? cmtEl.value.trim() : '',
+            _field_changed: fieldChanged
         });
     }
 
@@ -328,7 +357,7 @@ function designSave() {
             // 格式化：每个 SQL 子句换行缩进，方便阅读
             var formatted = s.replace(/^ALTER TABLE (\S+)\s+/, 'ALTER TABLE <b>$1</b>\n&nbsp;&nbsp;')
                 .replace(/, (DROP|ADD|MODIFY|ENGINE|COLLATE|COMMENT=)(\S?)/g, ',\n&nbsp;&nbsp;$1$3');
-            return '<div style="background:#0d1117;border:1px solid #333;border-radius:4px;padding:10px 12px;margin-bottom:8px;font-family:Consolas,monospace;font-size:11px;color:#e0e0e0;line-height:1.65;white-space:pre-wrap;word-break:break-all;">' + formatted + '</div>';
+            return '<div class="design-sql-preview">' + formatted + '</div>';
         }).join('');
         document.getElementById('modal_icon').innerHTML = '⚠️';
         document.getElementById('modal_title').textContent = '确认执行变更';
@@ -407,6 +436,11 @@ function _buildQueryEditorHtml(qid, cid, db, sql, name) {
     return '<div class="query-layout" id="ql_'+qid+'">' +
         '<div class="query-toolbar" style="display:flex;align-items:center;"><button id="btn_exe_'+qid+'" class="btn btn-green" style="font-size:11px;padding:4px 14px;" onclick="execQueryTab(\''+qid+'\')">▶ 执行</button>' +
         '<button id="btn_fmt_'+qid+'" class="btn btn-sm btn-fmt" style="font-size:11px;padding:4px 10px;margin-left:4px;" onclick="_formatSqlTab(\''+qid+'\')" title="格式化 SQL (Ctrl+B)">🧹 美化</button>' +
+        '<label class="sql-error-policy-label" for="sql_error_policy_'+qid+'">遇错处理：</label>' +
+        '<select id="sql_error_policy_'+qid+'" class="sql-error-policy" title="多条 SQL 执行遇到错误时的处理方式">' +
+            '<option value="stop">遇错停止</option>' +
+            '<option value="continue">忽略错误继续</option>' +
+        '</select>' +
         connLabel +
         '<div class="sql-find-bar" id="sql_find_bar_'+qid+'" style="display:none;">' +
             '<input type="text" id="sql_find_input_'+qid+'" placeholder="查找..." oninput="_applySqlHighlight(\''+qid+'\',null)" onkeydown="if(event.key===\'Enter\'){event.preventDefault();_sqlFindNext(\''+qid+'\');}if(event.key===\'Escape\'){event.preventDefault();_closeSqlFind(\''+qid+'\',null);}">' +
@@ -417,7 +451,7 @@ function _buildQueryEditorHtml(qid, cid, db, sql, name) {
         '</div>' +
         '</div>' +
         '<div class="query-editor-wrap" id="qew_'+qid+'" style="display:flex;position:relative;">' +
-        '<div class="sql-ln-gutter" id="lng_'+qid+'" onscroll="document.getElementById(\'sq_'+qid+'\').scrollTop=this.scrollTop"></div>' +
+        '<div class="sql-ln-gutter" id="lng_'+qid+'"><div class="sql-ln-rows" id="lnr_'+qid+'"></div></div>' +
         '<div class="sql-editor-inner" style="position:relative;flex:1;min-width:0;display:flex;">' +
             '<div class="sql-highlight" id="sql_hl_'+qid+'" aria-hidden="true" style="display:none;z-index:-1;"></div>' +
             '<textarea id="sq_'+qid+'" class="query-editor" spellcheck="false" wrap="off">'+(sql||'')+'</textarea>' +
@@ -438,7 +472,13 @@ function _initQueryEditorEvents(qid, cid, db, name) {
         btnE.textContent = (s !== e) ? '▶ 执行选中' : '▶ 执行';
     }
     if (ta) {
-        ta.addEventListener('input', function(){ _queryTextareaChanged(qid, ta); _syncLineGutter(qid, ta); _applySqlHighlightDebounced(qid, ta); });
+        ta.addEventListener('input', function(){
+            _queryTextareaChanged(qid, ta);
+            _syncLineGutter(qid, ta);
+            _applySqlHighlightDebounced(qid, ta);
+            // 粘贴大量 SQL 后等待布局更新，再同步一次滚动位置。
+            setTimeout(function(){ _syncLineGutter(qid, ta); _syncLineGutterScroll(qid, ta); }, 0);
+        });
         _initAutocomplete(ta, qid, cid, db); // ★ SQL 自动补全（必须在 keydown 之前注册以优先响应 Tab/Enter）
         ta.addEventListener('keydown',function(e){
             if(e.ctrlKey&&e.key==='Enter') execQueryTab(qid);
@@ -471,8 +511,7 @@ function _initQueryEditorEvents(qid, cid, db, name) {
             }
         });
         ta.addEventListener('scroll', function(){
-            var gutter = document.getElementById('lng_'+qid);
-            if (gutter) gutter.scrollTop = ta.scrollTop;
+            _syncLineGutterScroll(qid, ta);
             _positionHighlightOverlay(qid, ta);
         });
         _syncLineGutter(qid, ta);
@@ -512,7 +551,14 @@ function _syncLineGutter(qid, ta) {
     if (!ta) { ta = document.getElementById('sq_' + qid); }
     if (!ta) return;
     var gutter = document.getElementById('lng_' + qid);
+    var rowsEl = document.getElementById('lnr_' + qid);
     if (!gutter) return;
+    if (!rowsEl) {
+        rowsEl = document.createElement('div');
+        rowsEl.className = 'sql-ln-rows';
+        rowsEl.id = 'lnr_' + qid;
+        gutter.appendChild(rowsEl);
+    }
     // textarea 会把换行规范化为 LF，但粘贴/恢复内容时仍兼容 CRLF/CR。
     // 用 split 计算行数，确保末尾空行也有对应的行号。
     var lines = ta.value.split(/\r\n|\r|\n/).length;
@@ -523,9 +569,16 @@ function _syncLineGutter(qid, ta) {
         var cls = i === cursorLine ? ' class="ln-row ln-active"' : ' class="ln-row"';
         html += '<div' + cls + ' data-line="' + i + '" style="height:' + lineH + 'px;line-height:' + lineH + 'px;" onmousedown="_lnSelectLine(\'' + qid + '\',' + i + ',event)">' + i + '</div>';
     }
-    gutter.innerHTML = html;
-    // gutter 滚动位置跟随 textarea
-    gutter.scrollTop = ta.scrollTop;
+    rowsEl.innerHTML = html;
+    _syncLineGutterScroll(qid, ta);
+}
+
+/** 行号内容使用 transform 跟随 textarea，避免 overflow:hidden 容器的 scrollTop 在粘贴大量文本后失效。 */
+function _syncLineGutterScroll(qid, ta) {
+    if (!ta) ta = document.getElementById('sq_' + qid);
+    var rowsEl = document.getElementById('lnr_' + qid);
+    if (!rowsEl || !ta) return;
+    rowsEl.style.transform = 'translate3d(0, ' + (-ta.scrollTop) + 'px, 0)';
 }
 
 /** 获取光标所在行号（1-based） */

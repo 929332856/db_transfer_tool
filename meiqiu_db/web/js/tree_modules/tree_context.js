@@ -354,6 +354,7 @@ function refreshDatabaseList(cid) {
                     '<div class="tree-children" id="'+dbId2+'">' + renderDbCats(cid, db2, prevPad+40) + '</div></div>';
             }
         });
+        html += renderConnUsersNode(cid, prevPad, conn);
         children.innerHTML = html || '<div style="padding-left:'+(prevPad+20)+'px;color:#999;font-size:11px;">（无数据库）</div>';
     });
 }
@@ -445,6 +446,7 @@ function refreshCatItem(cat, cid, db, schema, dbKey, pad) {
     var conn = treeData.connections[cid];
     if (!conn) return;
     var sch = schema || '';
+    if (typeof _myConnTableCache !== 'undefined') delete _myConnTableCache[cid + '\0' + db + '\0' + sch];
     loadCategoryItems(conn, db, cat, function(items) {
         var itemPad = (pad||0) + 20;
         var catIcons = {tables:(window.MQ_ICON&&window.MQ_ICON.table)||'📊',views:'👁',mviews:'📋',indexes:'🔍',sequences:'🔢',synonyms:'🔗',functions:'𝑓',procedures:'⚙',packages:'📦',triggers:'⚡'};
@@ -982,6 +984,7 @@ function openProcTestTab(procName, db, schema, cid) {
                             '<div><span class="proc-section-title">输入参数</span><span class="proc-section-subtitle">IN / INOUT</span></div>' +
                             '<span class="proc-param-hint">勾选后参与执行</span>' +
                         '</div>' +
+                        '<div class="proc-test-params-scroll">' +
                         '<div class="proc-test-tip">' +
                         '<svg viewBox="0 0 16 16" width="10" height="10" style="vertical-align:middle;opacity:0.7;"><path d="M8 1l8 14H0z" fill="currentColor"/></svg> ' +
                         '下方表格仅展示输入参数（IN / IN/OUT）。纯 OUT 参数和函数返回值会自动在「出参/返回值」中显示。' +
@@ -991,7 +994,8 @@ function openProcTestTab(procName, db, schema, cid) {
                         '<tbody>' + (rowsHtml || '<tr><td colspan="4" class="proc-test-empty">（无入参）</td></tr>') + '</tbody>' +
                     '</table></div>' +
                     '<div class="proc-output-heading">出参 / 返回值</div>' +
-                    '<div id="'+escapeAttr(tabId)+'_results" class="proc-test-results"><div class="proc-test-result proc-test-result-empty">（点击执行后查看结果）</div></div>' +
+                        '<div id="'+escapeAttr(tabId)+'_results" class="proc-test-results"><div class="proc-test-result proc-test-result-empty">（点击执行后查看结果）</div></div>' +
+                        '</div>' +
                     '</section>' +
                 '</div>' +
             '</div>';

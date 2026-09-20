@@ -85,7 +85,7 @@ function showCollapsedTabs(e) {
     hidden.forEach(function(tabId) {
         var tab = objectTabs.find(function(t) { return t.id === tabId; });
         if (!tab) return;
-        var icon = tab.type === 'ddl' ? '🔧 ' : tab.type === 'data' ? ((window.MQ_ICON&&window.MQ_ICON.table)||'📊')+' ' : tab.type === 'query' ? '📝 ' : '📋 ';
+        var icon = tab.type === 'ddl' ? '🔧 ' : tab.type === 'data' ? ((window.MQ_ICON&&window.MQ_ICON.table)||'📊')+' ' : tab.type === 'query' ? '📝 ' : tab.type === 'users' ? '♙ ' : '📋 ';
         var item = document.createElement('div');
         item.style.cssText = 'padding:7px 16px;font-size:12px;color:#ccc;white-space:nowrap;display:flex;align-items:center;';
         item.innerHTML = '<span style="flex:1;">' + icon + escapeHtml(tab.label) + '</span>' +
@@ -144,6 +144,13 @@ function highlightTableRow() {
 }
 
 function addOrUpdateTab(id, label, type, content, db, cid) {
+    var previousId = activeObjTab;
+    if (previousId && previousId !== id && typeof _cacheDataTabDom === 'function') {
+        var previousTab = objectTabs.find(function(t){ return t.id === previousId; });
+        if (previousTab && (previousTab.type === 'data' || previousTab.type === 'redis')) {
+            _cacheDataTabDom(previousId, document.getElementById('obj_content'));
+        }
+    }
     var ex = objectTabs.find(function(t){return t.id===id;});
     if (ex) {
         // ★ 如果 content 变了（重新打开查询），清掉旧 textarea 缓存，避免用残留的旧 DOM 覆盖新内容

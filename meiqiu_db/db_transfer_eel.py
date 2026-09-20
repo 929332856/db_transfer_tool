@@ -179,6 +179,21 @@ def _log_db_error(label: str, msg: str):
     _db_err_logger.warning(f"[{label}] {msg}")
 
 
+def _execute_unbound_sql(conn, sql, db_type='mysql'):
+    """Execute user-provided SQL without letting DBAPI format literal percent signs.
+
+    MySQLdb receives an empty parameter tuple from SQLAlchemy for some raw
+    statements.  In that case a literal '%' in SQL comments or LIKE strings
+    is treated as a Python format marker.  Escaping it for the DBAPI restores
+    the original SQL on the wire while keeping this path parameter-free.
+    """
+    db_kind = str(db_type or '').lower()
+    driver_sql = str(sql)
+    if db_kind in ('mysql', 'ob-mysql'):
+        driver_sql = driver_sql.replace('%', '%%')
+    return conn.exec_driver_sql(driver_sql)
+
+
 def _gen_rollback_update(tbl: str, db_type: str, columns: list, orig_row: list, where_cols: list = None):
     """根据原始行数据生成 UPDATE 回退 SQL
     将修改后的值回退到原始值（仅在 table_exec_save 中用于单个字段修改时可用）
@@ -386,6 +401,13 @@ def _json_safe(val):
             b = bytes(val)
         except Exception:
             return str(val)
+        # MySQL 的 PROCESSLIST.INFO 可能混有历史 GBK/本地编码字节。
+        # 先尝试常见编码，最后用 latin-1 保证绝不因坏字节抛出解码异常。
+        for enc in ('utf-8', 'gb18030', 'gbk', 'latin-1'):
+            try:
+                return b.decode(enc)
+            except UnicodeDecodeError:
+                continue
         return b.decode('utf-8', errors='replace')
     # 超大整数 → 字符串（避免 JS 精度丢失）
     if isinstance(val, int):
@@ -1291,6 +1313,10 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
             _query_conn_data_map[conn_key] = data
             _query_job_conn[job_id] = conn_key
     DEFAULT_PAGE_SIZE = 200  # 首屏默认显示行数
+    try:
+        DEFAULT_PAGE_SIZE = min(max(int(data.get("page_size", DEFAULT_PAGE_SIZE)), 1), 5000)
+    except (TypeError, ValueError):
+        DEFAULT_PAGE_SIZE = 200
     BATCH = 1000             # 每次从结果集取 1000 行进行处理
     # ★ 最大拉取行数保护：防止大表 SELECT 把全量行堆进内存导致 OOM 崩溃
     #   （进程崩溃时若正执行写入/DDL，残留连接同样会引发元数据锁问题）
@@ -1308,7 +1334,8 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
                 "host": data.get("src_host", ""), "port": data.get("src_port", "3306"),
                 "user": data.get("src_user", ""), "pwd": data.get("src_pwd", ""),
                 "db": data.get("src_db", ""), "db_type": data.get("db_type", "mysql"),
-                "ora_mode": data.get("ora_mode", "service_name")
+                "ora_mode": data.get("ora_mode", "service_name"),
+                "page_size": data.get("page_size", 200)
             }
         db_type = data.get("db_type", "mysql")
         url = _conn_url(data)
@@ -1316,7 +1343,13 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
             read_timeout = (_MYSQL_DDL_READ_TIMEOUT if _is_long_running_sql(sql)
                             else _MYSQL_NORMAL_READ_TIMEOUT)
             url = _set_mysql_read_timeout(url, read_timeout)
-        engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
+        query_connect_args = _connect_args(db_type, timeout=10)
+        # mysqlclient 默认会在驱动层直接按连接 charset 解码所有文本。
+        # PROCESSLIST.INFO 中若存在非 UTF-8 历史字节，会在进入 _json_safe 前抛错。
+        # 先保留 bytes，返回 JSON 前再由 _json_safe 做容错解码。
+        if db_type in ('mysql', 'ob-mysql'):
+            query_connect_args['use_unicode'] = False
+        engine = create_engine(url, connect_args=query_connect_args)
         with engine.connect() as conn:
             if _is_cancelled(conn_key):
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
@@ -1346,13 +1379,16 @@ def _do_execute_sql_query(sql: str, data: dict, job_id: str = '', conn_key: str 
             #    再用 fetchmany 按批从服务端拉取，每批限量 max_fetch_rows 保护
             # ★ 用 exec_driver_sql 直接执行原生 SQL：避免 text() 把 SQL 文本中的
             #    ":7004"（如 JSON 字符串 "port":7004 的值）误解析为命名绑定参数
-            result = conn.execution_options(stream_results=True).exec_driver_sql(sql)
+            result = _execute_unbound_sql(
+                conn.execution_options(stream_results=True), sql, db_type
+            )
             _t_exec = _time.perf_counter()  # 查询提交 + 元数据接收完成
 
             if _is_cancelled(conn_key):
                 return {"ok": False, "msg": "查询已取消", "cancelled": True}
             if result.returns_rows:
-                query_columns = list(result.keys())
+                # use_unicode=False 下列名也可能以 bytes 返回，统一安全转成 JSON 字符串。
+                query_columns = [_json_safe(column) for column in result.keys()]
                 # ★ 批量 fetchmany 从服务端逐批拉取：
                 #    避免了默认 Cursor 在 execute() 时一次性反序列化全量行
                 #    → 大结果集（万行级 × Decimal 列）下可提速 5-10 倍
@@ -1496,6 +1532,158 @@ def execute_sql_query(sql: str, data: dict):
 
     _get_db_thread_pool().submit(_run)
     return {"ok": True, "_async": True, "_job_id": job_id}
+
+
+def _do_execute_sql_batch(statements, data: dict, continue_on_error=False,
+                           conn_key: str = ''):
+    """Execute a write-only SQL batch on one connection.
+
+    This is intentionally used for multiple INSERT statements from the SQL
+    editor.  Reusing one connection and one transaction avoids the connection
+    setup/teardown cost of executing every statement through execute_sql_query.
+    Savepoints keep earlier successful statements while allowing the caller to
+    either stop at the first error or continue after rolling back only the
+    failed statement.
+    """
+    if not isinstance(statements, (list, tuple)):
+        return {"ok": False, "batch": True, "msg": "批量 SQL 格式错误"}
+    statements = [str(stmt or '').strip() for stmt in statements]
+    statements = [stmt for stmt in statements if stmt]
+    if not statements:
+        return {"ok": False, "batch": True, "msg": "没有可执行的 SQL"}
+
+    cdata = dict(data or {})
+    if "user" not in cdata:
+        cdata = {
+            "host": cdata.get("src_host", ""),
+            "port": cdata.get("src_port", "3306"),
+            "user": cdata.get("src_user", ""),
+            "pwd": cdata.get("src_pwd", ""),
+            "db": cdata.get("src_db", ""),
+            "db_type": cdata.get("db_type", "mysql"),
+            "ora_mode": cdata.get("ora_mode", "service_name"),
+        }
+    db_type = cdata.get("db_type", "mysql")
+    url = _conn_url(cdata)
+    if db_type in ('mysql', 'ob-mysql'):
+        url = _set_mysql_read_timeout(url, _MYSQL_NORMAL_READ_TIMEOUT)
+
+    started = time.perf_counter()
+    engine = None
+    results = []
+    errors = []
+    total_affected = 0
+    attempted = 0
+    stopped_on_error = False
+    try:
+        engine = create_engine(url, connect_args=_connect_args(db_type, timeout=10))
+        with engine.connect() as conn:
+            pid = _get_backend_pid(conn, db_type)
+            if conn_key and pid:
+                with _query_state_lock:
+                    _query_conn_pid_map[conn_key] = pid
+            for index, stmt in enumerate(statements):
+                if _is_cancelled(conn_key):
+                    conn.rollback()
+                    return {"ok": False, "batch": True, "cancelled": True,
+                            "msg": "批量执行已取消", "results": results,
+                            "total_affected": total_affected, "attempted": attempted}
+                attempted += 1
+                savepoint = "mqdb_batch_stmt"
+                try:
+                    conn.exec_driver_sql("SAVEPOINT " + savepoint)
+                    result = _execute_unbound_sql(conn, stmt, db_type)
+                    if result.returns_rows:
+                        result.close()
+                        raise RuntimeError("批量 INSERT 只能包含写入语句")
+                    affected = result.rowcount if result.rowcount is not None else 0
+                    affected = max(0, int(affected))
+                    total_affected += affected
+                    results.append({"ok": True, "index": index,
+                                    "total": affected, "affected": affected})
+                    conn.exec_driver_sql("RELEASE SAVEPOINT " + savepoint)
+                except Exception as exc:
+                    try:
+                        conn.exec_driver_sql("ROLLBACK TO SAVEPOINT " + savepoint)
+                        conn.exec_driver_sql("RELEASE SAVEPOINT " + savepoint)
+                    except Exception:
+                        conn.rollback()
+                    item = {"ok": False, "index": index, "total": 0,
+                            "msg": str(exc)}
+                    results.append(item)
+                    errors.append(item)
+                    if len(errors) <= 20:
+                        errors[-1] = dict(item)
+                    if not continue_on_error:
+                        stopped_on_error = True
+                        break
+            conn.commit()
+        elapsed = round((time.perf_counter() - started) * 1000, 1)
+        first_error = errors[0] if errors else None
+        if errors and stopped_on_error:
+            msg = (f"第 {int(first_error.get('index', 0)) + 1} 条 INSERT 失败，"
+                   f"已停止执行；此前成功影响 {total_affected} 行")
+        elif errors:
+            msg = (f"批量执行完成，成功 {len(statements) - len(errors)} 条，"
+                   f"失败 {len(errors)} 条，共影响 {total_affected} 行")
+        else:
+            msg = f"批量执行完成，共 {len(statements)} 条 INSERT，影响 {total_affected} 行"
+        return {
+            "ok": not errors,
+            "batch": True,
+            "completed": True,
+            "msg": msg,
+            "results": results,
+            "total_affected": total_affected,
+            "attempted": attempted,
+            # 只统计实际尝试过且成功的语句；遇错停止时，后面的未执行语句不能算成功。
+            "success_count": attempted - len(errors),
+            "failed_count": len(errors),
+            "stopped_on_error": stopped_on_error,
+            "remaining_count": max(0, len(statements) - attempted),
+            "errors": errors,
+            "server_ms": elapsed,
+        }
+    except Exception as exc:
+        if _is_cancelled(conn_key):
+            return {"ok": False, "batch": True, "cancelled": True,
+                    "msg": "批量执行已取消", "results": results,
+                    "total_affected": total_affected, "attempted": attempted}
+        return {"ok": False, "batch": True, "msg": str(exc),
+                "results": results, "total_affected": total_affected,
+                "attempted": attempted}
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception:
+                pass
+
+
+@eel.expose
+def execute_sql_batch(statements, data: dict, continue_on_error=False):
+    """异步批量执行 SQL 编辑器中的多条 INSERT。"""
+    job_id = str(uuid.uuid4())
+    conn_key = _make_conn_key(data or {})
+    with _query_state_lock:
+        _query_jobs[job_id] = None
+        _query_job_conn[job_id] = conn_key
+        _query_state_time[job_id] = time.time()
+
+    def _run():
+        try:
+            result = _do_execute_sql_batch(
+                statements, data or {}, bool(continue_on_error), conn_key
+            )
+        except Exception as exc:
+            result = {"ok": False, "batch": True, "msg": str(exc)}
+        with _query_state_lock:
+            if job_id in _query_jobs:
+                _query_jobs[job_id] = result
+                _query_state_time[job_id] = time.time()
+
+    _get_db_thread_pool().submit(_run)
+    return {"ok": True, "_async": True, "_job_id": job_id, "batch": True}
 
 def _make_conn_key(data):
     """从连接数据生成唯一标识（用于区分不同连接的查询）"""
@@ -2109,7 +2297,7 @@ def table_preview_data(conn_data, database, table_name, schema='', order_col='',
 
 
 @eel.expose
-def table_preview_data_fast(conn_data, database, table_name, schema='', order_col='', order_dir='', where_clause='', operation_id=None):
+def table_preview_data_fast(conn_data, database, table_name, schema='', order_col='', order_dir='', where_clause='', operation_id=None, page_size=50):
     """快速预览：取 51 行，不用 COUNT(*)（超大表 COUNT 太慢），用第51行判断是否有更多。支持可选 WHERE 筛选"""
     global _query_conn_id, _query_src_data
     _query_cancel.clear()
@@ -2130,8 +2318,12 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
             order_clause = f' ORDER BY {safe_col} {direction}'
         if _query_cancel.is_set():
             return {"ok": False, "msg": "查询已取消", "cancelled": True}
-        # ★ 取 51 行，多一行用于判断是否还有更多数据（省掉慢 COUNT）
-        limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=51, where_clause=where_clause)
+        try:
+            preview_limit = min(max(int(page_size or 50), 1), 5000)
+        except (TypeError, ValueError):
+            preview_limit = 50
+        # ★ 多取一行用于判断是否还有更多数据（省掉慢 COUNT）
+        limit_sql = _build_full_table_sql(tbl, db_type, order_clause, limit=preview_limit + 1, where_clause=where_clause)
         # ★ 保存连接数据，用于 cancel 时 kill query
         _query_src_data = cdata
         url = _conn_url(cdata)
@@ -2166,7 +2358,7 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
                 if _query_cancel.is_set():
                     engine.dispose()
                     return {"ok": False, "msg": "查询已取消", "cancelled": True}
-                _log_db_select(limit_sql + "  -- [FAST] 前50行")
+                _log_db_select(limit_sql + f"  -- [FAST] 前{preview_limit}行")
                 result = conn.execute(text(limit_sql))
                 columns = list(result.keys())
                 rows = [_row_to_json(row) for row in result.fetchall()]
@@ -2174,9 +2366,9 @@ def table_preview_data_fast(conn_data, database, table_name, schema='', order_co
                 if _query_cancel.is_set():
                     engine.dispose()
                     return {"ok": False, "msg": "查询已取消", "cancelled": True}
-                has_more = len(rows) > 50
+                has_more = len(rows) > preview_limit
                 if has_more:
-                    rows = rows[:50]  # 只暴露前50行给前端
+                    rows = rows[:preview_limit]  # 只暴露配置的预览行数给前端
                 comments = _load_column_comments(conn, db_type, database, table_name, schema)
                 col_types = _load_column_types(conn, db_type, database, table_name, schema)
             engine.dispose()
@@ -2706,6 +2898,132 @@ def _build_update_sql(tbl, db_type, group, where_cols, col_types):
     return f"UPDATE {tbl} SET {', '.join(set_parts)} WHERE {where_clause}"
 
 
+def _load_insert_column_meta(conn_data, database, table_name, schema=''):
+    """读取新增数据所需的列元数据。
+
+    表数据预览只返回列类型，新增还需要知道列是否可空、是否有默认值以及
+    是否为自增列，因此复用表设计器已经维护好的跨数据库元数据查询。
+    """
+    result = table_get_design_info(conn_data, database, table_name, schema)
+    if not result or not result.get("ok"):
+        raise RuntimeError((result or {}).get("msg") or "无法读取表字段定义")
+    design = result.get("design") or result
+    columns = design.get("columns") or []
+    if not columns:
+        raise RuntimeError("表没有可用字段")
+    return columns
+
+
+def _build_insert_sql(tbl, db_type, columns, values, column_meta):
+    """校验新增行并生成 INSERT 预览 SQL。
+
+    空白字段按“未提供”处理：有默认值或自增的列直接省略，可空列也省略让
+    数据库使用 NULL；只有没有默认值且不可为空的字段必须填写。
+    """
+    if not isinstance(columns, list) or not columns:
+        raise ValueError("字段列表不能为空")
+    if not isinstance(values, list) or len(values) != len(columns):
+        raise ValueError("新增数据与字段数量不一致")
+
+    meta_map = {}
+    for item in column_meta or []:
+        name = str(item.get("name", ""))
+        if name:
+            meta_map[name.casefold()] = item
+
+    insert_cols = []
+    insert_vals = []
+    for index, col in enumerate(columns):
+        col_name = str(col or "").strip()
+        meta = meta_map.get(col_name.casefold())
+        if not meta:
+            raise ValueError(f"无效的字段：{col_name}")
+        raw = values[index]
+        is_blank = raw is None or str(raw).strip() == ""
+        is_null = is_blank or str(raw).strip().upper() == "NULL"
+        nullable = bool(meta.get("nullable", True))
+        has_default = meta.get("default_val") is not None
+        auto_increment = bool(meta.get("auto_increment"))
+
+        if is_null:
+            if not (nullable or has_default or auto_increment):
+                raise ValueError(f"字段 [{col_name}] 不能为空")
+            # 空白值交给默认值/自增逻辑；可空列省略后由数据库写入 NULL。
+            continue
+
+        insert_cols.append(_safe_ident(col_name, db_type))
+        insert_vals.append(
+            _sql_value(raw, db_type, str(meta.get("col_type") or meta.get("data_type") or ""),
+                       null_sentinel=False)
+        )
+
+    if insert_cols:
+        return f"INSERT INTO {tbl} ({', '.join(insert_cols)}) VALUES ({', '.join(insert_vals)})"
+    if db_type in ('mysql', 'ob-mysql'):
+        return f"INSERT INTO {tbl} () VALUES ()"
+    return f"INSERT INTO {tbl} DEFAULT VALUES"
+
+
+@eel.expose
+def table_insert_row(conn_data, database, table_name, schema, columns, values):
+    """生成 INSERT SQL 预览，不执行。"""
+    try:
+        cdata = dict(conn_data)
+        db_type = cdata.get('db_type', 'mysql')
+        if db_type != 'oracle':
+            cdata["db"] = database
+        tbl = _build_table_ref(cdata, database, table_name, schema)
+        column_meta = _load_insert_column_meta(cdata, database, table_name, schema)
+        sql = _build_insert_sql(tbl, db_type, columns, values, column_meta)
+        return {"ok": True, "sql": sql + ";", "count": 1}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@eel.expose
+def table_exec_insert(conn_data, database, table_name, schema, columns, values, operation_id=None):
+    """执行 INSERT 新增（支持取消并记录新增 SQL）。"""
+    global _query_conn_id, _query_src_data
+    cdata = dict(conn_data)
+    db_type = cdata.get('db_type', 'mysql')
+    if db_type != 'oracle':
+        cdata["db"] = database
+    tbl = _build_table_ref(cdata, database, table_name, schema)
+    op_state = _register_db_operation(operation_id, cdata, 'insert')
+    engine = None
+    try:
+        engine = create_engine(_conn_url(cdata), connect_args=_connect_args(db_type, timeout=10))
+        if _db_operation_cancelled(op_state):
+            raise RuntimeError("操作已取消")
+        column_meta = _load_insert_column_meta(cdata, database, table_name, schema)
+        insert_sql = _build_insert_sql(tbl, db_type, columns, values, column_meta)
+        with engine.begin() as c:
+            _query_conn_id = _get_backend_pid(c, db_type)
+            _query_src_data = cdata
+            _add_db_operation_session(op_state, cdata, _query_conn_id, kill_connection=False)
+            if _db_operation_cancelled(op_state):
+                _kill_db_operation(op_state)
+                raise RuntimeError("操作已取消")
+            result = _execute_unbound_sql(c, insert_sql, db_type)
+            if _db_operation_cancelled(op_state):
+                _kill_db_operation(op_state)
+                raise RuntimeError("操作已取消")
+            if result.rowcount == 0:
+                raise RuntimeError("新增失败：数据库未插入数据")
+            _log_db_insert(insert_sql)
+        return {"ok": True, "msg": "成功新增 1 行"}
+    except Exception as e:
+        if _db_operation_cancelled(op_state):
+            return {"ok": False, "msg": "操作已取消", "cancelled": True}
+        return {"ok": False, "msg": str(e)}
+    finally:
+        _query_conn_id = None
+        _query_src_data = None
+        _finish_db_operation(op_state)
+        if engine is not None:
+            engine.dispose()
+
+
 @eel.expose
 def table_save_changes(conn_data, database, table_name, schema, changes):
     """生成 UPDATE SQL 预览，不执行"""
@@ -2781,7 +3099,7 @@ def table_exec_save(conn_data, database, table_name, schema, changes, operation_
                 )
                 # update_sql 已是完整 SQL；使用驱动直执行，避免 JSON 中的
                 # "port":7004 被 SQLAlchemy text() 误识别为 :7004 参数。
-                result = c.exec_driver_sql(update_sql)
+                result = _execute_unbound_sql(c, update_sql, db_type)
                 if _db_operation_cancelled(op_state):
                     _kill_db_operation(op_state)
                     raise RuntimeError("操作已取消")
@@ -2902,7 +3220,7 @@ def table_exec_delete(conn_data, database, table_name, schema, rows_data, operat
                 )
                 delete_sql = f"DELETE FROM {tbl} WHERE {where_clause}"
                 # 同样避免 DELETE 条件中的 URL/时间/JSON 冒号被识别成绑定参数。
-                result = c.exec_driver_sql(delete_sql)
+                result = _execute_unbound_sql(c, delete_sql, db_type)
                 if _db_operation_cancelled(op_state):
                     _kill_db_operation(op_state)
                     raise RuntimeError("操作已取消")
@@ -3792,6 +4110,8 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
                 old_name = rename_map.get(col_name, col_name)
                 if col_name and old_name in existing_detail:
                     old = existing_detail[old_name]
+                    if col.get("_field_changed") is False:
+                        continue
                     new_type = (col.get("col_type") or col.get("data_type", "")).lower()
                     old_type = (old["col_type"] or "").lower()
                     changed = (
@@ -3965,6 +4285,8 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
                     if col.get("comment"):
                         sqls.append(f"COMMENT ON COLUMN {tbl}.{name} IS {_sql_literal(col['comment'])}")
                     continue
+                if col.get("_field_changed") is False:
+                    continue
                 if str(old.get("col_type", "")).lower() != col_type.lower():
                     sqls.append(f"ALTER TABLE {tbl} ALTER COLUMN {name} TYPE {col_type} USING {name}::{col_type}")
                 if col.get("nullable", True) != old.get("nullable", True):
@@ -4111,6 +4433,10 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
                     col_type = f"NUMBER({r[3]},{r[4]})"
                 elif dt == 'NUMBER' and r[3] is not None:
                     col_type = f"NUMBER({r[3]})"
+                elif dt == 'NUMBER':
+                    # DATA_LENGTH=22 is Oracle NUMBER storage length, not NUMBER(22).
+                    col_type = dt
+                    length = None
                 elif length and dt in ('VARCHAR', 'VARCHAR2', 'CHAR', 'NCHAR', 'NVARCHAR2', 'RAW'):
                     col_type = f"{dt}({length})"
                 else:
@@ -4216,6 +4542,8 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
                 old_name_up = rename_map.get(col_name_up, col_name_up)
                 if old_name_up in existing_detail:
                     old = existing_detail[old_name_up]
+                    if col.get("_field_changed") is False:
+                        continue
                     # ★ 用清理后的 col_type 比较，避免 DATE(7) vs DATE 误判为变更
                     new_type = col_type.upper()
                     old_type = (old["col_type"] or "").upper()
@@ -4378,6 +4706,8 @@ def table_apply_design(conn_data, database, table_name, design, schema='', execu
                     default = f" DEFAULT {default_sql}" if default_sql is not None else ""
                     sqls.append(f"ALTER TABLE {tbl} ADD {name} {ctype}{identity}{default}{nullable}")
                 else:
+                    if col.get("_field_changed") is False:
+                        continue
                     if bool(old[6]) != bool(col.get("auto_increment")):
                         raise ValueError(f"SQL Server 不支持直接修改已有字段 [{name_raw}] 的 IDENTITY 属性，请重建字段")
                     if _mssql_existing_type(old) != ctype or bool(old[5]) != bool(col.get("nullable", True)):
@@ -4793,8 +5123,11 @@ def table_execute_sql(conn_data, database, sql, schema='', operation_id=None):
                 _kill_db_operation(op_state)
                 raise RuntimeError("操作已取消")
             # ★ exec_driver_sql 直接执行原生 SQL：避免 text() 把 SQL 中的 ":7004"
-            #    （如 JSON 字符串 "port":7004 的值）误解析为绑定参数
-            conn.exec_driver_sql(sql)
+            #    （如 JSON 字符串 "port":7004 的值）误解析为绑定参数。
+            # MySQLdb 即使没有绑定参数也会按空元组处理 SQL，字面量 '%' 会被
+            # 当成 Python 格式占位符（例如字段注释中的 "10%"），因此先转义；
+            # DBAPI 格式化后发往 MySQL 的仍是单个 '%'。
+            _execute_unbound_sql(conn, sql, db_type)
             if _db_operation_cancelled(op_state):
                 _kill_db_operation(op_state)
                 raise RuntimeError("操作已取消")
@@ -5425,6 +5758,325 @@ def _conn_url(conn_data):
     # fallback mysql
     base = f"mysql+mysqldb://{u}:{p}@{h}:{port}"
     return f"{base}/{db}?charset=utf8mb4" if db else f"{base}/?charset=utf8mb4"
+
+_MYSQL_USER_PRIVILEGES = (
+    'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'DROP', 'ALTER',
+    'INDEX', 'REFERENCES', 'EXECUTE', 'SHOW VIEW', 'TRIGGER', 'EVENT',
+    'CREATE TEMPORARY TABLES',
+)
+
+
+def _mysql_user_cdata(conn_data):
+    """规范化用户管理连接，并强制不依赖连接配置中的默认数据库。"""
+    cdata = _normalize_conn_data(conn_data or {})
+    if cdata.get('db_type', 'mysql') not in ('mysql', 'ob-mysql'):
+        raise ValueError('用户与权限目前仅支持 MySQL / OceanBase')
+    cdata['db'] = ''
+    return cdata
+
+
+def _mysql_user_literal(value):
+    """Quote MySQL string values, including backslashes used by MySQL escapes."""
+    return "'" + str(value).replace('\\', '\\\\').replace("'", "''") + "'"
+
+
+def _mysql_user_target(username, host):
+    username = str(username or '').strip()
+    host = str(host or '%').strip() or '%'
+    if not username or len(username) > 128 or len(host) > 255:
+        raise ValueError('用户名和 Host 不能为空且长度不合法')
+    if any(ord(ch) < 32 for ch in username + host):
+        raise ValueError('用户名或 Host 包含非法控制字符')
+    # 用户名和 Host 是值，不是标识符，使用 SQL 字符串字面量避免注入。
+    return _mysql_user_literal(username) + '@' + _mysql_user_literal(host)
+
+
+def _mysql_user_engine(cdata):
+    return create_engine(
+        _conn_url(cdata),
+        connect_args=_connect_args(cdata.get('db_type', 'mysql'), timeout=10),
+    )
+
+
+def _mysql_user_exec(conn, sql):
+    """Execute user-management SQL safely with MySQLdb's ``format`` paramstyle.
+
+    MySQL account hosts commonly contain ``%`` (for example ``'%'``).  The
+    MySQLdb driver treats percent signs in raw SQL as Python format markers,
+    even when SQLAlchemy passes no bind parameters, so a statement such as
+    ``SHOW GRANTS FOR 'user'@'%'`` raises ``not enough arguments for format
+    string``.  Doubling percent signs lets the driver emit a literal percent
+    sign to MySQL while keeping the SQL construction/validation unchanged.
+    """
+    # Passing an explicit empty parameter tuple is important: it makes
+    # MySQLdb apply its format pass, turning ``%%`` back into a literal ``%``
+    # before the statement reaches the server.
+    return conn.exec_driver_sql(str(sql).replace('%', '%%'), ())
+
+
+def _mysql_user_is_missing_grant_error(exc):
+    """Return whether a revoke failed only because that scope had no grant."""
+    original = getattr(exc, 'orig', None) or exc
+    args = getattr(original, 'args', ()) or ()
+    if args and str(args[0]) == '1141':
+        return True
+    return '1141' in str(original) and 'no such grant' in str(original).lower()
+
+
+def _mysql_user_flag(value):
+    return str(value or '').upper() in ('Y', 'YES', '1', 'TRUE')
+
+
+@eel.expose
+def mysql_user_list(conn_data):
+    """读取 MySQL 用户、认证插件及账户状态。"""
+    cdata = _mysql_user_cdata(conn_data)
+
+    def _load():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.connect() as conn:
+                try:
+                    rows = conn.execute(text(
+                        'SELECT User AS user_name, Host AS host_name, plugin AS auth_plugin, '
+                        'account_locked, password_expired, password_last_changed '
+                        'FROM mysql.user ORDER BY User, Host'
+                    )).mappings().all()
+                except Exception:
+                    # MySQL 5.6 / 部分 MariaDB 版本没有全部账户状态字段。
+                    rows = conn.execute(text(
+                        'SELECT User AS user_name, Host AS host_name, plugin AS auth_plugin '
+                        'FROM mysql.user ORDER BY User, Host'
+                    )).mappings().all()
+            users = []
+            for row in rows:
+                item = dict(row)
+                users.append({
+                    'user': str(item.get('user_name') or ''),
+                    'host': str(item.get('host_name') or '%'),
+                    'plugin': str(item.get('auth_plugin') or ''),
+                    'locked': _mysql_user_flag(item.get('account_locked')),
+                    'password_expired': _mysql_user_flag(item.get('password_expired')),
+                    'password_last_changed': _json_safe(item.get('password_last_changed')),
+                })
+            return {'ok': True, 'users': users}
+        finally:
+            engine.dispose()
+
+    return _load()
+
+
+@eel.expose
+def mysql_user_databases(conn_data):
+    """返回权限编辑器可选的数据库名称。"""
+    cdata = _mysql_user_cdata(conn_data)
+
+    def _load():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.connect() as conn:
+                rows = conn.exec_driver_sql('SHOW DATABASES').fetchall()
+            return {'ok': True, 'databases': [str(row[0]) for row in rows]}
+        finally:
+            engine.dispose()
+
+    return _load()
+
+
+@eel.expose
+def mysql_user_tables(conn_data, database):
+    """返回指定数据库中的表/视图名称，供权限编辑器选择授权范围。"""
+    cdata = _mysql_user_cdata(conn_data)
+    database = str(database or '').strip()
+    if not database or database == '*':
+        return {'ok': True, 'database': database or '*', 'tables': []}
+    if len(database) > 255 or any(ord(ch) < 32 for ch in database):
+        raise ValueError('数据库名称不合法')
+
+    def _load():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_SCHEMA = :database "
+                    "AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') "
+                    "ORDER BY TABLE_NAME"
+                ), {'database': database}).fetchall()
+            return {
+                'ok': True,
+                'database': database,
+                'tables': [str(row[0]) for row in rows],
+            }
+        finally:
+            engine.dispose()
+
+    return _load()
+
+
+@eel.expose
+def mysql_user_grants(conn_data, username, host):
+    """读取指定 MySQL 用户的 SHOW GRANTS。"""
+    cdata = _mysql_user_cdata(conn_data)
+    target = _mysql_user_target(username, host)
+
+    def _load():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.connect() as conn:
+                rows = _mysql_user_exec(conn, 'SHOW GRANTS FOR ' + target).fetchall()
+            grants = [str(row[0]) for row in rows]
+            return {'ok': True, 'grants': grants, 'user': str(username), 'host': str(host or '%')}
+        finally:
+            engine.dispose()
+
+    return _load()
+
+
+def _mysql_grant_scope(database, table):
+    database = str(database or '*').strip() or '*'
+    table = str(table or '*').strip() or '*'
+    if database == '*' and table != '*':
+        raise ValueError('数据库为 * 时，表也必须为 *')
+    if database == '*':
+        db_sql = '*'
+    else:
+        db_sql = _safe_ident(database, 'mysql')
+    if table == '*':
+        table_sql = '*'
+    else:
+        table_sql = _safe_ident(table, 'mysql')
+    return db_sql + '.' + table_sql, database, table
+
+
+@eel.expose
+def mysql_user_apply_privileges(conn_data, username, host, database='*', table='*', privileges=None, grant_option=False):
+    """在指定数据库/表范围内重设授权，不影响其他范围的授权。"""
+    cdata = _mysql_user_cdata(conn_data)
+    target = _mysql_user_target(username, host)
+    scope, database, table = _mysql_grant_scope(database, table)
+    selected = []
+    for privilege in (privileges or []):
+        privilege = str(privilege or '').upper().strip()
+        if privilege in _MYSQL_USER_PRIVILEGES and privilege not in selected:
+            selected.append(privilege)
+
+    def _apply():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.begin() as conn:
+                # MySQL does not allow combining ALL PRIVILEGES and GRANT
+                # OPTION in one scoped REVOKE statement. Revoke them
+                # separately so this works on MySQL 5.x, 8.x and OceanBase.
+                for revoke_sql in (
+                    'REVOKE ALL PRIVILEGES ON ' + scope + ' FROM ' + target,
+                    'REVOKE GRANT OPTION ON ' + scope + ' FROM ' + target,
+                ):
+                    try:
+                        _mysql_user_exec(conn, revoke_sql)
+                    except Exception as exc:
+                        # REVOKE on a scope with no existing grant returns
+                        # MySQL error 1141. It is safe to ignore here because
+                        # the next step may be creating a new grant.
+                        if not _mysql_user_is_missing_grant_error(exc):
+                            raise
+                if selected:
+                    sql = 'GRANT ' + ', '.join(selected) + ' ON ' + scope + ' TO ' + target
+                    if grant_option:
+                        sql += ' WITH GRANT OPTION'
+                    _mysql_user_exec(conn, sql)
+            return {
+                'ok': True,
+                'msg': '权限已更新',
+                'database': database,
+                'table': table,
+                'privileges': selected,
+                'grant_option': bool(grant_option and selected),
+            }
+        finally:
+            engine.dispose()
+
+    return _apply()
+
+
+@eel.expose
+def mysql_user_create(conn_data, username, host='%', password=''):
+    """创建 MySQL 用户。创建后可在权限编辑器中授予具体权限。"""
+    cdata = _mysql_user_cdata(conn_data)
+    target = _mysql_user_target(username, host)
+    password = str(password if password is not None else '')
+    if len(password) > 1024:
+        raise ValueError('密码长度不能超过 1024 个字符')
+
+    def _create():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.begin() as conn:
+                _mysql_user_exec(conn, 'CREATE USER ' + target + ' IDENTIFIED BY ' + _mysql_user_literal(password))
+            return {'ok': True, 'msg': '用户创建成功'}
+        finally:
+            engine.dispose()
+
+    return _create()
+
+
+@eel.expose
+def mysql_user_update_password(conn_data, username, host, password):
+    """修改指定 MySQL 用户密码。"""
+    cdata = _mysql_user_cdata(conn_data)
+    target = _mysql_user_target(username, host)
+    password = str(password if password is not None else '')
+    if len(password) > 1024:
+        raise ValueError('密码长度不能超过 1024 个字符')
+
+    def _update():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.begin() as conn:
+                _mysql_user_exec(conn, 'ALTER USER ' + target + ' IDENTIFIED BY ' + _mysql_user_literal(password))
+            return {'ok': True, 'msg': '密码修改成功'}
+        finally:
+            engine.dispose()
+
+    return _update()
+
+
+@eel.expose
+def mysql_user_set_lock(conn_data, username, host, locked):
+    """锁定或解锁 MySQL 用户。"""
+    cdata = _mysql_user_cdata(conn_data)
+    target = _mysql_user_target(username, host)
+    action = 'LOCK' if bool(locked) else 'UNLOCK'
+
+    def _set_lock():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.begin() as conn:
+                _mysql_user_exec(conn, 'ALTER USER ' + target + ' ACCOUNT ' + action)
+            return {'ok': True, 'msg': ('用户已锁定' if locked else '用户已解锁')}
+        finally:
+            engine.dispose()
+
+    return _set_lock()
+
+
+@eel.expose
+def mysql_user_delete(conn_data, username, host):
+    """删除指定 MySQL 用户及其授权。"""
+    cdata = _mysql_user_cdata(conn_data)
+    target = _mysql_user_target(username, host)
+
+    def _delete():
+        engine = _mysql_user_engine(cdata)
+        try:
+            with engine.begin() as conn:
+                _mysql_user_exec(conn, 'DROP USER ' + target)
+            return {'ok': True, 'msg': '用户已删除'}
+        finally:
+            engine.dispose()
+
+    return _delete()
+
 
 @eel.expose
 def db_explore_get_databases(conn_data):
@@ -6939,7 +7591,7 @@ def db_run_sql_file(conn_data, database, file_path, content='', operation_id=Non
                         _kill_db_operation(op_state)
                         raise RuntimeError("操作已取消")
                     try:
-                        conn.execute(text(stmt)); done += 1
+                        _execute_unbound_sql(conn, stmt, db_type); done += 1
                         if _db_operation_cancelled(op_state):
                             _kill_db_operation(op_state)
                             raise RuntimeError("操作已取消")
@@ -8019,7 +8671,7 @@ def _drag_copy_table_impl(src_conn_data, src_db, table_name, dst_conn_data, dst_
                         if _db_operation_cancelled(op_state):
                             _kill_db_operation(op_state)
                             raise RuntimeError("操作已取消")
-                        if stmt: dconn.execute(text(stmt))
+                        if stmt: _execute_unbound_sql(dconn, stmt, dst_db_type)
             except Exception as e:
                 src_engine.dispose(); dst_engine.dispose()
                 return {"ok": False, "msg": f"创建表结构失败: {str(e)}"}
@@ -8806,7 +9458,7 @@ def import_wizard_run(conn_data, database, file_path, file_type, schema='', cont
                             _kill_db_operation(op_state)
                             raise RuntimeError("操作已取消")
                         try:
-                            conn.execute(text(stmt))
+                            _execute_unbound_sql(conn, stmt, db_type)
                             done += 1
                             if _db_operation_cancelled(op_state):
                                 _kill_db_operation(op_state)

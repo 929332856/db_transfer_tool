@@ -60,6 +60,11 @@ document.addEventListener('selectionchange', function() {
         for (var w = 0; w < allWraps.length; w++) {
             var wrap = allWraps[w];
             var tid = wrap.id;
+            var clearRowSelection = window['_clearRowSelection_'+tid];
+            if (clearRowSelection) {
+                if (clearRowSelection()) anyCleared = true;
+                continue;
+            }
             var selRows = window['_selRows_'+tid];
             if (selRows && Object.keys(selRows).length > 0) {
                 for (var k in selRows) delete selRows[k];

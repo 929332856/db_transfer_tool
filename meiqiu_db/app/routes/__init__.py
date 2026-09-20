@@ -65,9 +65,11 @@ db_explore_get_proc_source db_explore_get_procedures db_explore_get_schemas
 db_explore_get_table_ddl db_explore_get_tables db_explore_get_triggers
 db_explore_get_views db_explore_test_proc db_get_collations db_get_info
 db_run_sql_file debug_python_info delete_profile drag_copy_table drag_copy_tables
-execute_sql_query export_pick_file export_query_save export_wizard_get_columns
+execute_sql_query execute_sql_batch export_pick_file export_query_save export_wizard_get_columns
 export_wizard_get_tables export_wizard_start find_profile get_connection_info
 cancel_connection_info get_database_info get_last_used get_profiles get_query_page import_wizard_run
+  mysql_user_list mysql_user_databases mysql_user_tables mysql_user_grants mysql_user_apply_privileges
+mysql_user_create mysql_user_update_password mysql_user_set_lock mysql_user_delete
 pick_open_file pick_sql_file poll_query_result poll_queue redis_append_list
 redis_append_set redis_append_zset redis_delete_key redis_execute redis_get_databases
 redis_get_key_info redis_get_keys redis_get_keys_meta redis_set_hash redis_set_list
@@ -77,10 +79,10 @@ slow_query_check_enabled slow_query_enable slow_query_get_databases
 slow_query_get_detail slow_query_get_list slow_query_get_log slow_query_get_running
 slow_query_kill_processlist start_transfer stop_transfer table_apply_design
 table_backup table_clear table_delete table_delete_rows table_drop_column
-table_drop_foreign_key table_drop_index table_exec_delete table_exec_save
+table_drop_foreign_key table_drop_index table_exec_delete table_exec_insert table_exec_save
 table_execute_sql table_get_col_types table_get_ddl table_get_design_info
 table_load_page table_preview_data table_preview_data_fast table_rename
-table_save_changes table_truncate test_connection tree_add_connection tree_add_folder
+table_insert_row table_save_changes table_truncate test_connection tree_add_connection tree_add_folder
 tree_check_integrity tree_delete_connection tree_delete_folder tree_delete_query
 tree_diag tree_get_query tree_list_queries tree_load tree_move_connection
 tree_rename_folder tree_save tree_save_query tree_test_conn tree_update_connection
@@ -100,6 +102,10 @@ ASYNC_FUNCTIONS = {
     'db_explore_get_tables', 'db_explore_get_views', 'db_explore_get_procedures',
     'db_explore_get_proc_source', 'db_explore_get_proc_params', 'db_explore_test_proc', 'db_explore_drop_object', 'db_explore_compile_object',
     'execute_sql_query',
+    'execute_sql_batch',
+    'mysql_user_list', 'mysql_user_databases', 'mysql_user_tables', 'mysql_user_grants',
+    'mysql_user_apply_privileges', 'mysql_user_create',
+    'mysql_user_update_password', 'mysql_user_set_lock', 'mysql_user_delete',
 }
 
 

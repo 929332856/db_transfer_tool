@@ -185,6 +185,19 @@ function _saveTableScrollPosition(tabId) {
     };
 }
 
+function _bindTableScrollPosition(tabId, contentDiv) {
+    if (!tabId || !contentDiv || typeof _tableScrollStates === 'undefined') return;
+    var scrollWrap = contentDiv.querySelector('.data-table-scroll');
+    if (!scrollWrap || scrollWrap.getAttribute('data-scroll-state-tab') === tabId) return;
+    scrollWrap.setAttribute('data-scroll-state-tab', tabId);
+    scrollWrap.addEventListener('scroll', function() {
+        _tableScrollStates[tabId] = {
+            top: scrollWrap.scrollTop,
+            left: scrollWrap.scrollLeft
+        };
+    }, {passive: true});
+}
+
 function _restoreTableScrollPosition(tabId) {
     if (!tabId || typeof _tableScrollStates === 'undefined') return;
     var state = _tableScrollStates[tabId];
@@ -197,8 +210,10 @@ function _restoreTableScrollPosition(tabId) {
         scrollWrap.scrollTop = state.top || 0;
         scrollWrap.scrollLeft = state.left || 0;
     };
-    // 本地 render 也会重建 tbody，放到下一个任务中恢复，确保表格高度已经更新。
+    // 本地 render 也会重建 tbody，分几个时机恢复，确保表格高度更新后仍能回到原位置。
     setTimeout(apply, 0);
+    setTimeout(apply, 50);
+    setTimeout(apply, 150);
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(apply);
 }
 
@@ -731,6 +746,32 @@ function _doSaveQueryAndClose(qid, cid, db, qname, oldTabId) {
 }
 
 // ★ 内部关闭逻辑（不检查修改）
+// 数据表 Tab 的完整 DOM 缓存。切换大表时直接挂回原节点，避免重建数千个单元格。
+var _dataTabDomCache = {};
+
+function _cacheDataTabDom(tabId, contentDiv) {
+    if (!tabId || !contentDiv) return false;
+    var tab = objectTabs.find(function(t) { return t.id === tabId; });
+    if (!tab || (tab.type !== 'data' && tab.type !== 'redis')) return false;
+    _saveTableScrollPosition(tabId);
+    _bindTableScrollPosition(tabId, contentDiv);
+    var fragment = document.createDocumentFragment();
+    while (contentDiv.firstChild) fragment.appendChild(contentDiv.firstChild);
+    _dataTabDomCache[tabId] = fragment;
+    return true;
+}
+
+function _restoreDataTabDom(tabId, contentDiv) {
+    var fragment = _dataTabDomCache[tabId];
+    if (!fragment || !contentDiv) return false;
+    // obj_content 当前可能还挂着 home/其他 tab 的内容，必须先移除，
+    // 否则恢复表格时会把工具栏追加到对象列表下面。
+    while (contentDiv.firstChild) contentDiv.removeChild(contentDiv.firstChild);
+    contentDiv.appendChild(fragment);
+    delete _dataTabDomCache[tabId];
+    return true;
+}
+
 function _closeTabInternal(tabId, skipRender) {
     // ★ 关闭 tab 时强制隐藏 tab 悬浮提示（避免提示卡残留）
     _hideTabTip();
@@ -758,6 +799,7 @@ function _closeTabInternal(tabId, skipRender) {
     var tid2 = _tabIdToTid[tabId];
     if (tid2) { delete _whereStates[tid2]; delete _tabIdToTid[tabId]; }
     if (typeof _tableScrollStates !== 'undefined') delete _tableScrollStates[tabId];
+    delete _dataTabDomCache[tabId];
     // ★ 清理 redis tab 的编辑状态
     for (var i = 0; i < objectTabs.length; i++) {
         if (objectTabs[i].id === tabId && objectTabs[i].type === 'redis' && objectTabs[i].tid) {
@@ -782,8 +824,14 @@ function switchObjTab(tabId) {
     activeObjTab = tabId;
     // ★ 先保存 textarea 编辑状态（记录 _cachedSql/_cachedHtml）
     _saveCurrentTabState(oldId);
-    // ★ 再缓存 textarea/results DOM 元素（保留浏览器原生 undo 历史）
-    _cacheTextareas();
+    var oldTab = objectTabs.find(function(t){return t.id===oldId;});
+    var contentDiv = document.getElementById('obj_content');
+    // 数据表格直接缓存 DOM，避免切换大表时重建 tbody；查询编辑器继续保留原生撤销历史。
+    if (oldTab && (oldTab.type === 'data' || oldTab.type === 'redis')) {
+        _cacheDataTabDom(oldId, contentDiv);
+    } else {
+        _cacheTextareas();
+    }
     // 只更新 tab 栏 active 类，不重建 DOM
     var tabBar = document.getElementById('obj_tabs_bar');
     if (tabBar) {
@@ -794,14 +842,19 @@ function switchObjTab(tabId) {
         var searchWrap = tabBar.querySelector('.obj-search-wrap');
         if (searchWrap) searchWrap.style.display = (tabId === 'obj_home') ? '' : 'none';
     }
-    // 替换内容 + 重绑定
-    var contentDiv = document.getElementById('obj_content');
+    // 替换内容 + 重绑定；命中数据 Tab DOM 缓存时无需重新渲染。
     var at = objectTabs.find(function(t){return t.id===tabId;});
     if (contentDiv && at) {
-        contentDiv.innerHTML = at.content;
-        // ★ 恢复缓存的 textarea DOM 元素（保留浏览器原生 undo 历史）
-        _restoreTextareas(contentDiv);
-        _afterContentUpdate(at, contentDiv);
+        var restoredDataDom = (at.type === 'data' || at.type === 'redis') && _restoreDataTabDom(tabId, contentDiv);
+        if (restoredDataDom) {
+            _bindTableScrollPosition(tabId, contentDiv);
+            _restoreTableScrollPosition(tabId);
+        } else {
+            contentDiv.innerHTML = at.content;
+            // ★ 恢复缓存的 textarea DOM 元素（保留浏览器原生 undo 历史）
+            _restoreTextareas(contentDiv);
+            _afterContentUpdate(at, contentDiv);
+        }
     }
 }
 // ★ 保存当前 contentDiv 中所有 textarea/sql-editor 到缓存（保留 DOM 元素 + 原生 undo 历史）
@@ -901,6 +954,7 @@ function _afterContentUpdate(targetTab, contentDiv) {
             // ★ 只做本地 DOM 渲染，不触发服务端查询
             var renderLocalFn = window['_renderLocal_'+tid2];
             if (renderLocalFn) setTimeout(function(){ renderLocalFn(); }, 0);
+            _bindTableScrollPosition(targetTab.id, contentDiv);
             _restoreTableScrollPosition(targetTab.id);
             var bindSortFn = window['_bindSort_'+tid2];
             if (bindSortFn) setTimeout(function(){ bindSortFn(); }, 50);

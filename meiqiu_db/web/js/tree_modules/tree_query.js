@@ -247,6 +247,8 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
     }
     var sqlToExec = sel || _stripSqlComments(fullSql);
     var stmts = _smartSplitSQL(sqlToExec);
+    var policyEl = document.getElementById('sql_error_policy_' + qid);
+    var continueOnError = !!(policyEl && policyEl.value === 'continue');
 
     if (!stmts.length) { _resetExeBtnLate(qid, btnExe); return; }
 
@@ -318,7 +320,7 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
     esClear.editing = false;
     esClear._execJustStarted = true; // 标记刚清空，防止 _afterContentUpdate 恢复旧数据
     esClear._jobId = null;
-    esClear._showRowCount = 200;
+    esClear._showRowCount = getDefaultQueryPageSize();
     esClear._totalRows = 0;
     esClear._loadingAll = false;
     esClear._cancelLoadAll = false;
@@ -352,6 +354,59 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
 
     var execIdx = 0;
     var hasDDL = false;
+    var stoppedOnError = false;
+    var errorIndex = -1;
+
+    function finishExecution(meta) {
+        _execRunning[qid] = false;
+        _execCancelFlags[qid] = false;
+        var elapsed = Date.now() - (_execStartTime[qid] || 0);
+        var minDelay = Math.max(0, 300 - elapsed);
+        setTimeout(function() {
+            // 执行完成后短暂保留高亮，方便确认执行的是哪段 SQL。
+            setTimeout(function() { _clearExecHighlight(qid); }, 2000);
+            if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
+            if (resultsDiv) renderQueryResults(resultsDiv, allResults, stmts.length, stmts, meta || null);
+            if (hasDDL) { autoRefreshTreeTables(activeConnId, activeConnData, execDb, qDb); }
+        }, minDelay);
+    }
+
+    // 多条纯 INSERT 使用一次连接和一次批量事务，避免每条语句都重复建立连接、轮询和提交。
+    var isInsertBatch = stmts.length > 1 && stmts.every(function(stmt) {
+        return /^\s*INSERT\b/i.test(stmt);
+    });
+    if (isInsertBatch && typeof eel.execute_sql_batch === 'function') {
+        var batchData = {
+            src_host: activeConnData.host, src_port: activeConnData.port,
+            src_user: activeConnData.user, src_pwd: activeConnData.pwd,
+            src_db: execDb, db_type: activeConnData.db_type || 'mysql',
+            ora_mode: activeConnData.ora_mode || 'service_name',
+            page_size: getDefaultQueryPageSize()
+        };
+        if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 批量执行中（共 '+stmts.length+' 条）...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
+        eel.execute_sql_batch(stmts, batchData, continueOnError)(function(resp) {
+            function finishBatch(result) {
+                if (_execToken[qid] !== myToken || _execCancelFlags[qid]) return;
+                _execRunning[qid] = false;
+                _execCancelFlags[qid] = false;
+                setTimeout(function() { _clearExecHighlight(qid); }, 2000);
+                if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
+                if (resultsDiv) renderBatchSummary(resultsDiv, result || {ok:false, msg:'无响应'}, stmts.length);
+            }
+            if (resp && resp._async && resp._job_id) {
+                (function pollBatch() {
+                    if (_execToken[qid] !== myToken || _execCancelFlags[qid]) return;
+                    eel.poll_query_result(resp._job_id)(function(pollResult) {
+                        if (pollResult && pollResult._pending) setTimeout(pollBatch, 120);
+                        else finishBatch(pollResult || {ok:false, msg:'无响应'});
+                    });
+                })();
+            } else {
+                finishBatch(resp);
+            }
+        });
+        return;
+    }
 
     function execNext() {
         // ★ 令牌检测：新执行已启动，旧 chain 立即放弃
@@ -366,17 +421,7 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
             return;
         }
         if (execIdx >= stmts.length) {
-            _execRunning[qid] = false;
-            _execCancelFlags[qid] = false;
-            var elapsed = Date.now() - (_execStartTime[qid] || 0);
-            var minDelay = Math.max(0, 300 - elapsed);
-            setTimeout(function() {
-                // ★ 方案B：执行完成后 2 秒再移除高亮，让用户看清执行的是哪段 SQL
-                setTimeout(function() { _clearExecHighlight(qid); }, 2000);
-                if (btnExe) { btnExe.textContent = '▶ 执行'; btnExe.style.background = '#2ecc71'; }
-                if (resultsDiv) renderQueryResults(resultsDiv, allResults, stmts.length, stmts);
-                if (hasDDL) { autoRefreshTreeTables(activeConnId, activeConnData, execDb, qDb); }
-            }, minDelay);
+            finishExecution(null);
             return;
         }
         var i = execIdx;
@@ -388,7 +433,7 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
             return;
         }
         if (resultsDiv) resultsDiv.innerHTML = '<div style="padding:10px;color:#999;display:flex;align-items:center;gap:10px;"><span>⏳ 执行中 ('+(i+1)+'/'+stmts.length+')...</span><button class="btn btn-sm" style="background:#e74c3c;color:#fff;font-size:10px;padding:3px 10px;" onclick="cancelExecQuery(\''+qid+'\')">⏹ 取消</button></div>';
-        var data = {src_host:activeConnData.host, src_port:activeConnData.port, src_user:activeConnData.user, src_pwd:activeConnData.pwd, src_db:execDb, db_type:activeConnData.db_type||'mysql', ora_mode:activeConnData.ora_mode||'service_name'};
+        var data = {src_host:activeConnData.host, src_port:activeConnData.port, src_user:activeConnData.user, src_pwd:activeConnData.pwd, src_db:execDb, db_type:activeConnData.db_type||'mysql', ora_mode:activeConnData.ora_mode||'service_name', page_size:getDefaultQueryPageSize()};
         eel.execute_sql_query(clean, data)(function(resp){
             // ★ 令牌检测：异步回调返回时，确认仍是当前执行
             if (_execToken[qid] !== myToken) return;
@@ -401,6 +446,16 @@ function _execQueryWithSql(qid, fullSql, myToken, curTabSync, ta, resultsDiv, bt
                     hasDDL = true;
                 }
                 execIdx++;
+                if (result && !result.ok && !continueOnError) {
+                    stoppedOnError = true;
+                    errorIndex = i;
+                    finishExecution({
+                        stoppedOnError: true,
+                        errorIndex: errorIndex,
+                        remainingCount: Math.max(0, stmts.length - execIdx)
+                    });
+                    return;
+                }
                 execNext();
             }
 
@@ -486,7 +541,7 @@ function closeQueryResults(qid) {
     es._multiSelected = [];
     es._multiStmts = [];
     es._jobId = null;
-    es._showRowCount = 200;
+    es._showRowCount = getDefaultQueryPageSize();
     es._loadingAll = false;
     es._cancelLoadAll = false;
     es._totalRows = 0;
@@ -507,7 +562,7 @@ function _changeRowCount(qid) {
         return;
     }
 
-    var count = parseInt(val) || 200;
+    var count = parseInt(val) || getDefaultQueryPageSize();
     es._showRowCount = count;
     es._loadingAll = false;
     es._cancelLoadAll = false;
@@ -631,7 +686,7 @@ function _renderRowControls(qid) {
     var es = _qState(qid);
     var total = es._totalRows || es.rows.length;
     var loaded = es.rows.length;
-    var showCount = es._showRowCount || 200;
+    var showCount = es._showRowCount || getDefaultQueryPageSize();
     var isLoadingAll = es._loadingAll;
 
     if (isLoadingAll) {
@@ -650,7 +705,7 @@ function _renderRowControls(qid) {
 
     html += '<span>展示:</span>';
     html += '<select class="qr-pagbar-sel" id="' + qid + '_rowcount_sel" onchange="_changeRowCount(\x27' + qid + '\x27)">';
-    var rowOptions = [200, 500, 1000, 2000, 5000];
+    var rowOptions = getDataPageSizeOptions();
     var selVal = showCount;
     for (var rj = 0; rj < rowOptions.length; rj++) {
         var optVal = rowOptions[rj];
@@ -703,7 +758,7 @@ function _vtRenderBody(qid) {
     var es = _qState(qid);
     var tbody = document.getElementById(qid + '_vtbody');
     if (!tbody) return;
-    var maxShow = Math.min(es.rows.length, es._showRowCount || 200, es._totalRows || 999999);
+    var maxShow = Math.min(es.rows.length, es._showRowCount || getDefaultQueryPageSize(), es._totalRows || 999999);
     if (maxShow === 0) return;
     var wrapper = document.getElementById(qid + '_vtwrap');
     var scrollTop = wrapper ? wrapper.scrollTop : 0;
@@ -827,7 +882,7 @@ var _queryEditStates = {};
 /** 获取查询结果编辑状态 */
 function _qState(qid) {
     if (!_queryEditStates[qid]) {
-        _queryEditStates[qid] = { columns: [], rows: [], changedCells: {}, selectedRows: {}, editing: false, connData: null, execDb: '', _colComments: {}, _colTypes: {}, _lastClickedIdx: -1, server_ms: undefined, _lastResult: null, _multiResults: [], _jobId: null, _showRowCount: 200, _totalRows: 0, _loadingAll: false, _cancelLoadAll: false };
+        _queryEditStates[qid] = { columns: [], rows: [], changedCells: {}, selectedRows: {}, editing: false, connData: null, execDb: '', _colComments: {}, _colTypes: {}, _lastClickedIdx: -1, server_ms: undefined, _lastResult: null, _multiResults: [], _jobId: null, _showRowCount: getDefaultQueryPageSize(), _totalRows: 0, _loadingAll: false, _cancelLoadAll: false };
     }
     return _queryEditStates[qid];
 }
@@ -1327,7 +1382,7 @@ function _qRefreshData(qid, tabIdx) {
         var pane = resultsDiv.querySelector('.result-tab-pane[data-ri="'+tabIdx+'"]');
         if (pane) pane.innerHTML = '<div style="padding:10px;color:#999;">🔄 正在刷新...</div>';
         var data = {src_host:es.connData.host, src_port:es.connData.port, src_user:es.connData.user,
-            src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql', ora_mode:es.connData.ora_mode||'service_name'};
+            src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql', ora_mode:es.connData.ora_mode||'service_name', page_size:getDefaultQueryPageSize()};
         // ★ execute_sql_query 是异步的，需要轮询获取结果
         eel.execute_sql_query(stmt, data)(function(resp){
             function handleRefreshSingle(result) {
@@ -1394,7 +1449,7 @@ function _qRefreshData(qid, tabIdx) {
         if (!clean) { allResults[i] = null; refIdx++; execNextRefresh(); return; }
         resultsDiv.innerHTML = '<div style="padding:10px;color:#999;">🔄 正在刷新 ('+(i+1)+'/'+stmts.length+')...</div>';
         var data = {src_host:es.connData.host, src_port:es.connData.port, src_user:es.connData.user,
-            src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql', ora_mode:es.connData.ora_mode||'service_name'};
+            src_pwd:es.connData.pwd, src_db:es.execDb, db_type:es.connData.db_type||'mysql', ora_mode:es.connData.ora_mode||'service_name', page_size:getDefaultQueryPageSize()};
         // ★ execute_sql_query 现在是异步的，需要轮询获取结果
         eel.execute_sql_query(clean, data)(function(resp){
             if (resp && resp._async && resp._job_id) {
@@ -1504,7 +1559,7 @@ function _qRenderTable(qid) {
     html += '<div class="qr-stats-bar" style="padding:6px 12px;font-size:11px;">📊 查询结果 — ' + rc + ' 行'+_fmtExecTimeHtml(es._lastResult)+'</div>';
 
     // ★ 超过500行启用虚拟滚动：只渲染屏幕上可见的30-50行DOM，滚动流畅不卡死
-    var maxShow = Math.min(es.rows.length, es._showRowCount || 200);
+    var maxShow = Math.min(es.rows.length, es._showRowCount || getDefaultQueryPageSize());
     var needVT = (maxShow > _VT_THRESHOLD);
     var ROW_H = _VT_ROW_H;
 
@@ -1576,9 +1631,69 @@ function _qRenderTable(qid) {
     setTimeout(function(){ _initResultColResize(div, qid); }, 50);
 }
 
-function renderQueryResults(div, results, total, stmtsArr) {
+/** 批量 INSERT 的紧凑汇总，不创建数百个结果 Tab。 */
+function renderBatchSummary(div, result, totalStatements) {
+    result = result || {};
+    var attempted = Number(result.attempted || 0);
+    var success = Number(result.success_count || 0);
+    var failed = Number(result.failed_count || 0);
+    var affected = Number(result.total_affected || 0);
+    var remaining = Number(result.remaining_count || Math.max(0, totalStatements - attempted));
+    var stopped = !!result.stopped_on_error;
+    var color = failed ? '#f39c12' : '#2ecc71';
+    var html = '<div class="sql-batch-summary" style="padding:14px 16px;color:'+color+';overflow:hidden;">';
+    html += '<div style="font-size:13px;font-weight:bold;">'+(failed ? (stopped ? '⚠ 批量执行已停止' : '⚠ 批量执行完成，但有失败') : '✅ 批量执行完成')+'</div>';
+    html += '<div style="margin-top:8px;color:var(--text-primary);line-height:1.8;">';
+    html += '共 '+totalStatements+' 条，已执行 '+attempted+' 条；成功 <b>'+success+'</b> 条，失败 <b>'+failed+'</b> 条；共影响 <b>'+affected+'</b> 行';
+    if (remaining > 0) html += '；后续未执行 <b>'+remaining+'</b> 条';
+    if (result.server_ms !== undefined) html += '；耗时 '+_fmtExecTime(result.server_ms);
+    html += '</div>';
+    if (result.msg) html += '<div style="margin-top:6px;color:#999;font-size:11px;word-break:break-word;">'+escapeHtml(result.msg)+'</div>';
+    if (result.errors && result.errors.length) {
+        html += '<div style="margin-top:10px;color:#e74c3c;font-size:11px;">错误明细：</div><div style="margin-top:4px;line-height:1.7;max-height:180px;overflow:auto;">';
+        result.errors.forEach(function(err) {
+            html += '<div>第 '+(Number(err.index || 0)+1)+' 条：'+escapeHtml(err.msg || '执行失败')+'</div>';
+        });
+        html += '</div>';
+    }
+    html += '</div>';
+    div.innerHTML = html;
+}
+
+/** 普通多条写入语句的汇总，避免结果 Tab 栏产生横向滚动条。 */
+function renderWriteBatchSummary(div, results, totalStatements, meta) {
+    results = results || [];
+    var attempted = results.filter(function(r){ return !!r; }).length;
+    var success = results.filter(function(r){ return r && r.ok; }).length;
+    var failedResults = results.filter(function(r){ return r && !r.ok; });
+    var failed = failedResults.length;
+    var affected = results.reduce(function(sum, r) {
+        return sum + (r && r.ok ? Number(r.total || r.affected || 0) : 0);
+    }, 0);
+    var remaining = meta && meta.remainingCount !== undefined ? Number(meta.remainingCount) : Math.max(0, totalStatements - attempted);
+    var stopped = !!(meta && meta.stoppedOnError);
+    var color = failed ? '#f39c12' : '#2ecc71';
+    var html = '<div class="sql-batch-summary" style="padding:14px 16px;color:'+color+';overflow:hidden;">';
+    html += '<div style="font-size:13px;font-weight:bold;">'+(failed ? (stopped ? '⚠ 执行已停止' : '⚠ 执行完成，但有失败') : '✅ 执行完成')+'</div>';
+    html += '<div style="margin-top:8px;color:var(--text-primary);line-height:1.8;">共 '+totalStatements+' 条，已执行 '+attempted+' 条；成功 <b>'+success+'</b> 条，失败 <b>'+failed+'</b> 条；共影响 <b>'+affected+'</b> 行';
+    if (remaining > 0) html += '；后续未执行 <b>'+remaining+'</b> 条';
+    html += '</div>';
+    if (failedResults.length) {
+        html += '<div style="margin-top:10px;color:#e74c3c;font-size:11px;">错误明细：</div><div style="margin-top:4px;line-height:1.7;max-height:180px;overflow:auto;">';
+        results.forEach(function(err, errIdx) {
+            if (!err || err.ok) return;
+            html += '<div>第 '+(Number(err.index !== undefined ? err.index : errIdx)+1)+' 条：'+escapeHtml(err.msg || '执行失败')+'</div>';
+        });
+        html += '</div>';
+    }
+    html += '</div>';
+    div.innerHTML = html;
+}
+
+function renderQueryResults(div, results, total, stmtsArr, meta) {
     var qid = div.id.replace(/^qr_/, '');
     var es = _qState(qid);
+    es._showRowCount = getDefaultQueryPageSize();
     es.connData = activeConnData ? JSON.parse(JSON.stringify(activeConnData)) : null;
     // 确定执行的数据库
     var curTab = objectTabs.find(function(t){return t.id==='query_'+qid;});
@@ -1593,6 +1708,15 @@ function renderQueryResults(div, results, total, stmtsArr) {
     es._executedStmts = stmtsArr || [];
     // ★ 清除"刚执行"标记（结果已到达，允许渲染）
     es._execJustStarted = false;
+
+    // 多条写入语句不创建横向滚动的结果 Tab，直接显示汇总和错误明细。
+    var writeOnly = total > 1 && (stmtsArr || []).every(function(stmt) {
+        return /^\s*(INSERT|UPDATE|DELETE|REPLACE|TRUNCATE)\b/i.test(stmt || '');
+    });
+    if (writeOnly) {
+        renderWriteBatchSummary(div, results, total, meta);
+        return;
+    }
 
     // 只有一个结果时直接展示（支持编辑）
     if (total <= 1) {
@@ -1611,7 +1735,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
             // 行数元数据（后端返回首屏200行，其余按需加载）
             es._jobId = r0._job_id || null;
             es._totalRows = r0.total || 0;
-            es._showRowCount = Math.min(r0.page_size || 200, r0.total || 0);
+            es._showRowCount = Math.min(r0.page_size || getDefaultQueryPageSize(), r0.total || 0);
             es._loadingAll = false;
             es._cancelLoadAll = false;
             var rc = r0.total || 0;
@@ -1665,7 +1789,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
                 });
                 html += '</tr></thead><tbody>';
 
-                var maxShow = Math.min(es.rows.length, 200);
+                var maxShow = Math.min(es.rows.length, es._showRowCount || getDefaultQueryPageSize());
                 for (var i = 0; i < maxShow; i++) {
                     var row = es.rows[i];
                     var isSel = !!es.selectedRows[i];
@@ -1791,7 +1915,7 @@ function renderQueryResults(div, results, total, stmtsArr) {
                 tabBody += '<th class="row-sel-header" id="'+qid+'_mqsel_all_'+i2+'" onclick="_qToggleSelAllMulti(\''+qid+'\','+i2+')" title="全选/取消全选">#</th>';
                 cols2.forEach(function(c){ tabBody += '<th>'+escapeHtml(c)+'</th>'; });
                 tabBody += '</tr></thead><tbody>';
-                var mMax = Math.min(rows2.length, es._showRowCount || 200);
+                var mMax = Math.min(rows2.length, es._showRowCount || getDefaultQueryPageSize());
                 for (var mi = 0; mi < mMax; mi++) {
                     var mr = rows2[mi];
                     var isSel = !!es._multiSelected[i2][mi];

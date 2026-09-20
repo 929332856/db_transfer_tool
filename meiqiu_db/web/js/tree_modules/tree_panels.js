@@ -21,10 +21,294 @@ function showPanel(name) {
 }
 
 // ==================== 我的连接列表 ====================
-function renderMyConnectionsList() {
+var _myConnSearchKw = '';
+var _myConnSearchTimer = null;
+var _myConnSearchSeq = 0;
+var _myConnTableCache = {};
+
+function toggleConnSidebar() {
+    var panel = document.getElementById('split_left_panel');
+    var button = document.getElementById('conn_sidebar_toggle');
+    if (!panel) return;
+    var collapsed = panel.classList.toggle('conn-sidebar-collapsed');
+    if (button) {
+        button.title = collapsed ? '展开侧边栏' : '折叠侧边栏';
+        button.setAttribute('aria-label', button.title);
+        var icon = button.querySelector('span');
+        if (icon) icon.textContent = collapsed ? '»' : '«';
+    }
+    try { localStorage.setItem('conn_sidebar_collapsed', collapsed ? '1' : '0'); } catch (ignore) {}
+}
+
+function _myConnDirectChildren(node) {
+    var children = node ? node.children : [];
+    for (var i = 0; i < children.length; i++) {
+        if (children[i].classList && children[i].classList.contains('tree-children')) return children[i];
+    }
+    return null;
+}
+
+function _myConnNodeIsUnderOpenConnection(node) {
+    var parent = node && node.parentElement;
+    while (parent && parent.id !== 'my_conn_list') {
+        if (parent.classList && parent.classList.contains('tree-children')) return parent.classList.contains('open');
+        parent = parent.parentElement;
+    }
+    return false;
+}
+
+function _getOpenTableSearchTargets() {
+    var targets = [], seen = {};
+    function add(node, cid, db, schema, label, requireOpenChildren) {
+        if (!node || !cid || !db || !_myConnNodeIsUnderOpenConnection(node)) return;
+        var children = _myConnDirectChildren(node);
+        if (requireOpenChildren !== false && (!children || !children.classList.contains('open'))) return;
+        var key = cid + '\0' + db + '\0' + (schema || '');
+        if (seen[key]) return;
+        seen[key] = true;
+        targets.push({
+            cid: cid,
+            db: db,
+            schema: schema || '',
+            connName: (treeData.connections[cid] && treeData.connections[cid].name) || cid,
+            dbName: db,
+            label: label || db
+        });
+    }
+    document.querySelectorAll('#my_conn_list .db-node[data-cid][data-db]').forEach(function(node) {
+        var cid = node.getAttribute('data-cid');
+        var db = node.getAttribute('data-db');
+        var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
+        if (conn && conn.db_type !== 'redis' &&
+            (conn.db_type !== 'postgresql' || !node.querySelector('.pg-schema-node'))) {
+            add(node, cid, db, '', (conn.name || cid) + ' / ' + db);
+        }
+    });
+    document.querySelectorAll('#my_conn_list .ora-schema-node[data-cid][data-schema]').forEach(function(node) {
+        var cid = node.getAttribute('data-cid');
+        var schema = node.getAttribute('data-schema');
+        var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
+        if (conn) add(node, cid, schema, '', (conn.name || cid) + ' / ' + schema);
+    });
+    document.querySelectorAll('#my_conn_list .pg-schema-node[data-cid][data-db][data-schema]').forEach(function(node) {
+        var cid = node.getAttribute('data-cid');
+        var db = node.getAttribute('data-db');
+        var schema = node.getAttribute('data-schema');
+        var conn = treeData && treeData.connections ? treeData.connections[cid] : null;
+        if (conn) add(node, cid, db, schema, (conn.name || cid) + ' / ' + db + ' / ' + schema, false);
+    });
+    return targets;
+}
+
+function _loadTableSearchTarget(target, callback) {
+    var key = target.cid + '\0' + target.db + '\0' + target.schema;
+    if (Object.prototype.hasOwnProperty.call(_myConnTableCache, key)) {
+        callback(_myConnTableCache[key]);
+        return;
+    }
+    var conn = treeData && treeData.connections ? treeData.connections[target.cid] : null;
+    if (!conn || typeof loadCategoryItems !== 'function') { callback([]); return; }
+    loadCategoryItems(conn, target.db, 'tables', function(items) {
+        _myConnTableCache[key] = items || [];
+        callback(_myConnTableCache[key]);
+    }, target.schema);
+}
+
+function _renderMyConnTableSearchResults(keyword, results, targetCount) {
+    var box = document.getElementById('my_conn_search_results');
+    if (!box) return;
+    if (!results.length) {
+        box.innerHTML = '<div class="my-conn-search-status">未找到匹配的表（已搜索 '+targetCount+' 个打开的数据库）</div>';
+        return;
+    }
+    // 异步查询返回顺序不固定，先排序，保证多个连接/数据库的结果稳定、完整地展示。
+    results.sort(function(a, b) {
+        return (a.connName || '').localeCompare(b.connName || '') ||
+            (a.db || '').localeCompare(b.db || '') ||
+            (a.schema || '').localeCompare(b.schema || '') ||
+            a.name.localeCompare(b.name);
+    });
+    var groups = {};
+    results.forEach(function(item) {
+        var key = item.cid + '\0' + item.db + '\0' + item.schema;
+        if (!groups[key]) groups[key] = {
+            label: item.label,
+            connName: item.connName,
+            db: item.db,
+            schema: item.schema,
+            cid: item.cid,
+            tables: []
+        };
+        groups[key].tables.push(item.name);
+    });
+    var html = '<div class="my-conn-search-status">找到 '+results.length+' 张表</div>';
+    Object.keys(groups).forEach(function(key) {
+        var group = groups[key];
+        var location = '连接：' + group.connName + '  /  数据库：' + group.db;
+        if (group.schema) location += '  /  Schema：' + group.schema;
+        html += '<div class="my-conn-search-group"><div class="my-conn-search-group-title">'+escapeHtml(location)+'</div>';
+        group.tables.forEach(function(name) {
+            if (typeof _renderTableNode === 'function') {
+                html += _renderTableNode(name, 18, (window.MQ_ICON && window.MQ_ICON.table) || '📊', group.db, group.schema, group.cid, group.schema || group.db);
+            }
+        });
+        html += '</div>';
+    });
+    box.innerHTML = html;
+}
+
+function _searchOpenDatabaseTables(keyword, seq) {
+    var box = document.getElementById('my_conn_search_results');
+    if (!box) return;
+    var targets = _getOpenTableSearchTargets();
+    if (!targets.length) {
+        box.innerHTML = '<div class="my-conn-search-status">请先展开连接并打开数据库，再搜索表名</div>';
+        return;
+    }
+    box.innerHTML = '<div class="my-conn-search-status">正在搜索 '+targets.length+' 个打开的数据库...</div>';
+    var results = [], pending = targets.length;
+    targets.forEach(function(target) {
+        _loadTableSearchTarget(target, function(items) {
+            if (seq !== _myConnSearchSeq) return;
+            (items || []).forEach(function(item) {
+                var name = item && item.name ? item.name : item;
+                if (name && String(name).toLowerCase().indexOf(keyword) !== -1) {
+                    results.push({
+                        name: String(name),
+                        cid: target.cid,
+                        db: target.db,
+                        schema: target.schema,
+                        label: target.label,
+                        connName: target.connName,
+                        dbName: target.dbName
+                    });
+                }
+            });
+            pending--;
+            if (!pending) _renderMyConnTableSearchResults(keyword, results, targets.length);
+        });
+    });
+}
+
+function filterMyConnections(value) {
+    _myConnSearchKw = String(value || '').trim().toLowerCase();
+    var list = document.getElementById('my_conn_list');
+    var results = document.getElementById('my_conn_search_results');
+    if (!list || !results) return;
+    if (_myConnSearchTimer) clearTimeout(_myConnSearchTimer);
+    var seq = ++_myConnSearchSeq;
+    if (!_myConnSearchKw) {
+        list.style.display = '';
+        results.style.display = 'none';
+        results.innerHTML = '';
+        return;
+    }
+    list.style.display = 'none';
+    results.style.display = 'block';
+    results.innerHTML = '<div class="my-conn-search-status">准备搜索已打开数据库...</div>';
+    _myConnSearchTimer = setTimeout(function() { _searchOpenDatabaseTables(_myConnSearchKw, seq); }, 180);
+}
+
+function clearMyConnectionsSearch() {
+    var input = document.getElementById('my_conn_search');
+    if (input) input.value = '';
+    filterMyConnections('');
+    if (input) input.focus();
+}
+
+// 刷新连接列表前保存左侧树状态。连接列表会整体重建，单纯保存 open
+// 标记不够，还需要保留已经加载的数据库/分类/表节点 HTML。
+function _captureMyConnectionsTreeState() {
+    var list = document.getElementById('my_conn_list');
+    var state = { folders: {}, connections: {} };
+    if (!list) return state;
+
+    list.querySelectorAll('.tree-node[data-fid]').forEach(function(node) {
+        var fid = node.getAttribute('data-fid');
+        var children = _myConnDirectChildren(node);
+        var row = null;
+        for (var i = 0; i < node.children.length; i++) {
+            if (node.children[i].classList && node.children[i].classList.contains('folder-row')) {
+                row = node.children[i];
+                break;
+            }
+        }
+        var arrow = row ? row.querySelector('.arrow') : null;
+        if (fid) state.folders[fid] = {
+            open: !!(children && children.classList.contains('open')),
+            arrowText: arrow ? arrow.textContent : '',
+            arrowVisibility: arrow ? arrow.style.visibility : '',
+            highlighted: !!(row && row.classList.contains('tree-highlight'))
+        };
+    });
+
+    list.querySelectorAll('.tree-node > .conn-row').forEach(function(row) {
+        var node = row.parentElement;
+        var cid = node && node.getAttribute('data-cid');
+        var children = _myConnDirectChildren(node);
+        var arrow = row.querySelector('.arrow');
+        var icon = row.querySelector('.db-icon');
+        if (!cid) return;
+        state.connections[cid] = {
+            open: !!(children && children.classList.contains('open')),
+            childrenClassName: children ? children.className : 'tree-children',
+            childrenHtml: children ? children.innerHTML : '',
+            arrowText: arrow ? arrow.textContent : '',
+            arrowVisibility: arrow ? arrow.style.visibility : '',
+            iconClassName: icon ? icon.className : '',
+            highlighted: row.classList.contains('tree-highlight')
+        };
+    });
+    return state;
+}
+
+function _restoreMyConnectionsTreeState(state) {
+    if (!state) return;
+    Object.keys(state.folders || {}).forEach(function(fid) {
+        var saved = state.folders[fid];
+        var node = document.querySelector('#my_conn_list .tree-node[data-fid="' + fid + '"]');
+        if (!node) return;
+        var children = document.getElementById('mc_' + fid);
+        var row = node.querySelector('.folder-row');
+        var arrow = document.getElementById('ma_' + fid);
+        if (children) children.classList.toggle('open', saved.open);
+        if (arrow) {
+            if (saved.arrowText) arrow.textContent = saved.arrowText;
+            arrow.style.visibility = saved.arrowVisibility || '';
+        }
+        if (row) row.classList.toggle('tree-highlight', saved.highlighted);
+    });
+
+    Object.keys(state.connections || {}).forEach(function(cid) {
+        var saved = state.connections[cid];
+        var node = document.querySelector('#my_conn_list .tree-node[data-cid="' + cid + '"]');
+        if (!node) return;
+        var row = node.querySelector(':scope > .conn-row');
+        var children = document.getElementById('mc_c_' + cid);
+        var arrow = document.getElementById('ma_c_' + cid);
+        var icon = row ? row.querySelector('.db-icon') : null;
+        if (children) {
+            children.className = saved.childrenClassName || 'tree-children';
+            children.innerHTML = saved.childrenHtml || '';
+        }
+        if (arrow) {
+            if (saved.arrowText) arrow.textContent = saved.arrowText;
+            arrow.style.visibility = saved.arrowVisibility || '';
+        }
+        if (icon && saved.iconClassName) icon.className = saved.iconClassName;
+        if (row) row.classList.toggle('tree-highlight', saved.highlighted);
+    });
+}
+
+function renderMyConnectionsList(treeState) {
     if (!treeData) { console.warn('[tree.js] renderMyConnectionsList: treeData 为空，跳过渲染'); return; }
     var list = document.getElementById('my_conn_list');
     if (!list) { console.warn('[tree.js] renderMyConnectionsList: #my_conn_list 不存在'); return; }
+    var sidebar = document.getElementById('split_left_panel');
+    try {
+        var shouldCollapse = localStorage.getItem('conn_sidebar_collapsed') === '1';
+        if (sidebar && sidebar.classList.contains('conn-sidebar-collapsed') !== shouldCollapse) toggleConnSidebar();
+    } catch (ignore) {}
     var html = '';
     try {
         var rootFolders = (treeData.folders || []).filter(function (f) { return !f.parent; });
@@ -37,7 +321,9 @@ function renderMyConnectionsList() {
         console.error('[tree.js] 渲染连接列表异常:', err.message || err);
         list.innerHTML = '<div style="padding:20px;color:#e74c3c;">❌ 渲染连接列表时出错，请刷新页面重试</div>';
     }
+    _restoreMyConnectionsTreeState(treeState);
     // 根区域作为 drop 目标（拖连接移出文件夹）
+    if (_myConnSearchKw) filterMyConnections(_myConnSearchKw);
     list.ondragover = onConnRootDragOver;
     list.ondragleave = onConnRootDragLeave;
     list.ondrop = onConnRootDrop;
@@ -68,6 +354,17 @@ function getConnectionsByFolder(pid) {
     for (var k in treeData.connections) {
         if ((treeData.connections[k].parent || '') === pid) r.push(treeData.connections[k]);
     }
+    // 启动加载及每次重绘都按连接名称排序，避免对象键顺序影响左侧树的显示顺序。
+    r.sort(function (a, b) {
+        var nameA = String((a && a.name) || '').trim();
+        var nameB = String((b && b.name) || '').trim();
+        var result = nameA.localeCompare(nameB, 'zh-CN', {
+            numeric: true,
+            sensitivity: 'base'
+        });
+        // 同名时使用 ID 保证顺序稳定。
+        return result || String((a && a.id) || '').localeCompare(String((b && b.id) || ''));
+    });
     return r;
 }
 
@@ -97,6 +394,16 @@ function renderConn(c, indent) {
         '<span class="my-conn-icon db-icon closed">'+icon+'</span><span class="my-conn-name">'+escapeHtml(c.name)+colorDot+'</span>' +
         '</div>' +
         '<div class="tree-children" id="mc_c_'+cid+'"></div></div>';
+}
+
+// MySQL 连接级功能：用户与权限不属于某一个具体数据库，放在数据库列表之后。
+function renderConnUsersNode(cid, pad, conn) {
+    conn = conn || (treeData && treeData.connections ? treeData.connections[cid] : null);
+    if (!conn || (conn.db_type !== 'mysql' && conn.db_type !== 'ob-mysql')) return '';
+    return '<div class="my-conn-row conn-users-node" style="padding-left:'+(pad+20)+'px" ' +
+        'onclick="clickUsersPrivileges(\''+escapeAttr(cid)+'\');highlightRow(this)" ' +
+        'title="查看用户、授权、密码和账户状态">' +
+        '<span class="my-conn-icon">♙</span><span class="my-conn-name">用户与权限</span></div>';
 }
 
 /** 把 hex 颜色转成"行背景 + 文本不透明"的样式（深色主题 18% 透明，浅色主题 12%） */
@@ -227,6 +534,7 @@ function expandConn(cid, pad) {
                         '<div class="tree-children" id="'+dbId+'">' + renderDbCats(cid, db, pad+40) + '</div></div>';
                 }
             });
+            html += renderConnUsersNode(cid, pad, conn);
         }
         children.innerHTML = html || '<div style="padding-left:'+(pad+20)+'px;color:#999;font-size:11px;">（无数据库）</div>';
     });

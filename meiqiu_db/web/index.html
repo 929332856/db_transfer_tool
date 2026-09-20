@@ -71,11 +71,27 @@
                 <div class="split-view">
                     <div class="split-left" id="split_left_panel">
                         <div class="my-conn-header">
+                            <div class="conn-header-actions" aria-label="连接工具栏">
+                                <button type="button" class="conn-action-btn" onclick="showDgImportDialog()" title="导入连接" aria-label="导入连接"><span aria-hidden="true">⇩</span></button>
+                                <button type="button" class="conn-action-btn" onclick="exportConnections()" title="导出连接" aria-label="导出连接"><span aria-hidden="true">⇧</span></button>
+                                <button type="button" class="conn-action-btn" onclick="addFolder('')" title="新建分组" aria-label="新建分组"><span aria-hidden="true">⊞</span></button>
+                                <button type="button" class="conn-action-btn" onclick="showConnDialog('')" title="新建连接" aria-label="新建连接"><span aria-hidden="true">＋</span></button>
+                                <button type="button" class="conn-action-btn" onclick="refreshAll()" title="刷新连接" aria-label="刷新连接"><span aria-hidden="true">↻</span></button>
+                                <button type="button" class="conn-action-btn conn-action-collapse" id="conn_sidebar_toggle" onclick="toggleConnSidebar()" title="折叠侧边栏" aria-label="折叠侧边栏"><span aria-hidden="true">«</span></button>
+                            </div>
                             <span class="my-conn-title">📁 我的连接</span>
                             <button class="btn btn-sm" onclick="addFolder('')">📂 新建文件夹</button>
                             <button class="btn btn-sm btn-green" onclick="showConnDialog('')">🔗 新建连接</button>
                         </div>
+                        <div class="my-conn-search-row">
+                            <div class="my-conn-search-box">
+                                <span class="my-conn-search-icon" aria-hidden="true">⌕</span>
+                                <input id="my_conn_search" type="search" placeholder="搜索..." autocomplete="off" oninput="filterMyConnections(this.value)">
+                            </div>
+                            <button type="button" class="conn-search-clear" onclick="clearMyConnectionsSearch()" title="清空搜索" aria-label="清空搜索">×</button>
+                        </div>
                         <div class="my-conn-list" id="my_conn_list"></div>
+                        <div class="my-conn-search-results" id="my_conn_search_results"></div>
                     </div>
                     <div class="conn-splitter" id="conn_splitter" title="拖拽调整宽度"></div>
                     <div class="split-mid" id="object_panel">
@@ -463,6 +479,7 @@
     <script src="js/tree_modules/tree_dom.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_drag.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_manage.js" charset="utf-8"></script>
+    <script src="js/tree_modules/tree_users.js" charset="utf-8"></script>
     <script src="js/tree_modules/tree_redis.js" charset="utf-8"></script>
     <script src="js/tree.js" charset="utf-8"></script>
     <script src="js/tree_init.js" charset="utf-8"></script>

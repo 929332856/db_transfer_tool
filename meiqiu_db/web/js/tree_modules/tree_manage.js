@@ -4,13 +4,27 @@ function showCtxMenu(x, y, items) {
     hideCtxMenu();
     ctxMenu = document.createElement('div');
     ctxMenu.className = 'tree-ctx-menu show';
-    ctxMenu.style.left = x + 'px'; ctxMenu.style.top = y + 'px';
     items.forEach(function (it) {
         if (it === '---') { var s = document.createElement('div'); s.className = 'ctx-sep'; ctxMenu.appendChild(s); }
         else { var el = document.createElement('div'); el.className = 'ctx-item'; el.textContent = it.label;
             el.onclick = function () { hideCtxMenu(); if (it.action) it.action(); }; ctxMenu.appendChild(el); }
     });
     document.body.appendChild(ctxMenu);
+
+    // 菜单靠近窗口底部时，向下展开会把最后几个操作（如“删除表”）裁掉。
+    // 先挂到 body 测量实际尺寸，再按视口边界自动向上/向左调整位置。
+    var gap = 4;
+    var viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    var viewportHeight = document.documentElement.clientHeight || window.innerHeight;
+    ctxMenu.style.maxHeight = Math.max(80, viewportHeight - gap * 2) + 'px';
+    ctxMenu.style.overflowY = 'auto';
+    var rect = ctxMenu.getBoundingClientRect();
+    var left = Math.max(gap, Math.min(Number(x) || 0, viewportWidth - rect.width - gap));
+    var top = Number(y) || 0;
+    if (top + rect.height > viewportHeight - gap) top = top - rect.height;
+    top = Math.max(gap, Math.min(top, viewportHeight - rect.height - gap));
+    ctxMenu.style.left = left + 'px';
+    ctxMenu.style.top = top + 'px';
 }
 function hideCtxMenu() { if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; } }
 document.addEventListener('click', function () { hideCtxMenu(); });
@@ -779,10 +793,35 @@ function loadTree() {
         console.error('[tree.js] loadTree 调用 eel.tree_load 失败:', err.message || err);
     }
 }
+function exportConnections() {
+    if (!treeData) return;
+    var payload = {
+        format: 'meiqiu-db-connections',
+        version: 1,
+        exported_at: new Date().toISOString(),
+        folders: treeData.folders || [],
+        connections: treeData.connections || {}
+    };
+    var blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json;charset=utf-8'});
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    var stamp = new Date().toISOString().replace(/[T:]/g, '-').slice(0, 19);
+    link.href = url;
+    link.download = 'meiqiu-connections-' + stamp + '.json';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 0);
+}
+
 function refreshAll() {
+    if (typeof _myConnTableCache !== 'undefined') _myConnTableCache = {};
+    // renderMyConnectionsList 会重建整棵树，先保存用户当前的展开/选中状态。
+    var treeState = typeof _captureMyConnectionsTreeState === 'function'
+        ? _captureMyConnectionsTreeState() : null;
     eel.tree_load()(function (data) {
         treeData = data || { folders: [], connections: {} };
         var el = document.getElementById('my_conn_list');
-        if (el && treeData) renderMyConnectionsList();
+        if (el && treeData) renderMyConnectionsList(treeState);
     });
 }

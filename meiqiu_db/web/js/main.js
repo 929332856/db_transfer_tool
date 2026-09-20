@@ -62,6 +62,11 @@ function showModal(icon, title, msg, iconColor, btns) {
         });
     }
     $('modal_btns').innerHTML = btns;
+    // Generic modal callers often provide a standard cancel button without
+    // an inline handler. Give it a default close action; callers such as
+    // showConfirmDialog can still replace this handler with their callback.
+    var cancelBtn = $('modal_cancel_btn');
+    if (cancelBtn) cancelBtn.onclick = function () { hideModal(); };
     $('modal_overlay').classList.add('show');
 }
 function hideModal() {
@@ -2989,8 +2994,29 @@ function onDgLocalFileSelected(e) {
 }
 
 // ========== 选项 / 设置弹窗 ==========
-var _settingsData = { theme: 'dark' };
+var _settingsData = {
+    theme: 'dark',
+    table_page_size: 50,
+    query_page_size: 200
+};
 var _pendingTheme = 'dark';
+var _settingsLoaded = false;
+
+// 数据展示默认行数：设置页只提供经过验证的选项，避免一次加载过大的结果集。
+var _DATA_PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 2000, 5000];
+function _normalizeDataPageSize(value, fallback) {
+    var n = parseInt(value, 10);
+    return _DATA_PAGE_SIZE_OPTIONS.indexOf(n) >= 0 ? n : fallback;
+}
+function getDefaultTablePageSize() {
+    return _normalizeDataPageSize(_settingsData && _settingsData.table_page_size, 50);
+}
+function getDefaultQueryPageSize() {
+    return _normalizeDataPageSize(_settingsData && _settingsData.query_page_size, 200);
+}
+function getDataPageSizeOptions() {
+    return _DATA_PAGE_SIZE_OPTIONS.slice();
+}
 
 // ★ 启动时同步 localStorage 主题到 mqdb_settings.json（确保下次启动背景色正确）
 (function() {
@@ -2998,7 +3024,7 @@ var _pendingTheme = 'dark';
     if (lsTheme) {
         _settingsData.theme = lsTheme;
         setTimeout(function() {
-            if (typeof eel !== 'undefined' && eel.settings_save) {
+            if (_settingsLoaded && typeof eel !== 'undefined' && eel.settings_save) {
                 eel.settings_save(_settingsData)(function(){});
             }
         }, 1000);
@@ -3010,7 +3036,8 @@ function openSettings() {
     // 先从后端获取当前设置
     if (typeof eel !== 'undefined' && eel.settings_get) {
         eel.settings_get()(function(data) {
-            if (data) _settingsData = data;
+            if (data && typeof data === 'object') _settingsData = Object.assign({}, _settingsData, data);
+            _settingsLoaded = true;
             _pendingTheme = _settingsData.theme || 'dark';
             _renderSettings();
             $('settings_overlay').classList.add('show');
@@ -3084,6 +3111,26 @@ function _renderGeneralTab() {
     html += '</div>';
 
     // 底部按钮
+    // 数据展示默认值
+    html += '<div class="settings-section">';
+    html += '<h4>📊 数据展示</h4>';
+    html += '<div class="settings-form-row">';
+    html += '<label class="settings-label" for="settings_table_page_size">双击表默认加载</label>';
+    html += '<select id="settings_table_page_size" class="settings-select">';
+    getDataPageSizeOptions().forEach(function(size) {
+        html += '<option value="' + size + '"' + (size === getDefaultTablePageSize() ? ' selected' : '') + '>' + size + ' 行</option>';
+    });
+    html += '</select></div>';
+    html += '<div class="settings-form-row">';
+    html += '<label class="settings-label" for="settings_query_page_size">SQL 查询结果默认显示</label>';
+    html += '<select id="settings_query_page_size" class="settings-select">';
+    getDataPageSizeOptions().forEach(function(size) {
+        html += '<option value="' + size + '"' + (size === getDefaultQueryPageSize() ? ' selected' : '') + '>' + size + ' 行</option>';
+    });
+    html += '</select></div>';
+    html += '<div class="settings-hint">仅影响新打开的表和新执行的 SQL，不会改变当前已打开页面。</div>';
+    html += '</div>';
+
     html += '<div class="settings-btn-row">';
     html += '<button class="btn btn-gray btn-sm" onclick="closeSettings()">取消</button>';
     html += '<button class="btn btn-green btn-sm" onclick="_saveSettings()">确定</button>';
@@ -3190,7 +3237,13 @@ function _selectTheme(theme) {
 
 /** 保存设置 */
 function _saveSettings() {
-    var dataToSave = Object.assign({}, _settingsData, { theme: _pendingTheme });
+    var tablePageSize = (($('settings_table_page_size') || {}).value);
+    var queryPageSize = (($('settings_query_page_size') || {}).value);
+    var dataToSave = Object.assign({}, _settingsData, {
+        theme: _pendingTheme,
+        table_page_size: _normalizeDataPageSize(tablePageSize, getDefaultTablePageSize()),
+        query_page_size: _normalizeDataPageSize(queryPageSize, getDefaultQueryPageSize())
+    });
     if (typeof eel !== 'undefined' && eel.settings_save) {
         eel.settings_save(dataToSave)(function(result) {
             if (result && result.ok) {
